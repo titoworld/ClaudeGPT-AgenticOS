@@ -1,48 +1,53 @@
 # CLAUDE.md
 
-Instrucciones para las sesiones de Claude Code en este repositorio.
+Instruccions per a les sessions de Claude Code en aquest repositori.
 
 ## Idioma
 
-- Habla con el usuario en español.
-- Documentación (README, `docs/`) en español.
-- Código, identificadores y comentarios en inglés.
-- Mensajes de commit en inglés, con [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
+- Parla amb el propietari en l'idioma en què t'escrigui (normalment català, de vegades castellà).
+- Documentació (`README.md`, `docs/`) i textos de la interfície en català.
+- Codi, identificadors i comentaris en anglès.
+- Missatges de commit en anglès, amb [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
 
-## Estado del proyecto
+## Què és
 
-Fase 0/1: la arquitectura **todavía no está decidida**. Antes de trabajar, lee `docs/VISION.md`, `docs/ROADMAP.md` y `docs/adr/`.
+ClaudeGPT OS: un consell privat de Claude i ChatGPT per a un sol propietari, autoallotjat en un VPS. Llegeix [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md), [docs/PROTOCOL.md](docs/PROTOCOL.md) i [docs/adr/](docs/adr/) abans de fer canvis d'estructura. Les decisions noves d'arquitectura es proposen al propietari i es registren com a ADR.
 
-- No introduzcas decisiones de arquitectura por tu cuenta: propónlas, confírmalas con el usuario y regístralas como ADR en `docs/adr/`.
-- Al completar un hito, marca su casilla en `docs/ROADMAP.md`.
-
-## Comandos
+## Comandes
 
 ```bash
-uv sync                 # instalar dependencias (el hook de inicio de sesión ya lo hace en la web)
-uv run pytest           # tests
-uv run ruff check .     # lint
-uv run ruff format .    # formato
-uv run mypy             # tipos (modo estricto)
+uv sync                                   # dependències (el hook d'inici de sessió ja ho fa a la web)
+uv run pytest                             # tests del backend
+uv run ruff check . && uv run ruff format --check .
+uv run mypy                               # tipus, mode estricte
+cd web && npm run check && npm test && npm run build   # frontend
+uv run agentic-os serve --dev             # servidor local (vegeu el README per a les variables)
 ```
 
-Antes de cada commit deben pasar `ruff check`, `ruff format --check`, `mypy` y `pytest`: es lo mismo que ejecuta la CI.
+Abans de cada commit han de passar totes aquestes comprovacions: és el mateix que executa la CI.
 
-## Convenciones de código
+## Contractes
 
-- Python >= 3.12, layout `src/` (paquete `agentic_os`), tests en `tests/`.
-- Tipado completo: mypy en modo estricto sobre `src` y `tests`.
-- Dependencias siempre con `uv add` / `uv add --dev`; nunca edites `uv.lock` a mano. Justifica cada dependencia nueva.
-- Los tests no llaman a APIs reales de modelos (cuestan dinero y requieren red): usa dobles de prueba.
-- Todo cambio de comportamiento lleva su test.
+- El protocol client-servidor viu a `docs/PROTOCOL.md`, `web/src/lib/protocol.ts` i `src/agentic_os/server/`. Quan canviïs un missatge o una ruta, actualitza els tres alhora.
+- Els contractes interns són `domain.py`, `providers/base.py`, `orchestrator/store.py`, `orchestrator/events.py` i `orchestrator/types.py`. Un canvi aquí afecta proveïdors, motor, emmagatzematge i servidor.
+- La CSP del servidor (`server/middleware.py`) i la de `web/vite.config.ts` han de ser idèntiques (hi ha un test que ho comprova).
 
-## Secretos
+## Convencions
 
-- Nunca escribas claves ni tokens en el repositorio. Se leen de variables de entorno (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
-- `.env` es solo para desarrollo local y está en `.gitignore`; `.env.example` documenta las variables.
+- Python >= 3.12, layout `src/`, tipat complet (mypy estricte), asyncio. `CancelledError` sempre es propaga i allibera recursos.
+- Dependències només amb `uv add` / `npm install --save-exact`; mai editis `uv.lock` a mà. Justifica cada dependència nova.
+- **Els tests no criden APIs reals ni fan login** (costen diners i requereixen xarxa). Fes servir `FakeProvider`, les CLI falses de `tests/providers/fixtures/` o transports simulats.
+- Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica; revisa visualment els canvis d'interfície.
+
+## Seguretat (no negociable)
+
+- Mai extreguis ni reutilitzis tokens OAuth de les CLI fora de les mateixes CLI (ho prohibeixen els termes). Les CLI s'executen amb una llista tancada de variables d'entorn: no hi afegeixis claus d'API ni variables `AOS_*`.
+- La CLI de Claude sempre porta `--tools ""`, `--setting-sources=`, `--strict-mcp-config`, `--disable-slash-commands` i `client_composed: true`; Codex sempre en mode només lectura i sense aprovacions.
+- El Markdown dels models sempre passa per DOMPurify; res de `{@html}` amb contingut no sanejat. Res de scripts en línia (CSP).
+- Els secrets només en variables d'entorn o al `.env` del servidor (fora del repositori).
 
 ## Git
 
-- `main` es la rama por defecto y debe estar siempre en verde.
-- Trabaja en una rama y lleva los cambios a `main` mediante pull request; no hagas push directo a `main`.
-- Si cambias comandos, estructura o convenciones, actualiza este fichero y el README en el mismo cambio.
+- `main` és la branca per defecte i ha d'estar sempre en verd.
+- Treballa en una branca i porta els canvis a `main` amb un pull request.
+- Si canvies ordres, estructura o convencions, actualitza aquest fitxer i el README en el mateix canvi.

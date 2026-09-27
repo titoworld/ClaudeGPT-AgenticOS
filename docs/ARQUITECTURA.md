@@ -12,11 +12,12 @@ Caddy (TLS automàtic, capçaleres de seguretat, compressió)
    │  xarxa interna de Docker
    ▼
 Aplicació Python (FastAPI + uvicorn/uvloop)
-   ├── web/          API REST, WebSocket, sessió, fitxers estàtics del frontend
+   ├── server/       API REST, WebSocket, sessió, fitxers estàtics del frontend
    ├── security/     contrasenya argon2id, TOTP, sessions, límits d'intents, capçaleres
    ├── orchestrator/ motor de torns: solo · duel · debat, compactació, memòria cau, comptabilitat
    ├── providers/    Claude i ChatGPT, cadascun en mode cli · api · fake
-   └── storage/      SQLite (WAL): converses, missatges, ús, estalvis, memòria cau, sessions
+   ├── storage/      SQLite (WAL): converses, missatges, ús, estalvis, memòria cau, sessions
+   └── pricing · fx  preus per model (USD/MTok) i canvi USD→EUR del BCE
         │
         ├── CLI oficial de Claude Code  (subscripció Pro/Max, OAuth)   ─┐ mode "cli"
         ├── CLI oficial de Codex        (subscripció ChatGPT, OAuth)   ─┘
@@ -33,6 +34,8 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | `orchestrator/events.py` | esdeveniments | Missatges servidor → client d'un torn ([PROTOCOL.md](PROTOCOL.md)) |
 | `orchestrator/types.py` | `TurnRequest`, `EngineConfig` | Entrada del motor |
 | `config.py` | `Settings` | Configuració del procés (variables `AOS_*`) |
+| `pricing.py` | `ModelPrice`, `estimate_cost_usd` | Preus per defecte i propis; cost de cada crida |
+| `fx.py` | `FxRate` | Tipus de canvi diari del BCE amb valor manual de reserva |
 
 ## Modes de torn
 
@@ -64,6 +67,12 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 - **`cli`** (per defecte): executa la CLI oficial (`claude`, `codex`) sense eines, amb el prompt per l'entrada estàndard, en un directori buit i amb un entorn mínim. Autenticada amb la teva subscripció (OAuth) un sol cop al VPS.
 - **`api`**: SDK oficial amb clau d'API (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) i *prompt caching*.
 - **`fake`**: respostes deterministes per a proves i per provar la interfície sense gastar res.
+
+## Models, costos i límits
+
+- **Models:** cada agent té un model per defecte i un de ràpid (per als resums), configurables des de la interfície. La llista es demana en directe al proveïdor (API de models d'Anthropic i d'OpenAI, `model/list` de Codex; a la CLI de Claude, els àlies `opus`, `sonnet`, `haiku` i `fable`, que sempre apunten a l'última versió). També s'accepta qualsevol identificador, per fer servir un model nou el mateix dia que surt.
+- **Cost:** el motor calcula el cost de cada crida amb la taula de preus (USD per milió de tokens, editable). En mode API és el cost real; en mode subscripció és el *valor equivalent* a preus d'API. La interfície ho mostra en euros amb el tipus del BCE.
+- **Percentatge usat:** en mode subscripció, les finestres de 5 hores i setmanal que informen Anthropic i OpenAI; en mode API, el pressupost mensual en euros; i, si indiques el preu del pla, quant valor n'has tret aquest mes.
 
 ## Seguretat (un sol usuari)
 

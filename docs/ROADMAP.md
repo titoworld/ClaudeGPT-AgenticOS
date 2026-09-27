@@ -1,40 +1,32 @@
-# Roadmap
+# Full de ruta
 
-Las fases 2 en adelante son un borrador y se concretarán al cerrar la fase 1.
+## Fase 0 · Inicialització ✅
 
-## Fase 0 · Inicialización ✅
+- [x] Repositori a GitHub amb `main` com a branca per defecte
+- [x] Base de Python (uv, pytest, ruff, mypy estricte), CI i hook d'inici de sessió per a Claude Code a la web
 
-- [x] Repositorio en GitHub con `main` como rama por defecto
-- [x] Base de Python: uv, pytest, ruff, mypy estricto y CLI mínimo (`agentic-os`)
-- [x] CI en GitHub Actions
-- [x] Hook de inicio de sesión para Claude Code en la web
-- [x] `CLAUDE.md`, visión inicial y registro de decisiones (ADR)
+## Fase 1 · Visió i arquitectura ✅
 
-## Fase 1 · Visión y arquitectura
+- [x] Recerca: CLI oficials amb subscripció, SDK, stack web i desplegament ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md))
+- [x] Arquitectura, contractes interns i protocol client-servidor ([ARQUITECTURA.md](ARQUITECTURA.md), [PROTOCOL.md](PROTOCOL.md))
 
-- [ ] Responder las preguntas de [VISION.md](VISION.md)
-- [ ] ADR: enfoque (runtime propio, OS sobre Claude Code o híbrido)
-- [ ] ADR: papel de cada modelo y cómo se abstraen los proveedores
-- [ ] ADR: memoria, autonomía y seguridad
-- [ ] Diagrama de arquitectura y concreción de las fases siguientes
+## Fase 2 · Consell de Claude i ChatGPT (MVP) ✅
 
-## Fase 2 · Núcleo mínimo (borrador)
+- [x] Proveïdors: Claude Code (subscripció) i API d'Anthropic; Codex app-server (subscripció) i API d'OpenAI; mode de demostració
+- [x] Motor de torns: solo, duel i consell, amb parada per consens, compactació i memòria cau ([ADR 0003](adr/0003-consell-i-estalvi-de-tokens.md))
+- [x] Inici de sessió amb contrasenya i TOTP, sessions, límits d'intents
+- [x] Servidor amb WebSocket resistent a talls
+- [x] Interfície amb escena 3D, vista del consell, paleta d'ordres i tauler ([ADR 0004](adr/0004-web-i-desplegament.md))
+- [x] Desplegament amb Docker Compose + Caddy i guia pas a pas
+- [x] Selecció de model per agent (llista en directe + identificador lliure)
+- [x] Tokens i cost en euros, pressupost mensual i percentatge d'ús de les subscripcions
 
-- [ ] Un agente que resuelve una tarea usando una herramienta y un proveedor
-- [ ] Trazas de cada paso
-- [ ] Tests con dobles de prueba (sin llamadas reales a las APIs)
+## Fase 3 · Idees per a més endavant
 
-## Fase 3 · Multi-proveedor y memoria (borrador)
+Per decidir amb el propietari segons l'ús real:
 
-- [ ] Claude y GPT detrás de una interfaz común
-- [ ] Memoria persistente
-
-## Fase 4 · Multi-agente y planificación (borrador)
-
-- [ ] Delegación entre agentes
-- [ ] Cola de tareas, prioridades y presupuestos
-
-## Fase 5 · Interfaz y despliegue (borrador)
-
-- [ ] Interfaz de usuario
-- [ ] Despliegue
+- [ ] Adjunts (fitxers i imatges) a les preguntes
+- [ ] Exportar converses (Markdown/PDF)
+- [ ] Avisos quan una finestra de subscripció o el pressupost s'acosta al límit (correu o Telegram)
+- [ ] Plantilles de consell per a tasques habituals (revisar codi, redactar, investigar)
+- [ ] Còpies de seguretat automàtiques programades
