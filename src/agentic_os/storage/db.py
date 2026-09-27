@@ -1,0 +1,283 @@
+"""SQLite access layer: one aiosqlite connection plus forward-only schema migrations.
+
+Every operation runs inside :meth:`Database.transaction`, which holds an
+``asyncio.Lock`` for its whole duration. aiosqlite executes statements in FIFO
+order on its worker thread, so when a task is cancelled mid-transaction the
+``ROLLBACK`` queued by the cancellation handler always runs before any statement
+of the next transaction: the shared connection is never left half-committed.
+
+The schema version lives in ``PRAGMA user_version``; migration ``n`` (1-based) of
+:data:`MIGRATIONS` upgrades the database from version ``n - 1`` to ``n``. Never edit
+a released migration: append a new one.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import os
+import sqlite3
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Final
+
+import aiosqlite
+
+logger = logging.getLogger(__name__)
+
+BUSY_TIMEOUT_MS: Final = 5000
+
+SqlParams = Sequence[object]
+
+_V1: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE owner (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        password_hash TEXT NOT NULL,
+        totp_secret TEXT NOT NULL,
+        totp_last_step INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE sessions (
+        token_hash TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        ip TEXT,
+        user_agent TEXT
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX sessions_expires_at ON sessions (expires_at)",
+    """
+    CREATE TABLE login_throttle (
+        key TEXT PRIMARY KEY,
+        failures INTEGER NOT NULL,
+        locked_until TEXT,
+        last_failure_at TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
+    """
+    CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        summary TEXT,
+        summary_upto_id INTEGER NOT NULL DEFAULT 0,
+        last_mode TEXT CHECK (last_mode IN ('solo', 'duel', 'debate')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX conversations_updated ON conversations (updated_at, id)",
+    """
+    CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+        turn_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('question', 'answer', 'revision', 'synthesis')),
+        agent TEXT CHECK (agent IN ('claude', 'chatgpt')),
+        round INTEGER NOT NULL DEFAULT 0 CHECK (round >= 0),
+        final INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0, 1)),
+        content TEXT NOT NULL,
+        meta TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX messages_conversation ON messages (conversation_id, final, id)",
+    "CREATE INDEX messages_turn ON messages (turn_id, kind)",
+    "CREATE INDEX messages_kind_created ON messages (kind, created_at)",
+    # usage and savings keep their rows when a conversation is deleted (no FK):
+    # they are the cost history.
+    """
+    CREATE TABLE usage (
+        id INTEGER PRIMARY KEY,
+        ts TEXT NOT NULL,
+        conversation_id INTEGER,
+        turn_id INTEGER,
+        agent TEXT NOT NULL,
+        provider_mode TEXT NOT NULL,
+        model TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL,
+        latency_ms INTEGER NOT NULL,
+        ttft_ms INTEGER,
+        ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+        error TEXT
+    )
+    """,
+    "CREATE INDEX usage_ts ON usage (ts)",
+    """
+    CREATE TABLE savings (
+        id INTEGER PRIMARY KEY,
+        ts TEXT NOT NULL,
+        conversation_id INTEGER,
+        turn_id INTEGER,
+        kind TEXT NOT NULL CHECK (kind IN ('cache', 'compaction', 'early_stop', 'unchanged')),
+        tokens INTEGER NOT NULL,
+        detail TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX savings_ts ON savings (ts)",
+    # conversation_id: origin of the cached answer, so deleting the conversation
+    # also forgets its cached content.
+    """
+    CREATE TABLE turn_cache (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        conversation_id INTEGER,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX turn_cache_expires_at ON turn_cache (expires_at)",
+    "CREATE INDEX turn_cache_conversation ON turn_cache (conversation_id)",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1,)
+"""Statements of each schema version, oldest first. Append only."""
+
+SCHEMA_VERSION: Final = len(MIGRATIONS)
+
+
+class SchemaVersionError(RuntimeError):
+    """The database was created by a newer version of the application."""
+
+
+class Tx:
+    """Statement helpers bound to the connection of an open transaction."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def execute(self, sql: str, params: SqlParams = ()) -> int:
+        """Run a statement and return the number of rows it changed."""
+        async with self._conn.execute(sql, params) as cursor:
+            return cursor.rowcount
+
+    async def insert(self, sql: str, params: SqlParams = ()) -> int:
+        """Run an INSERT and return the new rowid."""
+        row = await self._conn.execute_insert(sql, params)
+        if row is None:  # pragma: no cover - last_insert_rowid() always returns a row
+            raise RuntimeError("INSERT did not report a rowid")
+        return int(row[0])
+
+    async def fetchall(self, sql: str, params: SqlParams = ()) -> list[sqlite3.Row]:
+        return list(await self._conn.execute_fetchall(sql, params))
+
+    async def fetchone(self, sql: str, params: SqlParams = ()) -> sqlite3.Row | None:
+        rows = await self.fetchall(sql, params)
+        return rows[0] if rows else None
+
+    async def user_version(self) -> int:
+        row = await self.fetchone("PRAGMA user_version")
+        return int(row[0]) if row else 0
+
+
+def _prepare_path(path: Path) -> None:
+    """Create the data directory (0700) and the database file (0600) before SQLite
+    does, so the file never exists with looser permissions."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.close(fd)
+    for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        try:
+            if candidate.stat().st_mode & 0o077:
+                candidate.chmod(0o600)
+        except FileNotFoundError:
+            continue
+
+
+class Database:
+    """A single SQLite connection (WAL, foreign keys on) shared by the whole process."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn: aiosqlite.Connection | None = conn
+        self._lock = asyncio.Lock()
+
+    @classmethod
+    async def open(cls, path: Path) -> Database:
+        """Open (creating if needed) the database at ``path`` and migrate it to
+        :data:`SCHEMA_VERSION`. Raises :class:`SchemaVersionError` if it is newer."""
+        await asyncio.to_thread(_prepare_path, path)
+        conn = await aiosqlite.connect(
+            path, isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000, cached_statements=256
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = list(await conn.execute_fetchall("PRAGMA journal_mode = WAL"))
+            if not rows or str(rows[0][0]).lower() != "wal":
+                logger.warning("SQLite could not enable WAL mode for %s", path)
+            await conn.execute_fetchall(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+            await conn.execute_fetchall("PRAGMA foreign_keys = ON")
+            await conn.execute_fetchall("PRAGMA synchronous = NORMAL")
+            db = cls(conn)
+            await db._migrate()
+        except BaseException:
+            await conn.close()
+            raise
+        return db
+
+    async def close(self) -> None:
+        """Wait for the running transaction, optimize and close. Idempotent."""
+        async with self._lock:
+            conn, self._conn = self._conn, None
+            if conn is None:
+                return
+            try:
+                with contextlib.suppress(sqlite3.Error):
+                    await conn.execute_fetchall("PRAGMA optimize")
+            finally:
+                await conn.close()
+
+    @asynccontextmanager
+    async def transaction(self, *, write: bool = True) -> AsyncIterator[Tx]:
+        """Run the block in one transaction (``BEGIN IMMEDIATE`` for writes, a
+        deferred read snapshot otherwise). Commits on success; rolls back on any
+        exception, including cancellation, and re-raises it."""
+        async with self._lock:
+            conn = self._conn
+            if conn is None:
+                raise RuntimeError("database is closed")
+            try:
+                await conn.execute_fetchall("BEGIN IMMEDIATE" if write else "BEGIN")
+                yield Tx(conn)
+                await conn.execute_fetchall("COMMIT")
+            except BaseException:
+                # Queued after every statement of this transaction; "no transaction
+                # is active" (BEGIN failed or COMMIT already ran) is harmless.
+                with contextlib.suppress(sqlite3.Error):
+                    await conn.execute_fetchall("ROLLBACK")
+                raise
+
+    async def schema_version(self) -> int:
+        async with self.transaction(write=False) as tx:
+            return await tx.user_version()
+
+    async def _migrate(self) -> None:
+        current = await self.schema_version()
+        if current > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"La base de dades té la versió d'esquema {current}, més nova que la "
+                f"{SCHEMA_VERSION} que coneix aquesta versió de l'aplicació. Actualitza-la."
+            )
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            async with self.transaction() as tx:
+                # Re-check under the write lock: another process may have migrated.
+                if await tx.user_version() >= version:
+                    continue
+                for statement in MIGRATIONS[version - 1]:
+                    await tx.execute(statement)
+                await tx.execute(f"PRAGMA user_version = {version}")
+            logger.info("Database schema migrated to version %d", version)
