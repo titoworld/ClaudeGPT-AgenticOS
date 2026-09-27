@@ -149,6 +149,7 @@ export interface MessageMeta {
   cached?: boolean;
   cost_basis?: 'api' | 'equivalent';
   compaction_usage?: Usage; // question only: the turn's compaction summary call
+  unstored_usage?: Usage; // last final message: billed calls stored on no message (failed/empty)
   savings?: Savings;
   consensus?: Consensus;
   degraded?: boolean;

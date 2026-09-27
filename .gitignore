@@ -32,3 +32,9 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Estat local de proves (Codex, SQLite)
+strict-state/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
