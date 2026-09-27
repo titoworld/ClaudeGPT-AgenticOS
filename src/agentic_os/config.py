@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     chatgpt_fast_model: str | None = None
     claude_cli_path: str = "claude"
     codex_cli_path: str = "codex"
+    codex_state_dir: Path | None = None
+    """Where Codex keeps its SQLite state and logs (they contain full prompts). None:
+    ``<data_dir>/sandbox/codex-state``. The Docker image points it to a tmpfs."""
     provider_timeout_seconds: float = 600.0
     anthropic_api_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("AOS_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
