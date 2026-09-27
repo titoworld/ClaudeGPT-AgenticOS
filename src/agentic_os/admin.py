@@ -1,7 +1,8 @@
 """Administration commands run from the terminal on the VPS (``agentic-os init``,
-``agentic-os reset-sessions``). All output is in Catalan.
+``agentic-os reset-sessions``, ``agentic-os reset-throttle``). All output is in
+Catalan.
 
-Both are coroutines taking an open :class:`~agentic_os.storage.SqliteStore`. The
+All are coroutines taking an open :class:`~agentic_os.storage.SqliteStore`. The
 input callables are called directly (blocking) because these commands run alone
 in their own event loop.
 """
@@ -47,6 +48,21 @@ def _closed_sessions(count: int) -> str:
     return f"S'han tancat {count} sessions."
 
 
+def _forgotten_devices(count: int) -> str:
+    if count == 1:
+        return "S'ha oblidat 1 dispositiu conegut."
+    return f"S'han oblidat {count} dispositius coneguts."
+
+
+def _cleared_throttle(count: int) -> str:
+    if count == 0:
+        return "No hi havia cap bloqueig ni cap intent fallit registrat."
+    counters = (
+        "1 comptador d'intents fallits" if count == 1 else f"{count} comptadors d'intents fallits"
+    )
+    return f"S'han esborrat els bloquejos d'inici de sessió ({counters})."
+
+
 def _account_label(settings: Settings) -> str:
     host = urlsplit(settings.public_origin).hostname
     return f"propietari@{host}" if host else "propietari"
@@ -89,9 +105,10 @@ async def run_init(
 ) -> int:
     """Interactive owner setup: password (asked twice, policy checked), a new TOTP
     secret shown as a QR code and ``otpauth://`` URI, and a current code to confirm
-    it. Replacing an existing owner asks for confirmation and revokes every
-    session. Nothing is saved unless every step succeeds. Returns the exit code
-    (0 saved, 1 cancelled or failed)."""
+    it. Replacing an existing owner asks for confirmation. Saving revokes every
+    session, forgets every known device and clears the login throttling. Nothing
+    is saved unless every step succeeds. Returns the exit code (0 saved, 1
+    cancelled or failed)."""
     try:
         replacing = await store.get_owner() is not None
         if replacing:
@@ -132,7 +149,10 @@ async def run_init(
         password_hash=await hash_password_async(password), totp_secret=secret, totp_last_step=step
     )
     if replacing:
-        out(f"Propietari substituït. {_closed_sessions(revoked)}")
+        out(
+            f"Propietari substituït. {_closed_sessions(revoked)} S'han oblidat els "
+            "dispositius coneguts i s'han esborrat els bloquejos d'inici de sessió."
+        )
     else:
         out("Propietari configurat.")
     out("Ja pots iniciar sessió al navegador amb la contrasenya i el codi TOTP.")
@@ -140,8 +160,28 @@ async def run_init(
 
 
 async def run_reset_sessions(store: SqliteStore, *, out: Output = print) -> int:
-    """Revoke every session (every browser must log in again). Returns 0."""
+    """Revoke every session and forget every known device (every browser must log
+    in again, as a new device), and clear the login throttling. Returns 0.
+
+    The server runs in another process: its open WebSockets notice the revocation
+    at their next periodic session check (``server.ws.SESSION_CHECK_SECONDS``)."""
     revoked = await store.delete_all_sessions()
+    devices = await store.delete_all_devices()
+    counters = await store.clear_throttle()
     message = _closed_sessions(revoked)
     out(f"{message} Caldrà tornar a iniciar sessió." if revoked else message)
+    if devices:
+        out(_forgotten_devices(devices))
+    if counters:
+        out(_cleared_throttle(counters))
+    return 0
+
+
+async def run_reset_throttle(store: SqliteStore, *, out: Output = print) -> int:
+    """Clear every login throttling counter and lock (the owner can log in again
+    from any address right away). Sessions and devices are kept. Returns 0."""
+    counters = await store.clear_throttle()
+    out(_cleared_throttle(counters))
+    if counters:
+        out("Ja es pot tornar a iniciar sessió des de qualsevol adreça.")
     return 0

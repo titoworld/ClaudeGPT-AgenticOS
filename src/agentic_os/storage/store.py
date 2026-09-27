@@ -28,6 +28,7 @@ from agentic_os.storage.models import (
     TURN_MODES,
     ConversationDetail,
     ConversationSummary,
+    DeviceRecord,
     OwnerRecord,
     RuntimeSettings,
     SessionRecord,
@@ -566,8 +567,9 @@ class SqliteStore:
         )
 
     async def set_owner(self, *, password_hash: str, totp_secret: str, totp_last_step: int) -> int:
-        """Create or replace the owner and, atomically, revoke every session.
-        Returns the number of sessions revoked."""
+        """Create or replace the owner and, atomically, revoke every session, forget
+        every known device and clear the login throttling. Returns the number of
+        sessions revoked."""
         now = self._now()
         async with self._db.transaction() as tx:
             await tx.execute(
@@ -577,6 +579,8 @@ class SqliteStore:
                 "totp_last_step = excluded.totp_last_step, updated_at = excluded.updated_at",
                 (password_hash, totp_secret, totp_last_step, now, now),
             )
+            await tx.execute("DELETE FROM devices")
+            await tx.execute("DELETE FROM login_throttle")
             return await tx.execute("DELETE FROM sessions")
 
     async def update_password_hash(self, password_hash: str) -> None:
@@ -660,6 +664,46 @@ class SqliteStore:
             )
 
     # ------------------------------------------------------------------
+    # Known devices (only SHA-256 hashes of the device tokens are stored)
+    # ------------------------------------------------------------------
+
+    async def create_device(
+        self, token_hash: str, *, created_at: datetime, expires_at: datetime
+    ) -> None:
+        async with self._db.transaction() as tx:
+            await tx.execute(
+                "INSERT INTO devices (token_hash, created_at, expires_at) VALUES (?, ?, ?)",
+                (token_hash, format_ts(created_at), format_ts(expires_at)),
+            )
+
+    async def get_device(self, token_hash: str) -> DeviceRecord | None:
+        async with self._db.transaction(write=False) as tx:
+            row = await tx.fetchone(
+                "SELECT token_hash, created_at, expires_at FROM devices WHERE token_hash = ?",
+                (token_hash,),
+            )
+        if row is None:
+            return None
+        return DeviceRecord(
+            token_hash=str(row["token_hash"]),
+            created_at=parse_ts(str(row["created_at"])),
+            expires_at=parse_ts(str(row["expires_at"])),
+        )
+
+    async def delete_device(self, token_hash: str) -> bool:
+        async with self._db.transaction() as tx:
+            deleted = await tx.execute("DELETE FROM devices WHERE token_hash = ?", (token_hash,))
+        return deleted > 0
+
+    async def delete_all_devices(self) -> int:
+        async with self._db.transaction() as tx:
+            return await tx.execute("DELETE FROM devices")
+
+    async def purge_expired_devices(self, now: datetime) -> int:
+        async with self._db.transaction() as tx:
+            return await tx.execute("DELETE FROM devices WHERE expires_at <= ?", (format_ts(now),))
+
+    # ------------------------------------------------------------------
     # Login throttling
     # ------------------------------------------------------------------
 
@@ -716,6 +760,12 @@ class SqliteStore:
         async with self._db.transaction() as tx:
             for key in keys:
                 await tx.execute("DELETE FROM login_throttle WHERE key = ?", (key,))
+
+    async def clear_throttle(self) -> int:
+        """Delete every throttle counter and lock (``agentic-os reset-throttle``);
+        returns how many there were."""
+        async with self._db.transaction() as tx:
+            return await tx.execute("DELETE FROM login_throttle")
 
     async def purge_throttle(self, now: datetime, *, idle: timedelta) -> int:
         """Delete throttle rows whose last failure is older than ``idle`` and that

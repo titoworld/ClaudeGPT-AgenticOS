@@ -11,13 +11,14 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Final
+from typing import Annotated, Final, Protocol
 
 from fastapi import Depends, HTTPException, Request
-from starlette.requests import HTTPConnection
+from starlette.requests import ClientDisconnect, HTTPConnection
 
 from agentic_os.config import Settings
-from agentic_os.security.sessions import SessionManager
+from agentic_os.security.devices import DeviceManager
+from agentic_os.security.sessions import SessionManager, hash_token, is_well_formed
 from agentic_os.security.throttle import LoginThrottle
 from agentic_os.server.catalog import ModelCatalog
 from agentic_os.server.fx_rates import FxRefresher
@@ -28,12 +29,52 @@ from agentic_os.storage import SessionRecord, SqliteStore
 
 SECURE_COOKIE_NAME: Final = "__Host-aos_session"
 DEV_COOKIE_NAME: Final = "aos_session"
+SECURE_DEVICE_COOKIE_NAME: Final = "__Host-aos_device"
+DEV_DEVICE_COOKIE_NAME: Final = "aos_device"
 UNAUTHORIZED_DETAIL: Final = "Cal iniciar sessió."
+CLIENT_DISCONNECT_DETAIL: Final = "La connexió s'ha tancat abans de rebre la petició sencera."
 
 
 def cookie_name(settings: Settings) -> str:
     """``__Host-aos_session`` with secure cookies, ``aos_session`` for local http."""
     return SECURE_COOKIE_NAME if settings.secure_cookies else DEV_COOKIE_NAME
+
+
+def device_cookie_name(settings: Settings) -> str:
+    """``__Host-aos_device`` with secure cookies, ``aos_device`` for local http."""
+    return SECURE_DEVICE_COOKIE_NAME if settings.secure_cookies else DEV_DEVICE_COOKIE_NAME
+
+
+class Revocable(Protocol):
+    """A long-lived connection that must stop when its session ends."""
+
+    def revoke(self) -> None: ...
+
+
+class SessionConnections:
+    """Open WebSockets by session (token hash), so that ending a session in this
+    process (logout) closes its sockets at once. Revocations by the CLI, which runs
+    in another process, are noticed by each socket's periodic check instead."""
+
+    def __init__(self) -> None:
+        self._by_session: dict[str, set[Revocable]] = {}
+
+    def add(self, token_hash: str, connection: Revocable) -> None:
+        self._by_session.setdefault(token_hash, set()).add(connection)
+
+    def discard(self, token_hash: str, connection: Revocable) -> None:
+        connections = self._by_session.get(token_hash)
+        if connections is not None:
+            connections.discard(connection)
+            if not connections:
+                del self._by_session[token_hash]
+
+    def revoke(self, token_hash: str) -> int:
+        """Close every connection of the session; returns how many there were."""
+        connections = self._by_session.pop(token_hash, set())
+        for connection in connections:
+            connection.revoke()
+        return len(connections)
 
 
 @dataclass(slots=True)
@@ -43,6 +84,7 @@ class AppState:
     settings: Settings
     store: SqliteStore
     sessions: SessionManager
+    devices: DeviceManager
     throttle: LoginThrottle
     turns: TurnManager
     monitor: ProviderMonitor
@@ -52,10 +94,15 @@ class AppState:
     login_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serializes login attempts so the throttle check and the failure count are
     atomic: parallel requests cannot test more passwords than the lockout allows."""
+    connections: SessionConnections = field(default_factory=SessionConnections)
 
     @property
     def cookie_name(self) -> str:
         return cookie_name(self.settings)
+
+    @property
+    def device_cookie_name(self) -> str:
+        return device_cookie_name(self.settings)
 
     @property
     def allowed_origins(self) -> frozenset[str]:
@@ -65,6 +112,12 @@ class AppState:
         """The live session of the request's cookie, or ``None``."""
         token = connection.cookies.get(self.cookie_name)
         return await self.sessions.validate(token, self.clock())
+
+    async def end_session(self, token: str | None) -> None:
+        """Revoke the session of ``token`` and close its open WebSockets."""
+        await self.sessions.revoke(token)
+        if is_well_formed(token):
+            self.connections.revoke(hash_token(token))
 
 
 def app_state(connection: HTTPConnection) -> AppState:
@@ -99,8 +152,12 @@ def client_ip(connection: HTTPConnection) -> str | None:
 
 
 async def read_json(request: Request) -> object:
-    """The decoded JSON body; 422 if it is not valid JSON."""
-    body = await request.body()
+    """The decoded JSON body; 422 if it is not valid JSON, 400 (without a traceback
+    in the logs) if the client disconnects before sending all of it."""
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        raise HTTPException(status_code=400, detail=CLIENT_DISCONNECT_DETAIL) from None
     try:
         return json.loads(body)
     except (ValueError, RecursionError):

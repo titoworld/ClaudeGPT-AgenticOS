@@ -1,7 +1,7 @@
 import asyncio
 import stat
 from collections.abc import Iterator, Sequence
-from datetime import date
+from datetime import date, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -51,7 +51,7 @@ def test_bare_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     out = capsys.readouterr().out
     assert out.startswith("ús: agentic-os")
-    for command in ("serve", "init", "reset-sessions", "doctor"):
+    for command in ("serve", "init", "reset-sessions", "reset-throttle", "doctor"):
         assert command in out
 
 
@@ -106,6 +106,26 @@ def test_log_config_adds_the_application_logger() -> None:
 def test_reset_sessions(env: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["reset-sessions"]) == 0
     assert capsys.readouterr().out.strip() == "No hi havia cap sessió oberta."
+
+
+def test_reset_throttle(env: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    async def lock() -> None:
+        async with await SqliteStore.open(env / "data" / "agentic_os.sqlite3") as store:
+            await store.record_throttle_failure(
+                "global",
+                utc_now(),
+                reset_after=timedelta(hours=24),
+                lock_for=lambda _: timedelta(minutes=15),
+            )
+
+    asyncio.run(lock())
+    assert main(["reset-throttle"]) == 0
+    out = capsys.readouterr().out
+    assert "S'han esborrat els bloquejos d'inici de sessió (1 comptador" in out
+    assert main(["reset-throttle"]) == 0
+    assert capsys.readouterr().out.strip() == (
+        "No hi havia cap bloqueig ni cap intent fallit registrat."
+    )
 
 
 def test_init_runs_the_admin_command(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:

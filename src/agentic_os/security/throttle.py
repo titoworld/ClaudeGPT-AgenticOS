@@ -10,7 +10,13 @@ up to 15 minutes. Two keys are counted on every failure:
   rotate addresses and there is only one account to guess.
 
 A success resets both. Counters restart after ``reset_after`` without failures.
-State lives in the database, so restarting the server does not lift a lockout.
+State lives in the database, so restarting the server does not lift a lockout
+(``agentic-os reset-throttle`` does).
+
+A login from a known device (:mod:`agentic_os.security.devices`) uses only
+``device:<token hash>``, with the per-client policy: anyone can keep the global
+key locked, but not a device they do not hold, so the owner is never locked out
+of a browser already used to log in. Its success resets only that key.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from agentic_os.storage.models import ThrottleState, as_utc
 
 GLOBAL_KEY: Final = "global"
 UNKNOWN_CLIENT_KEY: Final = "ip:unknown"
+DEVICE_KEY_PREFIX: Final = "device:"
 
 
 class ThrottleStore(Protocol):
@@ -63,12 +70,18 @@ def client_key(ip: str | None) -> str:
     return f"ip:{address}"
 
 
+def device_key(device: str) -> str:
+    """Throttle key of a known device (``device``: the hash of its token)."""
+    return f"{DEVICE_KEY_PREFIX}{device}"
+
+
 class LoginThrottle:
     """Pure lockout policy plus persistence through a :class:`ThrottleStore`.
 
     Server flow: ``retry_after`` before checking credentials (answer 429 with
     ``Retry-After`` if > 0), ``record_failure`` on a wrong password or code,
-    ``record_success`` after a successful login."""
+    ``record_success`` after a successful login. Every method takes ``device``, the
+    token hash of a known device presented by the client, or ``None``."""
 
     def __init__(
         self,
@@ -120,16 +133,25 @@ class LoginThrottle:
         )
         return math.ceil(remaining) if remaining > 0 else 0
 
-    async def retry_after(self, ip: str | None, now: datetime) -> int:
+    async def retry_after(self, ip: str | None, now: datetime, *, device: str | None = None) -> int:
         """Seconds the client must wait before trying again (0: allowed)."""
         now = as_utc(now)
+        if device is not None:
+            return self._wait(now, await self._store.get_throttle(device_key(device)))
         client = await self._store.get_throttle(client_key(ip))
         overall = await self._store.get_throttle(GLOBAL_KEY)
         return self._wait(now, client, overall)
 
-    async def record_failure(self, ip: str | None, now: datetime) -> int:
+    async def record_failure(
+        self, ip: str | None, now: datetime, *, device: str | None = None
+    ) -> int:
         """Count a failed login; returns the resulting wait in seconds (0: none)."""
         now = as_utc(now)
+        if device is not None:
+            own = await self._store.record_throttle_failure(
+                device_key(device), now, reset_after=self.reset_after, lock_for=self._client_lock
+            )
+            return self._wait(now, own)
         client = await self._store.record_throttle_failure(
             client_key(ip), now, reset_after=self.reset_after, lock_for=self._client_lock
         )
@@ -138,8 +160,11 @@ class LoginThrottle:
         )
         return self._wait(now, client, overall)
 
-    async def record_success(self, ip: str | None) -> None:
-        await self._store.reset_throttle(client_key(ip), GLOBAL_KEY)
+    async def record_success(self, ip: str | None, *, device: str | None = None) -> None:
+        if device is not None:
+            await self._store.reset_throttle(device_key(device))
+        else:
+            await self._store.reset_throttle(client_key(ip), GLOBAL_KEY)
 
     async def purge(self, now: datetime) -> int:
         """Delete stale, unlocked counters (call periodically)."""

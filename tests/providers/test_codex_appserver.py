@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import time
@@ -189,7 +190,8 @@ async def test_streams_a_recorded_turn_with_usage_and_limits(
     assert initialize["clientInfo"]["name"] == "agentic-os"
     assert fake.received("initialized")
     [start] = [entry for entry in fake.log() if "argv" in entry]
-    assert start["argv"] == ["app-server", *config_arguments(), "--listen", "stdio://"]
+    state = (fake.data_dir / "sandbox" / "codex-state").resolve()
+    assert start["argv"] == ["app-server", *config_arguments(state), "--listen", "stdio://"]
     assert start["cwd"] == str(sandbox)
     assert "features.shell_tool=false" in start["argv"]
     assert 'web_search="disabled"' in start["argv"]
@@ -348,6 +350,36 @@ async def test_wall_clock_timeout_interrupts_the_turn(fake: FakeCodex) -> None:
         await codex.aclose()
 
 
+async def test_sub_agents_are_interrupted_and_not_counted(
+    fake: FakeCodex, provider: CodexAppServerProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A prompt injection can make ChatGPT spawn a Codex sub-agent: a thread no call
+    listens to, which would keep spending the owner's plan after the call ends."""
+    caplog.set_level(logging.WARNING, logger="agentic_os.providers.codex_appserver")
+
+    _, result = await collect(provider, make_request("[spawn] fet"))
+
+    assert result.text.strip() == "fet"
+    # Only the call's own thread is counted, never the sub-agent's usage.
+    assert result.usage == Usage(
+        input_tokens=400, output_tokens=50, cache_read_tokens=600, reasoning_tokens=10
+    )
+    await wait_until(lambda: any("sub_agent" in entry for entry in fake.log()))
+    [stopped] = [entry for entry in fake.log() if "sub_agent" in entry]
+    assert stopped["interrupted_after"] is not None
+    assert stopped["interrupted_after"] < 20  # within a second, not after 20 s of work
+    [root] = fake.params("turn/start")
+    await wait_until(lambda: fake.received("thread/unsubscribe"))
+    # One interrupt for the sub-agent's turn despite its many notifications; none for
+    # the call's own turn, which had finished.
+    [interrupt] = fake.params("turn/interrupt")
+    assert interrupt["threadId"] == stopped["sub_agent"] != root["threadId"]
+    assert "outside any call" in caplog.text
+    await wait_until(lambda: not provider._background)
+    assert not provider._stray_turns
+    assert not provider._threads
+
+
 async def test_concurrent_calls_share_one_process(
     fake: FakeCodex, provider: CodexAppServerProvider
 ) -> None:
@@ -381,6 +413,36 @@ async def test_the_process_gets_only_the_allow_listed_environment(
     assert env["CODEX_HOME"] == str(fake.home)
     assert env["LANG"] == "ca_ES.UTF-8"
     assert "PATH" in env
+
+
+async def test_codex_state_and_logs_stay_out_of_codex_home(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    """Codex logs every prompt in logs_2.sqlite: it must not land in CODEX_HOME (the
+    volume with the CLI login, which is backed up) but in a private state directory."""
+    await collect(provider, make_request("[echo] SECRET-7731"))
+
+    state = (fake.data_dir / "sandbox" / "codex-state").resolve()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert "SECRET-7731" in (state / "logs_2.sqlite").read_text(encoding="utf-8")
+    assert not (fake.home / "logs_2.sqlite").exists()
+    [start] = [entry for entry in fake.log() if "argv" in entry]
+    assert f"sqlite_home={json.dumps(str(state))}" in start["argv"]
+    assert start["cwd"] != str(state)  # the working directory stays empty
+
+
+async def test_codex_state_dir_setting(fake: FakeCodex, tmp_path: Path) -> None:
+    state = tmp_path / "run" / "codex state"
+    state.mkdir(parents=True, mode=0o755)
+    codex = CodexAppServerProvider(fake.settings(codex_state_dir=state))
+    try:
+        await collect(codex, make_request("[echo] SECRET-7732"))
+    finally:
+        await codex.aclose()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert "SECRET-7732" in (state / "logs_2.sqlite").read_text(encoding="utf-8")
+    assert not (fake.home / "logs_2.sqlite").exists()
+    assert not (fake.data_dir / "sandbox" / "codex-state").exists()
 
 
 def test_codex_environment_filters_the_source() -> None:
@@ -610,8 +672,8 @@ def test_usage_from_breakdown_is_none_safe() -> None:
     )
 
 
-def test_config_arguments_disable_tools_and_retries() -> None:
-    arguments = config_arguments()
+def test_config_arguments_disable_tools_and_retries(tmp_path: Path) -> None:
+    arguments = config_arguments(tmp_path / 'dir "x"')
     pairs = [arguments[i + 1] for i in range(0, len(arguments), 2)]
     assert all(flag == "-c" for flag in arguments[::2])
     for expected in (
@@ -622,8 +684,11 @@ def test_config_arguments_disable_tools_and_retries() -> None:
         "skills.bundled.enabled=false",
         "analytics.enabled=false",
         "include_environment_context=false",
+        "agents.max_threads=1",
     ):
         assert expected in pairs
+    # A TOML string: codex parses the value after "=" as TOML.
+    assert f'sqlite_home="{tmp_path}/dir \\"x\\""' in pairs
     assert not any(pair.startswith("model_catalog_json") for pair in pairs)
 
 

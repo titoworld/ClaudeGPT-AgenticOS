@@ -143,7 +143,20 @@ _V1: Final[tuple[str, ...]] = (
     "CREATE INDEX turn_cache_conversation ON turn_cache (conversation_id)",
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1,)
+_V2: Final[tuple[str, ...]] = (
+    # Known owner devices (security/devices.py): SHA-256 of the long-lived device
+    # cookie. A login that presents one is throttled per device only.
+    """
+    CREATE TABLE devices (
+        token_hash TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX devices_expires_at ON devices (expires_at)",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2)
 """Statements of each schema version, oldest first. Append only."""
 
 SCHEMA_VERSION: Final = len(MIGRATIONS)

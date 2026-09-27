@@ -15,7 +15,7 @@ import re
 import secrets
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Final, Protocol
+from typing import Final, Protocol, TypeGuard
 
 from agentic_os.config import Settings
 from agentic_os.storage.models import SessionRecord, as_utc
@@ -60,6 +60,11 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
+def is_well_formed(token: str | None) -> TypeGuard[str]:
+    """Whether ``token`` looks like a token (URL-safe, 16-128 characters)."""
+    return token is not None and _TOKEN_RE.fullmatch(token) is not None
+
+
 class SessionManager:
     """Creates, validates and revokes sessions on top of a :class:`SessionStore`."""
 
@@ -100,28 +105,46 @@ class SessionManager:
         )
         return token
 
-    async def validate(self, token: str | None, now: datetime) -> SessionRecord | None:
-        """The live session for ``token``, or ``None`` (missing, malformed, idle or
-        expired; expired sessions are deleted). Refreshes ``last_seen_at`` at most
-        once per touch interval."""
-        if not token or not _TOKEN_RE.fullmatch(token):
+    def _ended(self, record: SessionRecord, now: datetime) -> bool:
+        return now >= record.expires_at or now >= record.last_seen_at + self.idle_timeout
+
+    async def _lookup(self, token: str | None) -> SessionRecord | None:
+        if not is_well_formed(token):
             return None
-        now = as_utc(now)
         token_hash = hash_token(token)
         record = await self._store.get_session(token_hash)
         if record is None or not hmac.compare_digest(record.token_hash, token_hash):
             return None
-        if now >= record.expires_at or now >= record.last_seen_at + self.idle_timeout:
-            await self._store.delete_session(token_hash)
+        return record
+
+    async def validate(self, token: str | None, now: datetime) -> SessionRecord | None:
+        """The live session for ``token``, or ``None`` (missing, malformed, idle or
+        expired; expired sessions are deleted). Refreshes ``last_seen_at`` at most
+        once per touch interval."""
+        now = as_utc(now)
+        record = await self._lookup(token)
+        if record is None:
+            return None
+        if self._ended(record, now):
+            await self._store.delete_session(record.token_hash)
             return None
         if now - record.last_seen_at >= self._touch_interval:
-            await self._store.touch_session(token_hash, now)
+            await self._store.touch_session(record.token_hash, now)
             record = replace(record, last_seen_at=now)
+        return record
+
+    async def peek(self, token: str | None, now: datetime) -> SessionRecord | None:
+        """Like :meth:`validate` but read-only: never refreshes ``last_seen_at`` nor
+        deletes anything. For the periodic checks of long-lived connections, whose
+        heartbeats must not keep an idle session alive."""
+        record = await self._lookup(token)
+        if record is None or self._ended(record, as_utc(now)):
+            return None
         return record
 
     async def revoke(self, token: str | None) -> None:
         """End the session of ``token`` (logout); unknown tokens are ignored."""
-        if token and _TOKEN_RE.fullmatch(token):
+        if is_well_formed(token):
             await self._store.delete_session(hash_token(token))
 
     async def revoke_all(self) -> int:

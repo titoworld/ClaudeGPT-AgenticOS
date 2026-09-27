@@ -6,7 +6,7 @@ from pathlib import Path
 import pyotp
 import pytest
 
-from agentic_os.admin import render_qr, run_init, run_reset_sessions
+from agentic_os.admin import render_qr, run_init, run_reset_sessions, run_reset_throttle
 from agentic_os.config import Settings
 from agentic_os.security.passwords import verify_password
 from agentic_os.storage import SqliteStore
@@ -126,6 +126,13 @@ async def test_existing_owner_is_kept_unless_confirmed(store: SqliteStore) -> No
     assert owner is not None and owner.password_hash == "old"
 
 
+async def lock(store: SqliteStore, *keys: str) -> None:
+    for key in keys:
+        await store.record_throttle_failure(
+            key, NOW, reset_after=timedelta(hours=24), lock_for=lambda _: timedelta(minutes=15)
+        )
+
+
 async def test_replacing_owner_revokes_sessions(store: SqliteStore) -> None:
     await store.set_owner(password_hash="old", totp_secret="OLD", totp_last_step=0)
     for index in range(2):
@@ -136,10 +143,17 @@ async def test_replacing_owner_revokes_sessions(store: SqliteStore) -> None:
             ip=None,
             user_agent=None,
         )
+    await store.create_device("device", created_at=NOW, expires_at=NOW + timedelta(days=365))
+    await lock(store, "global")
     console = Console(answers=["Sí", "<totp>"], passwords=[PASSWORD, PASSWORD])
     assert await init(store, console) == 0
-    assert "Propietari substituït. S'han tancat 2 sessions." in console.text
+    assert (
+        "Propietari substituït. S'han tancat 2 sessions. S'han oblidat els dispositius "
+        "coneguts i s'han esborrat els bloquejos d'inici de sessió."
+    ) in console.text
     assert await store.get_session("hash0") is None
+    assert await store.get_device("device") is None
+    assert await store.get_throttle("global") is None
     owner = await store.get_owner()
     assert owner is not None and owner.totp_secret != "OLD"
 
@@ -166,6 +180,43 @@ async def test_reset_sessions(store: SqliteStore) -> None:
     assert await store.get_session("hash") is None
     assert await run_reset_sessions(store, out=lines.append) == 0
     assert lines[-1] == "No hi havia cap sessió oberta."
+
+
+async def test_reset_sessions_forgets_devices_and_clears_the_throttle(
+    store: SqliteStore,
+) -> None:
+    for name in ("d1", "d2"):
+        await store.create_device(name, created_at=NOW, expires_at=NOW + timedelta(days=365))
+    await lock(store, "global", "ip:203.0.113.9")
+    lines: list[str] = []
+    assert await run_reset_sessions(store, out=lines.append) == 0
+    assert lines == [
+        "No hi havia cap sessió oberta.",
+        "S'han oblidat 2 dispositius coneguts.",
+        "S'han esborrat els bloquejos d'inici de sessió (2 comptadors d'intents fallits).",
+    ]
+    assert await store.get_device("d1") is None
+    assert await store.get_throttle("global") is None
+
+
+async def test_reset_throttle(store: SqliteStore) -> None:
+    await store.create_session(
+        "hash", created_at=NOW, expires_at=NOW + timedelta(days=1), ip=None, user_agent=None
+    )
+    await store.create_device("d1", created_at=NOW, expires_at=NOW + timedelta(days=365))
+    await lock(store, "global")
+    lines: list[str] = []
+    assert await run_reset_throttle(store, out=lines.append) == 0
+    assert lines == [
+        "S'han esborrat els bloquejos d'inici de sessió (1 comptador d'intents fallits).",
+        "Ja es pot tornar a iniciar sessió des de qualsevol adreça.",
+    ]
+    assert await store.get_throttle("global") is None
+    # Sessions and devices are kept.
+    assert await store.get_session("hash") is not None
+    assert await store.get_device("d1") is not None
+    assert await run_reset_throttle(store, out=lines.append) == 0
+    assert lines[-1] == "No hi havia cap bloqueig ni cap intent fallit registrat."
 
 
 def test_render_qr_draws_blocks() -> None:

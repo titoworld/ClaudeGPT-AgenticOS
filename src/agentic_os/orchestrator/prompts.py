@@ -4,6 +4,11 @@ Everything here is byte-for-byte stable across turns (no timestamps, ids or
 counters) so the vendors' prompt caches keep hitting: the system prompt is the
 same for every purpose of an agent, and the variable parts of a template always
 come last. Every prompt asks the model to answer in the language of the user.
+
+The embedded texts (the question, the answers, the critiques) go through
+``neutralize_tags``: another model's answer, or a page the owner pasted, cannot close
+a section and pass itself off as the owner's instructions. Every tag used here must be
+in ``RESERVED_TAGS`` (a test checks it).
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from agentic_os.domain import AGENTS, AgentName, other_agent
-from agentic_os.providers.prompt_format import AGENT_LABELS
+from agentic_os.providers.prompt_format import AGENT_LABELS, neutralize_tags
 
 _IDENTITIES: dict[AgentName, str] = {
     "claude": "You are Claude, an AI assistant made by Anthropic.",
@@ -109,7 +114,9 @@ def system_prompt(agent: AgentName) -> str:
 
 def debate_answer_prompt(agent: AgentName, question: str) -> str:
     """Round-0 prompt of a debate: the question, knowing the other agent will review it."""
-    return DEBATE_ANSWER_TEMPLATE.format(other=AGENT_LABELS[other_agent(agent)], question=question)
+    return DEBATE_ANSWER_TEMPLATE.format(
+        other=AGENT_LABELS[other_agent(agent)], question=neutralize_tags(question)
+    )
 
 
 def revision_prompt(agent: AgentName, question: str, own_answer: str, other_answer: str) -> str:
@@ -118,9 +125,9 @@ def revision_prompt(agent: AgentName, question: str, own_answer: str, other_answ
     return REVISION_TEMPLATE.format(
         other=AGENT_LABELS[other],
         other_tag=other,
-        question=question,
-        own_answer=own_answer,
-        other_answer=other_answer,
+        question=neutralize_tags(question),
+        own_answer=neutralize_tags(own_answer),
+        other_answer=neutralize_tags(other_answer),
     )
 
 
@@ -132,7 +139,7 @@ def synthesis_prompt(
     """Synthesis prompt: the question, both final answers and the last critiques
     (empty or "None" critiques are left out)."""
     parts = [
-        f'<answer from="{AGENT_LABELS[agent]}">\n{answers[agent]}\n</answer>'
+        f'<answer from="{AGENT_LABELS[agent]}">\n{neutralize_tags(answers[agent])}\n</answer>'
         for agent in AGENTS
         if agent in answers
     ]
@@ -141,6 +148,7 @@ def synthesis_prompt(
         if critique and critique.strip(" -*.").lower() != "none":
             target = AGENT_LABELS[other_agent(agent)]
             parts.append(
-                f'<critique from="{AGENT_LABELS[agent]}" about="{target}">\n{critique}\n</critique>'
+                f'<critique from="{AGENT_LABELS[agent]}" about="{target}">\n'
+                f"{neutralize_tags(critique)}\n</critique>"
             )
-    return SYNTHESIS_TEMPLATE.format(question=question, answers="\n\n".join(parts))
+    return SYNTHESIS_TEMPLATE.format(question=neutralize_tags(question), answers="\n\n".join(parts))

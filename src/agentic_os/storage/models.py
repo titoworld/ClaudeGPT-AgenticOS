@@ -507,6 +507,15 @@ class SessionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class DeviceRecord:
+    """A known owner device. Only the SHA-256 of the device cookie is stored."""
+
+    token_hash: str
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ThrottleState:
     """Failed login attempts for one throttle key ("global" or "ip:<addr>")."""
 

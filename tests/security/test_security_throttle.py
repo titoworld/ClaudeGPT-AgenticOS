@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agentic_os.config import Settings
-from agentic_os.security.throttle import GLOBAL_KEY, LoginThrottle, client_key
+from agentic_os.security.throttle import GLOBAL_KEY, LoginThrottle, client_key, device_key
 from agentic_os.storage import SqliteStore
 
 T0 = datetime(2026, 9, 27, 12, 0, 0, tzinfo=UTC)
@@ -88,6 +88,29 @@ async def test_global_lock_across_clients(throttle: LoginThrottle, store: Sqlite
     assert state is not None and state.failures == 10
     await throttle.record_success("192.0.2.1")
     assert await store.get_throttle(GLOBAL_KEY) is None
+
+
+async def test_a_known_device_has_only_its_own_counter(
+    throttle: LoginThrottle, store: SqliteStore
+) -> None:
+    device = "d" * 64
+    for index in range(30):  # the client and global keys are at their maximum lock
+        await throttle.record_failure(f"203.0.113.{index % 3}", T0)
+    assert await throttle.retry_after(IP, T0) > 0
+    assert await throttle.retry_after("203.0.113.1", T0, device=device) == 0
+
+    global_before = await store.get_throttle(GLOBAL_KEY)
+    assert await throttle.record_failure(IP, T0, device=device) == 0
+    assert await throttle.record_failure(IP, T0, device=device) == 0
+    assert await throttle.record_failure(IP, T0, device=device) == 5  # per-client policy
+    assert await throttle.retry_after(IP, T0, device=device) == 5
+    assert await throttle.retry_after(IP, T0, device="e" * 64) == 0  # another device
+    assert await store.get_throttle(GLOBAL_KEY) == global_before  # not counted globally
+    assert await store.get_throttle(client_key(IP)) is None
+
+    await throttle.record_success(IP, device=device)
+    assert await store.get_throttle(device_key(device)) is None
+    assert await store.get_throttle(GLOBAL_KEY) == global_before  # still locked for others
 
 
 async def test_counter_restarts_after_quiet_period(store: SqliteStore) -> None:

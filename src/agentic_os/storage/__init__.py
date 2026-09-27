@@ -1,6 +1,6 @@
 """SQLite persistence (WAL): conversations, messages, usage, savings, turn cache,
-runtime settings, the last ECB exchange rate, the owner account, sessions and login
-throttling.
+runtime settings, the last ECB exchange rate, the owner account, sessions, known
+devices and login throttling.
 
 Entry point: ``store = await SqliteStore.open(settings.db_path)``.
 """
@@ -9,6 +9,7 @@ from agentic_os.storage.db import SCHEMA_VERSION, SchemaVersionError
 from agentic_os.storage.models import (
     ConversationDetail,
     ConversationSummary,
+    DeviceRecord,
     FxSettings,
     OwnerRecord,
     RuntimeSettings,
@@ -36,6 +37,7 @@ __all__ = [
     "ConversationDetail",
     "ConversationNotFoundError",
     "ConversationSummary",
+    "DeviceRecord",
     "FxSettings",
     "MonthSpend",
     "OwnerRecord",

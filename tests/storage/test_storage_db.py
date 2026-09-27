@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agentic_os.storage import SqliteStore
-from agentic_os.storage.db import MIGRATIONS, SCHEMA_VERSION, Database, SchemaVersionError
+from agentic_os.storage.db import MIGRATIONS, SCHEMA_VERSION, Database, SchemaVersionError, Tx
 
 
 def _mode(path: Path) -> int:
@@ -69,7 +69,32 @@ async def test_migrations_are_idempotent_and_keep_data(tmp_path: Path) -> None:
             "usage",
             "savings",
             "turn_cache",
+            "devices",
         } <= tables
+    finally:
+        await db.close()
+
+
+async def test_version_1_databases_are_migrated(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    db = await Database.open(path)
+    async with db.transaction() as tx:  # back to a version 1 database with data
+        await tx.execute("DROP TABLE devices")
+        await tx.execute("PRAGMA user_version = 1")
+        await tx.execute("INSERT INTO settings (key, value) VALUES ('a', '1')")
+    await db.close()
+
+    async def tables(tx: Tx) -> set[str]:
+        rows = await tx.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
+        return {row[0] for row in rows}
+
+    db = await Database.open(path)
+    try:
+        assert await db.schema_version() == SCHEMA_VERSION == 2
+        async with db.transaction(write=False) as tx:
+            assert "devices" in await tables(tx)
+            row = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
+        assert row is not None and row[0] == "1"
     finally:
         await db.close()
 

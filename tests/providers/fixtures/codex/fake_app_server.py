@@ -15,13 +15,17 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
   [interrupted]   finish the turn with status "interrupted" on its own
   [retry-error]   a non-final error notification (willRetry: true) before the answer
   [commentary]    a commentary message before the final answer
+  [spawn]         like [echo], but the turn also starts a sub-agent thread (as Codex's
+                  collaboration.spawn_agent does) that works until turn/interrupt
 
 Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
 ``requiresOpenaiAuth``, ``config_model``, ``rate_limits_delay`` (seconds before answering
 account/rateLimits/read), ``init_error``, ``spawn_child`` (start a ``sleep`` child to
 check process-group kills), ``models`` / ``page_size`` / ``model_list_error`` (the
 model/list catalog, its page size and a forced error). Every message received is appended to
-``$CODEX_HOME/requests.jsonl`` with the pid; the environment goes to ``env.json``.
+``$CODEX_HOME/requests.jsonl`` with the pid; the environment goes to ``env.json``. Like
+the real server, every turn input is logged to ``logs_2.sqlite`` (a plain-text stand-in)
+in ``-c sqlite_home=...``, or in ``$CODEX_HOME`` without that override.
 Standard library only.
 """
 
@@ -34,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -45,6 +50,17 @@ OPTIONS: dict[str, Any] = (
 )
 PID = os.getpid()
 DEFAULT_ACCOUNT = {"type": "chatgpt", "email": "owner@example.com", "planType": "plus"}
+
+
+def sqlite_home() -> Path:
+    """Directory of Codex's SQLite state and logs: ``-c sqlite_home=...`` or CODEX_HOME."""
+    for flag, value in itertools.pairwise(sys.argv[1:]):
+        if flag == "-c" and value.startswith("sqlite_home="):
+            return Path(tomllib.loads(value)["sqlite_home"])
+    return HOME
+
+
+STATE = sqlite_home()
 
 
 def model_entry(
@@ -241,7 +257,23 @@ MARKERS = (
     "[interrupted]",
     "[retry-error]",
     "[commentary]",
+    "[spawn]",
 )
+
+
+def run_sub_agent(turn: Turn) -> None:
+    """A sub-agent nobody listens to: it works (and spends tokens) until interrupted."""
+    interrupted = _interrupts[turn.turn_id]
+    turn.begin()
+    for step in range(400):
+        if interrupted.wait(0.05):
+            log({"sub_agent": turn.thread_id, "interrupted_after": step})
+            turn.finish("interrupted")
+            return
+        turn.usage(breakdown(500, 0, 0, 50, 0), breakdown(500 * (step + 1), 0, 0, 50, 0))
+        notify("item/agentMessage/delta", {**turn.ids(), "itemId": "w1", "delta": "."})
+    log({"sub_agent": turn.thread_id, "interrupted_after": None})
+    turn.finish()
 
 
 def run_turn(thread_id: str, turn_id: str, text: str) -> None:
@@ -288,12 +320,25 @@ def run_turn(thread_id: str, turn_id: str, text: str) -> None:
             "misalignment": None,
         }
         notify("error", {"error": error, "willRetry": True, **turn.ids()})
+    if "[spawn]" in text:
+        child = Turn(str(uuid.uuid4()), str(uuid.uuid4()))
+        _interrupts[child.turn_id] = threading.Event()
+        activity = {
+            "type": "subAgentActivity",
+            "id": "call_1",
+            "kind": "started",
+            "agentThreadId": child.thread_id,
+            "agentPath": "/root/worker",
+        }
+        notify("item/started", {"item": activity, **turn.ids(), "startedAtMs": 0})
+        notify("item/completed", {"item": activity, **turn.ids(), "completedAtMs": 0})
+        threading.Thread(target=run_sub_agent, args=(child,), daemon=True).start()
     if "[commentary]" in text:
         turn.message("c1", ["Pensant", "..."], phase="commentary")
         turn.message("m1", ["Primer."], phase="final_answer")
         turn.message("m2", ["Segon."], phase="final_answer")
     else:
-        words = text.replace("[echo]", "").split()
+        words = text.replace("[echo]", "").replace("[spawn]", "").split()
         turn.message("m1", [f"{word} " for word in words], delay=0.01)
     turn.usage(breakdown(1000, 600, 0, 50, 10), breakdown(1000, 600, 0, 50, 10))
     notify("account/rateLimits/updated", {"rateLimits": rate_limits(42.5, 7)})
@@ -383,6 +428,8 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         _interrupts[turn_id] = threading.Event()
         respond(request_id, {"turn": Turn(params["threadId"], turn_id).turn("inProgress")})
         text = "".join(part.get("text", "") for part in params.get("input", []))
+        with _log_lock, open(STATE / "logs_2.sqlite", "a", encoding="utf-8") as handle:
+            handle.write(f"DEBUG Submission TurnInput {text!r}\n")
         threading.Thread(
             target=run_turn, args=(params["threadId"], turn_id, text), daemon=True
         ).start()

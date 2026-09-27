@@ -86,9 +86,27 @@ async def test_absolute_expiry_despite_activity(
     assert await store.get_session(hash_token(token)) is None
 
 
+async def test_peek_is_read_only(store: SqliteStore, sessions: SessionManager) -> None:
+    token = await sessions.create(T0, ip=None, user_agent=None)
+    record = await sessions.peek(token, T0 + timedelta(hours=11))
+    assert record is not None and record.last_seen_at == T0
+    stored = await store.get_session(hash_token(token))
+    assert stored is not None and stored.last_seen_at == T0  # never touched
+    # Idle since T0 (peeks are no activity): ended, but not deleted by a peek.
+    assert await sessions.peek(token, T0 + timedelta(hours=12)) is None
+    assert await store.get_session(hash_token(token)) is not None
+    assert await sessions.validate(token, T0 + timedelta(hours=12)) is None
+
+    token = await sessions.create(T0, ip=None, user_agent=None)
+    assert await sessions.peek(token, T0 + timedelta(days=7)) is None  # absolute expiry
+    await sessions.revoke(token)
+    assert await sessions.peek(token, T0) is None
+
+
 @pytest.mark.parametrize("token", [None, "", "short", "bad token with spaces!!", "x" * 129])
 async def test_malformed_tokens_are_rejected(sessions: SessionManager, token: str | None) -> None:
     assert await sessions.validate(token, T0) is None
+    assert await sessions.peek(token, T0) is None
     await sessions.revoke(token)  # never raises
 
 

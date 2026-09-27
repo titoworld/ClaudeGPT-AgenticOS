@@ -2,7 +2,8 @@
 
 - ``agentic-os serve [--host] [--port] [--dev]``: run the web server (uvicorn).
 - ``agentic-os init``: configure the owner (password + TOTP).
-- ``agentic-os reset-sessions``: close every open session.
+- ``agentic-os reset-sessions``: close every open session and forget known devices.
+- ``agentic-os reset-throttle``: lift the login lockouts.
 - ``agentic-os doctor``: check the installation and the providers.
 - ``agentic-os --version``.
 """
@@ -98,7 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _parser(commands, "init", "Configura el propietari: contrasenya i codi TOTP.")
-    _parser(commands, "reset-sessions", "Tanca totes les sessions obertes.")
+    _parser(
+        commands,
+        "reset-sessions",
+        "Tanca totes les sessions obertes, oblida els dispositius coneguts i esborra els "
+        "bloquejos d'inici de sessió.",
+    )
+    _parser(
+        commands,
+        "reset-throttle",
+        "Esborra els bloquejos per intents d'inici de sessió fallits (no tanca cap sessió).",
+    )
     _parser(commands, "doctor", "Comprova la instal·lació, la configuració i els proveïdors.")
     return parser
 
@@ -122,6 +133,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from agentic_os.admin import run_init
 
         return _with_store(settings, lambda store: run_init(store, settings))
+    if args.command == "reset-throttle":
+        from agentic_os.admin import run_reset_throttle
+
+        return _with_store(settings, run_reset_throttle)
     from agentic_os.admin import run_reset_sessions
 
     return _with_store(settings, run_reset_sessions)

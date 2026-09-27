@@ -20,6 +20,7 @@ from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.types import EngineConfig
 from agentic_os.providers.base import Provider
 from agentic_os.providers.factory import build_providers
+from agentic_os.security.devices import DeviceManager
 from agentic_os.security.sessions import SessionManager
 from agentic_os.security.throttle import LoginThrottle
 from agentic_os.server import routes_api, routes_auth, ws
@@ -87,12 +88,14 @@ async def _internal_error(request: Request, exc: Exception) -> Response:
 
 
 async def _maintenance(state: AppState) -> None:
-    """Hourly purge of expired sessions, cached turns and stale throttle counters."""
+    """Hourly purge of expired sessions and devices, cached turns and stale throttle
+    counters."""
     while True:
         now = state.clock()
         try:
             await state.store.purge_expired_cache(now)
             await state.sessions.purge_expired(now)
+            await state.devices.purge_expired(now)
             await state.throttle.purge(now)
         except Exception:
             logger.exception("Periodic maintenance failed")
@@ -147,6 +150,7 @@ def create_app(
                 settings=settings,
                 store=store,
                 sessions=SessionManager.from_settings(store, settings),
+                devices=DeviceManager(store),
                 throttle=LoginThrottle.from_settings(store, settings),
                 turns=turns,
                 monitor=monitor,

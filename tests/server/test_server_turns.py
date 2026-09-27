@@ -39,6 +39,8 @@ class Recorder:
 
     def __init__(self, *, accept: int | None = None) -> None:
         self.messages: list[dict[str, Any]] = []
+        self.batches: list[int] = []
+        """Size of each batch received."""
         self._accept = accept
 
     def send(self, text: str) -> bool:
@@ -46,6 +48,10 @@ class Recorder:
             return False
         self.messages.append(json.loads(text))
         return True
+
+    def send_batch(self, texts: Sequence[str]) -> bool:
+        self.batches.append(len(texts))
+        return all(self.send(text) for text in texts)
 
     @property
     def types(self) -> list[str]:
@@ -393,6 +399,34 @@ class StuckWebSocket:
         self.sent.append(text)
         if len(self.sent) > 1:
             await asyncio.Event().wait()
+
+
+class RecordingWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(text)
+
+
+async def test_a_replay_takes_one_place_in_the_send_queue() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    turns.start(request("r1"))
+    await settle()  # seq 1 and 2 buffered, nobody listening
+    websocket = RecordingWebSocket()
+    connection = ClientConnection(websocket, queue_size=1)  # type: ignore[arg-type]
+    # The whole backlog is queued at once, before the writer can run.
+    assert turns.subscribe("r1", connection, after_seq=0)
+    assert not connection.overflowed.is_set()
+    writer = asyncio.create_task(connection.write_loop())
+    await settle()
+    runner.gate.set()  # the rest arrives live
+    await settle()
+    assert not connection.overflowed.is_set()
+    assert [json.loads(t)["seq"] for t in websocket.sent] == [1, 2, 3]
+    await cancel_and_wait([writer])
+    await turns.aclose()
 
 
 async def test_a_client_that_cannot_keep_up_is_dropped() -> None:

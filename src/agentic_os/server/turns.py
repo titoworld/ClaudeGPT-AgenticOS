@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
@@ -47,6 +47,11 @@ class Subscriber(Protocol):
     def send(self, text: str) -> bool:
         """Queue ``text`` without blocking; ``False`` means the subscriber is gone
         (it is then dropped from the turn)."""
+        ...
+
+    def send_batch(self, texts: Sequence[str]) -> bool:
+        """Like :meth:`send` for several texts at once, which take a single place
+        in the subscriber's queue (a replay can be far longer than the queue)."""
         ...
 
 
@@ -185,9 +190,9 @@ class TurnManager:
         turn = self._turns.get(request_id)
         if turn is None:
             return False
-        for text in turn.events[max(after_seq, 0) :]:
-            if not subscriber.send(text):
-                return True
+        backlog = turn.events[max(after_seq, 0) :]
+        if backlog and not subscriber.send_batch(backlog):
+            return True
         if not turn.finished:
             turn.subscribers.add(subscriber)
         return True

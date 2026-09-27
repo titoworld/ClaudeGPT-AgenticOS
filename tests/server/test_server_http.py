@@ -2,6 +2,8 @@
 
 import asyncio
 import functools
+import json
+import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -13,6 +15,7 @@ import httpx
 import pyotp
 import pytest
 from fastapi import FastAPI
+from starlette.types import Message
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, DebateOptions, ProviderMode, Usage
@@ -23,6 +26,8 @@ from agentic_os.providers.base import ModelInfo, Provider
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.security.passwords import hash_password
 from agentic_os.security.sessions import hash_token
+from agentic_os.security.throttle import GLOBAL_KEY, client_key
+from agentic_os.server import middleware
 from agentic_os.server.app import create_app
 from agentic_os.server.catalog import ModelCatalog
 from agentic_os.server.deps import AppState
@@ -36,6 +41,8 @@ PASSWORD = "una frase de pas prou llarga"
 SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 T0 = datetime(2026, 9, 27, 12, 0, 5, tzinfo=UTC)
 COOKIE = "__Host-aos_session"
+DEVICE_COOKIE = "__Host-aos_device"
+WRONG_PASSWORD = "incorrecta però llarga"
 
 
 @functools.cache
@@ -125,9 +132,11 @@ async def h(tmp_path: Path) -> AsyncIterator[Harness]:
         yield harness
 
 
-def set_cookie_attributes(response: httpx.Response) -> dict[str, str]:
-    """Attributes of the single Set-Cookie header, lowercase keys."""
-    [header] = response.headers.get_list("set-cookie")
+def set_cookie_attributes(response: httpx.Response, name: str = COOKIE) -> dict[str, str]:
+    """Attributes of the single Set-Cookie header for ``name``, lowercase keys."""
+    [header] = [
+        h for h in response.headers.get_list("set-cookie") if h.split("=", 1)[0].strip() == name
+    ]
     name_value, *attributes = [part.strip() for part in header.split(";")]
     result = {"__name__": name_value.split("=", 1)[0], "__value__": name_value.split("=", 1)[1]}
     for attribute in attributes:
@@ -186,6 +195,93 @@ async def test_body_limit(h: Harness) -> None:
     response = await h.client.put("/api/settings", content=chunks(), headers=ORIGIN_HEADERS)
     assert response.status_code == 413
     assert response.json()["detail"].startswith("La petició és massa gran")
+
+
+async def test_a_slow_body_gets_408_and_closes_the_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(middleware, "BODY_TIMEOUT_SECONDS", 0.2)
+    async with running(make_settings(tmp_path)) as h:
+        await h.add_owner()
+
+        async def trickle() -> AsyncIterator[bytes]:  # every chunk on time, the whole late
+            for _ in range(40):
+                yield b" "
+                await asyncio.sleep(0.05)
+
+        async def stalled() -> AsyncIterator[bytes]:  # never finishes
+            yield b'{"password": "'
+            await asyncio.sleep(3600)
+
+        for body in (trickle(), stalled()):
+            async with asyncio.timeout(5):
+                response = await h.client.post(
+                    "/api/auth/login", content=body, headers=ORIGIN_HEADERS
+                )
+            assert response.status_code == 408
+            assert response.json() == {
+                "detail": "La petició ha trigat massa a arribar. Torna-ho a provar."
+            }
+            assert response.headers["connection"] == "close"
+        # Nothing was counted as a failed login, and a normal login still works.
+        assert await h.state.store.get_throttle(GLOBAL_KEY) is None
+        assert (await h.login()).status_code == 204
+
+
+async def test_the_body_deadline_does_not_limit_the_handler(tmp_path: Path) -> None:
+    app = FastAPI()
+    app.add_middleware(middleware.BodyLimitMiddleware, timeout=0.1)
+
+    @app.post("/slow")
+    async def slow(body: dict[str, int]) -> dict[str, int]:
+        await asyncio.sleep(0.3)  # longer than the body deadline
+        return body
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+        response = await client.post("/slow", json={"a": 1})
+    assert response.status_code == 200
+    assert response.json() == {"a": 1}
+
+
+async def test_a_client_disconnect_mid_body_is_a_quiet_400(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}  # the client went away before the body
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/auth/login",
+        "raw_path": b"/api/auth/login",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"origin", ORIGIN.encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", b"1000"),
+        ],
+        "client": ("203.0.113.9", 50000),
+        "server": ("testserver", 443),
+    }
+    with caplog.at_level(logging.INFO):
+        await h.app(scope, receive, send)  # does not raise (uvicorn would log it)
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 400
+    assert json.loads(sent[1]["body"]) == {
+        "detail": "La connexió s'ha tancat abans de rebre la petició sencera."
+    }
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR or r.exc_info]
 
 
 async def test_origin_check_on_state_changing_requests(h: Harness) -> None:
@@ -268,8 +364,22 @@ async def test_login_sets_a_secure_cookie_and_logout_clears_it(h: Harness) -> No
     assert (await h.client.get("/api/auth/state")).json()["authenticated"] is True
     assert (await h.client.get("/api/settings")).status_code == 200
 
+    device = set_cookie_attributes(response, DEVICE_COOKIE)
+    assert device["max-age"] == str(365 * 24 * 3600)
+    assert device["path"] == "/"
+    assert device["samesite"].lower() == "strict"
+    assert "httponly" in device
+    assert "secure" in device
+    assert "domain" not in device
+    assert device["__value__"] != cookie["__value__"]
+    assert await h.state.store.get_device(hash_token(device["__value__"])) is not None
+    assert await h.state.store.get_device(device["__value__"]) is None  # only the hash
+
     response = await h.client.post("/api/auth/logout", headers=ORIGIN_HEADERS)
     assert response.status_code == 204
+    assert all(not c.startswith(DEVICE_COOKIE) for c in response.headers.get_list("set-cookie"))
+    assert h.client.cookies.get(DEVICE_COOKIE) == device["__value__"]  # kept at logout
+    assert await h.state.store.get_device(hash_token(device["__value__"])) is not None
     cleared = set_cookie_attributes(response)
     assert cleared["__name__"] == COOKIE
     assert cleared["max-age"] == "0"
@@ -290,10 +400,13 @@ async def test_dev_cookie_without_secure_flag(tmp_path: Path) -> None:
         await h.add_owner()
         response = await h.login()
     assert response.status_code == 204
-    cookie = set_cookie_attributes(response)
+    cookie = set_cookie_attributes(response, "aos_session")
     assert cookie["__name__"] == "aos_session"
     assert "secure" not in cookie
     assert "httponly" in cookie
+    device = set_cookie_attributes(response, "aos_device")
+    assert "secure" not in device
+    assert "httponly" in device
 
 
 async def test_login_failures_are_generic(h: Harness) -> None:
@@ -356,6 +469,83 @@ async def test_parallel_attempts_cannot_bypass_the_lockout(tmp_path: Path) -> No
             *(h.login(password=f"contrasenya incorrecta {i}") for i in range(6))
         )
     assert sorted(r.status_code for r in responses) == [401, 401, 429, 429, 429, 429]
+
+
+def client_from(h: Harness, ip: str) -> httpx.AsyncClient:
+    """A client with its own address and cookie jar."""
+    transport = httpx.ASGITransport(app=h.app, client=(ip, 50000))
+    return httpx.AsyncClient(transport=transport, base_url="https://testserver")
+
+
+async def login_from(
+    h: Harness, client: httpx.AsyncClient, *, password: str = PASSWORD
+) -> httpx.Response:
+    return await client.post(
+        "/api/auth/login", json={"password": password, "totp": h.code()}, headers=ORIGIN_HEADERS
+    )
+
+
+async def lock_globally(h: Harness, attacker: httpx.AsyncClient) -> None:
+    """One anonymous address follows Retry-After until the global key is locked."""
+    for _ in range(50):
+        response = await login_from(h, attacker, password=WRONG_PASSWORD)
+        if response.status_code == 429:
+            h.clock.advance(seconds=response.json()["retry_after"])
+            continue
+        state = await h.state.store.get_throttle(GLOBAL_KEY)
+        if state is not None and state.locked_until is not None and state.locked_until > h.clock():
+            return
+    pytest.fail("the global key never locked")
+
+
+async def test_a_known_device_is_not_locked_out_by_anonymous_failures(tmp_path: Path) -> None:
+    async with running(make_settings(tmp_path, login_max_failures=2)) as h:
+        await h.add_owner()
+        async with (
+            client_from(h, "198.51.100.7") as owner,
+            client_from(h, "203.0.113.9") as attacker,
+            client_from(h, "192.0.2.1") as stranger,
+        ):
+            assert (await login_from(h, owner)).status_code == 204
+            device = owner.cookies[DEVICE_COOKIE]
+            assert (await owner.post("/api/auth/logout", headers=ORIGIN_HEADERS)).status_code == 204
+            h.clock.advance(seconds=30)
+
+            await lock_globally(h, attacker)
+            # Unknown clients are locked out, even with the right credentials...
+            assert (await login_from(h, stranger)).status_code == 429
+            stranger.cookies.set(DEVICE_COOKIE, "a-forged-device-token-00000000000000000000")
+            assert (await login_from(h, stranger)).status_code == 429
+            # ...but not the owner's browser, from any address.
+            async with client_from(h, "192.0.2.200") as roaming:
+                roaming.cookies.set(DEVICE_COOKIE, device)
+                response = await login_from(h, roaming)
+            assert response.status_code == 204
+            # The device token was replaced, and the global lock is still on.
+            new_device = set_cookie_attributes(response, DEVICE_COOKIE)["__value__"]
+            assert new_device != device
+            assert await h.state.store.get_device(hash_token(device)) is None
+            assert await h.state.store.get_device(hash_token(new_device)) is not None
+            assert (await login_from(h, stranger)).status_code == 429
+
+
+async def test_a_known_device_has_its_own_failure_counter(tmp_path: Path) -> None:
+    async with running(make_settings(tmp_path, login_max_failures=2)) as h:
+        await h.add_owner()
+        async with client_from(h, "198.51.100.7") as owner:
+            assert (await login_from(h, owner)).status_code == 204
+            h.clock.advance(seconds=30)
+            for _ in range(2):
+                wrong = await login_from(h, owner, password=WRONG_PASSWORD)
+                assert wrong.status_code == 401
+            locked = await login_from(h, owner)  # right credentials, device locked
+            assert locked.status_code == 429
+            assert locked.json()["retry_after"] == 5
+            # The address and global counters were not touched by the device.
+            assert await h.state.store.get_throttle(client_key("198.51.100.7")) is None
+            assert await h.state.store.get_throttle(GLOBAL_KEY) is None
+            h.clock.advance(seconds=6)
+            assert (await login_from(h, owner)).status_code == 204
 
 
 async def test_session_idle_and_absolute_expiry(tmp_path: Path) -> None:

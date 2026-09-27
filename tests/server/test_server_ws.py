@@ -26,6 +26,8 @@ from agentic_os.providers.base import (
     TextDelta,
 )
 from agentic_os.providers.fake import FakeProvider
+from agentic_os.security.sessions import hash_token
+from agentic_os.server import ws as ws_module
 from agentic_os.server.app import create_app
 from agentic_os.server.deps import AppState
 from agentic_os.server.ws import ProtocolError, parse_turn_start
@@ -104,9 +106,21 @@ def call(client: TestClient, fn: Callable[[], Any]) -> Any:
     return client.portal.call(fn)
 
 
+class Clock:
+    """Mutable fake clock (aware UTC)."""
+
+    def __init__(self) -> None:
+        self.now = T0
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
 @contextmanager
 def app_client(
-    tmp_path: Path, providers: dict[AgentName, Provider] | None = None
+    tmp_path: Path,
+    providers: dict[AgentName, Provider] | None = None,
+    clock: Callable[[], datetime] = lambda: T0,
 ) -> Iterator[tuple[TestClient, AppState, str]]:
     """Running app, its state and a valid session token."""
     if providers is None:
@@ -114,10 +128,12 @@ def app_client(
             "claude": FakeProvider("claude", chunk_delay=0),
             "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
         }
-    app = create_app(make_settings(tmp_path), providers=providers, clock=lambda: T0)
+    app = create_app(make_settings(tmp_path), providers=providers, clock=clock)
     with TestClient(app, base_url="https://testserver") as client:
         state: AppState = app.state.aos
-        token = call(client, functools.partial(state.sessions.create, T0, ip=None, user_agent=None))
+        token = call(
+            client, functools.partial(state.sessions.create, clock(), ip=None, user_agent=None)
+        )
         yield client, state, token
 
 
@@ -207,6 +223,94 @@ def test_revoked_session_closes_on_the_next_message(tmp_path: Path) -> None:
         with pytest.raises(WebSocketDisconnect) as exc:
             ws.receive_json()
         assert exc.value.code == 4401
+
+
+def gates() -> dict[AgentName, GateProvider]:
+    return {"claude": GateProvider("claude"), "chatgpt": GateProvider("chatgpt")}
+
+
+def test_a_silent_socket_closes_when_another_process_revokes_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ws_module, "SESSION_CHECK_SECONDS", 0.05)
+    providers = gates()
+    with (
+        app_client(tmp_path, dict(providers)) as (client, state, token),
+        connect(client, token) as ws,
+    ):
+        ws.receive_json()
+        ws.send_json(start("r1"))
+        receive_until(ws, is_type("stream.delta"))
+        # Like `agentic-os reset-sessions`: only the database changes.
+        assert call(client, state.store.delete_all_sessions) == 1
+        call(client, functools.partial(asyncio.sleep, 0.3))  # a few periodic checks
+        call(client, providers["claude"].release.set)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()  # not the rest of the turn
+        assert exc.value.code == 4401
+
+
+def test_a_ping_checks_the_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws_module, "SESSION_CHECK_SECONDS", 3600.0)
+    with app_client(tmp_path) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        call(client, functools.partial(state.store.delete_session, hash_token(token)))
+        ws.send_json({"type": "ping", "t": 1})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 4401
+
+
+def test_pings_do_not_keep_an_idle_session_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ws_module, "SESSION_CHECK_SECONDS", 3600.0)
+    clock = Clock()
+    with app_client(tmp_path, clock=clock) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        step = state.sessions.idle_timeout / 3
+        for t in (1, 2):
+            clock.now += step
+            ws.send_json({"type": "ping", "t": t})
+            assert ws.receive_json() == {"type": "pong", "t": t}
+        clock.now += step  # idle timeout since the last real activity
+        ws.send_json({"type": "ping", "t": 3})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 4401
+
+
+def test_logout_closes_the_sockets_of_its_session_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ws_module, "SESSION_CHECK_SECONDS", 3600.0)  # only logout can do it
+    providers = gates()
+    with app_client(tmp_path, dict(providers)) as (client, state, token):
+        other = call(client, functools.partial(state.sessions.create, T0, ip=None, user_agent=None))
+        with (
+            connect(client, token) as first,
+            connect(client, token) as second,
+            connect(client, other) as kept,
+        ):
+            for ws in (first, second, kept):
+                ws.receive_json()
+            first.send_json(start("r1"))
+            receive_until(first, is_type("stream.delta"))
+            second.send_json({"type": "turn.subscribe", "request_id": "r1", "after_seq": 0})
+            receive_until(second, is_type("stream.delta"))
+
+            logout = client.post(
+                "/api/auth/logout", headers={"origin": ORIGIN, "cookie": f"{COOKIE}={token}"}
+            )
+            assert logout.status_code == 204
+            call(client, functools.partial(asyncio.sleep, 0.1))
+            call(client, providers["claude"].release.set)
+            for ws in (first, second):
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    ws.receive_json()  # not the rest of the turn
+                assert exc.value.code == 4401
+            kept.send_json({"type": "ping", "t": 1})
+            assert kept.receive_json() == {"type": "pong", "t": 1}
 
 
 # -- turns -----------------------------------------------------------------------------

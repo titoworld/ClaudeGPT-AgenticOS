@@ -10,6 +10,13 @@ rendered transcript, and the thread is released afterwards. Codex's default agen
 harness (a 19 KB prompt, tools, skills, plugins...) is trimmed with config overrides
 verified against 0.157.1, and any request the server sends back (approvals, user
 input...) is declined so a call can never hang waiting for a human.
+
+0.157.1 still offers the model its sub-agent tools (the bundled model catalog enables
+them whatever the config says), so a prompt injection can make ChatGPT spawn a
+sub-agent: a thread no call listens to, which would keep spending the owner's plan
+after the call ends. ``agents.max_threads=1`` caps them and any turn on a thread that
+no call owns is interrupted as soon as it shows up. Codex's SQLite state, whose log
+records every prompt, lives in a private directory outside ``CODEX_HOME``.
 """
 
 from __future__ import annotations
@@ -105,6 +112,8 @@ CONFIG_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("history.persistence", '"none"'),
     ("analytics.enabled", "false"),
     ("skills.bundled.enabled", "false"),
+    # At most one sub-agent per call (0 is rejected): see _on_stray_activity.
+    ("agents.max_threads", "1"),
     *((f"features.{name}", "false") for name in _DISABLED_FEATURES),
 )
 """``-c key=value`` overrides (TOML values), all accepted by ``--strict-config`` in 0.157.1.
@@ -196,10 +205,12 @@ def codex_environment(source: Mapping[str, str] | None = None) -> dict[str, str]
     return {name: environ[name] for name in ENV_ALLOWLIST if name in environ}
 
 
-def config_arguments() -> list[str]:
-    """``-c key=value`` command-line arguments that trim Codex's agent harness."""
+def config_arguments(state_dir: Path) -> list[str]:
+    """``-c key=value`` command-line arguments that trim Codex's agent harness and keep
+    its SQLite state (``logs_2.sqlite`` records every prompt) in ``state_dir``."""
     arguments: list[str] = []
-    for key, value in CONFIG_OVERRIDES:
+    # A JSON string is also a valid TOML basic string.
+    for key, value in (*CONFIG_OVERRIDES, ("sqlite_home", json.dumps(str(state_dir)))):
         arguments += ["-c", f"{key}={value}"]
     return arguments
 
@@ -216,7 +227,7 @@ class _AppServerConnection:
         self,
         process: asyncio.subprocess.Process,
         *,
-        on_notification: Callable[[str, JsonObject], None],
+        on_notification: Callable[[_AppServerConnection, str, JsonObject], None],
         on_exit: Callable[[_AppServerConnection, bool], None],
     ) -> None:
         self._process = process
@@ -358,7 +369,7 @@ class _AppServerConnection:
             if queue is not None:
                 queue.put_nowait((method, params))
             else:
-                self._on_notification(method, params)
+                self._on_notification(self, method, params)
             return
         request_id = message.get("id")
         future = self._pending.pop(request_id, None) if isinstance(request_id, int) else None
@@ -597,8 +608,8 @@ def _usage_limit(name: str, window: JsonObject) -> UsageLimit:
     )
 
 
-def _prepare_sandbox(path: Path) -> Path:
-    """Create the empty working directory of Codex (0700) and return its absolute path."""
+def _private_dir(path: Path) -> Path:
+    """Create a directory only the app's user can enter (0700); return its absolute path."""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path.resolve()
@@ -616,6 +627,11 @@ class CodexAppServerProvider:
         self._sandbox = settings.data_dir / "sandbox" / "codex"
         self._cwd: Path | None = None
         """Absolute sandbox path, set when the process starts."""
+        self._state_dir = settings.codex_state_dir or settings.data_dir / "sandbox" / "codex-state"
+        self._threads: set[str] = set()
+        """Threads of this provider's calls, from thread/start until they are released."""
+        self._stray_turns: set[str] = set()
+        """Turns on threads no call owns (sub-agents) with an interrupt sent."""
         self._conn: _AppServerConnection | None = None
         self._starting: asyncio.Task[None] | None = None
         self._closed = False
@@ -667,6 +683,7 @@ class CodexAppServerProvider:
             )
             thread = await _until(deadline, asyncio.shield(thread_task))
             thread_id = _nested_id(thread, "thread")
+            self._threads.add(thread_id)
             model = _as_dict(thread).get("model") or requested_model or FALLBACK_MODEL_LABEL
             if requested_model is None and _as_dict(thread).get("model"):
                 self._default_model = str(model)
@@ -822,6 +839,8 @@ class CodexAppServerProvider:
             self._retire(conn)
         except ProcessGone:
             pass
+        finally:
+            self._threads.discard(thread_id)
 
     # -- process lifecycle ---------------------------------------------------------------
 
@@ -867,10 +886,11 @@ class CodexAppServerProvider:
             await asyncio.sleep(delay)
         cli = self._settings.codex_cli_path
         try:
-            cwd = await asyncio.to_thread(_prepare_sandbox, self._sandbox)
+            cwd = await asyncio.to_thread(_private_dir, self._sandbox)
+            state_dir = await asyncio.to_thread(_private_dir, self._state_dir)
         except OSError as exc:
             raise ProviderError(
-                f"No s'ha pogut preparar el directori de treball de Codex: {exc}",
+                f"No s'han pogut preparar els directoris de Codex: {exc}",
                 kind="unavailable",
             ) from None
         self._cwd = cwd
@@ -878,7 +898,7 @@ class CodexAppServerProvider:
             process = await asyncio.create_subprocess_exec(
                 cli,
                 "app-server",
-                *config_arguments(),
+                *config_arguments(state_dir),
                 "--listen",
                 "stdio://",
                 stdin=asyncio.subprocess.PIPE,
@@ -937,6 +957,7 @@ class CodexAppServerProvider:
     def _on_exit(self, conn: _AppServerConnection, expected: bool) -> None:
         if self._conn is conn:
             self._conn = None
+            self._stray_turns.clear()
         if expected:
             return
         if time.monotonic() - conn.started_at >= STABLE_UPTIME:
@@ -975,13 +996,62 @@ class CodexAppServerProvider:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    def _on_notification(self, method: str, params: JsonObject) -> None:
-        if method == "account/rateLimits/updated":
+    def _on_notification(self, conn: _AppServerConnection, method: str, params: JsonObject) -> None:
+        """Notifications no call listens to: account-wide ones, and the activity of
+        threads that no running call owns."""
+        thread_id = params.get("threadId")
+        if isinstance(thread_id, str):
+            self._on_stray_activity(conn, method, thread_id, params)
+        elif method == "account/rateLimits/updated":
             self._merge_rate_limits(params.get("rateLimits"), sparse=True)
         elif method == "account/updated":
             self._status_cache = None
         elif method in ("configWarning", "warning", "deprecationNotice"):
             logger.info("Codex app-server %s: %s", method, params.get("summary") or params)
+
+    def _on_stray_activity(
+        self, conn: _AppServerConnection, method: str, thread_id: str, params: JsonObject
+    ) -> None:
+        """Interrupt a turn on a thread that no call owns, and count nothing of it.
+
+        Such a turn is a sub-agent that ChatGPT started (a prompt injection can ask for
+        one): nobody sees its output and it would go on spending the owner's plan after
+        the call ends or is stopped. Threads of our own calls that are being released
+        are left to :meth:`_release_thread`."""
+        if thread_id in self._threads:
+            return
+        turn_id = params.get("turnId") or _as_dict(params.get("turn")).get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            return
+        if method == "turn/completed":
+            self._stray_turns.discard(turn_id)
+            return
+        if turn_id in self._stray_turns:
+            return
+        self._stray_turns.add(turn_id)
+        logger.warning(
+            "Codex is running a turn outside any call (thread %s, turn %s), probably a "
+            "sub-agent started by the model; interrupting it",
+            thread_id,
+            turn_id,
+        )
+        self._spawn(self._interrupt_stray(conn, thread_id, turn_id))
+
+    async def _interrupt_stray(
+        self, conn: _AppServerConnection, thread_id: str, turn_id: str
+    ) -> None:
+        try:
+            await conn.request(
+                "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, CLEANUP_TIMEOUT
+            )
+        except CodexRpcError as exc:
+            # Not retried: a turn that cannot be interrupted must not flood the server.
+            logger.warning("Could not interrupt Codex turn %s: %s", turn_id, exc.message)
+        except TimeoutError:
+            logger.warning("Codex app-server stopped answering; restarting it")
+            self._retire(conn)
+        except ProcessGone:
+            pass
 
     def _merge_rate_limits(self, snapshot: Any, *, sparse: bool) -> None:
         """Keep the latest ``primary``/``secondary`` windows of the ``codex`` limit.

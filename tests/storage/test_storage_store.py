@@ -534,6 +534,51 @@ async def test_session_records(store: SqliteStore) -> None:
     assert await store.delete_all_sessions() == 0
 
 
+async def test_device_records(store: SqliteStore) -> None:
+    await store.create_device("d1", created_at=T0, expires_at=T0 + timedelta(days=365))
+    await store.create_device("d2", created_at=T0, expires_at=T0 + timedelta(days=1))
+    record = await store.get_device("d1")
+    assert record is not None
+    assert (record.token_hash, record.created_at) == ("d1", T0)
+    assert record.expires_at == T0 + timedelta(days=365)
+    assert await store.get_device("missing") is None
+
+    assert await store.purge_expired_devices(T0 + timedelta(days=2)) == 1
+    assert await store.get_device("d2") is None
+    assert await store.delete_device("d1") is True
+    assert await store.delete_device("d1") is False
+    await store.create_device("d3", created_at=T0, expires_at=T0 + timedelta(days=1))
+    assert await store.delete_all_devices() == 1
+
+
+async def test_set_owner_forgets_devices_and_clears_the_throttle(store: SqliteStore) -> None:
+    def lock_for(failures: int) -> timedelta:
+        return timedelta(minutes=15)
+
+    await store.create_device("d1", created_at=T0, expires_at=T0 + timedelta(days=365))
+    for key in ("global", "ip:203.0.113.9"):
+        await store.record_throttle_failure(
+            key, T0, reset_after=timedelta(hours=24), lock_for=lock_for
+        )
+    await store.set_owner(password_hash="h", totp_secret="S", totp_last_step=0)
+    assert await store.get_device("d1") is None
+    assert await store.get_throttle("global") is None
+    assert await store.get_throttle("ip:203.0.113.9") is None
+
+
+async def test_clear_throttle(store: SqliteStore) -> None:
+    def lock_for(failures: int) -> timedelta:
+        return timedelta(minutes=15)
+
+    assert await store.clear_throttle() == 0
+    for key in ("global", "ip:203.0.113.9", "device:abc"):
+        await store.record_throttle_failure(
+            key, T0, reset_after=timedelta(hours=24), lock_for=lock_for
+        )
+    assert await store.clear_throttle() == 3
+    assert await store.get_throttle("global") is None
+
+
 async def test_throttle_records(store: SqliteStore) -> None:
     def lock_for(failures: int) -> timedelta:
         return timedelta(seconds=10) if failures >= 2 else timedelta(0)

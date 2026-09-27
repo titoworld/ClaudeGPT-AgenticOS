@@ -4,7 +4,14 @@ The handshake is accepted first so the browser sees the close codes: ``4403`` fo
 foreign ``Origin`` and ``4401`` without a live session. Every connection has a
 bounded outgoing queue drained by a writer task; a client that cannot keep up is
 disconnected (code 1013) and recovers what it missed with ``turn.subscribe`` after
-reconnecting. Invalid messages get an ``error`` answer; they never close the socket.
+reconnecting (a replay takes a single place in the queue, however long it is).
+Invalid messages get an ``error`` answer; they never close the socket.
+
+The session is checked again on every message (read-only for ``ping``, so that
+heartbeats never keep an idle session alive) and every
+:data:`SESSION_CHECK_SECONDS` even if the client sends nothing: a socket whose
+session ended (logout, ``agentic-os reset-sessions``, expiry) is closed with
+``4401``. A logout in this process closes its sockets at once.
 """
 
 import asyncio
@@ -12,7 +19,7 @@ import contextlib
 import json
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 from fastapi import APIRouter, WebSocket
@@ -22,6 +29,7 @@ from agentic_os import __version__
 from agentic_os.domain import AGENTS, AgentName, TurnMode, TurnOptions
 from agentic_os.orchestrator.events import Wire
 from agentic_os.orchestrator.types import TurnRequest
+from agentic_os.security.sessions import hash_token
 from agentic_os.server.deps import AppState, app_state
 from agentic_os.server.middleware import origin_allowed
 from agentic_os.server.status import status_to_wire
@@ -40,7 +48,10 @@ CLOSE_TOO_SLOW: Final = 1013
 CLOSE_INTERNAL_ERROR: Final = 1011
 MAX_MESSAGE_CHARS: Final = 512 * 1024
 SEND_QUEUE_SIZE: Final = 4096
-"""Messages waiting to be written; a full queue drops the connection."""
+"""Messages (or replay batches) waiting to be written; a full queue drops the
+connection."""
+SESSION_CHECK_SECONDS: Final = 30.0
+"""How often an open socket re-checks its session (read-only)."""
 MAX_REQUEST_ID_LENGTH: Final = 128
 
 
@@ -169,26 +180,40 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
 class ClientConnection:
     """Outgoing side of one WebSocket: a bounded queue and its writer task.
 
-    :meth:`send` never blocks, so turn events can be fanned out synchronously; it is
-    the :class:`~agentic_os.server.turns.Subscriber` given to the turn manager."""
+    :meth:`send` and :meth:`send_batch` never block, so turn events can be fanned
+    out synchronously; it is the :class:`~agentic_os.server.turns.Subscriber` given
+    to the turn manager."""
 
     def __init__(self, websocket: WebSocket, *, queue_size: int = SEND_QUEUE_SIZE) -> None:
         self._websocket = websocket
-        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
+        self._queue: asyncio.Queue[str | tuple[str, ...]] = asyncio.Queue(maxsize=queue_size)
         self.overflowed = asyncio.Event()
+        self.revoked = asyncio.Event()
+        """Set when the session of the connection ends (see :meth:`revoke`)."""
         self.closed = False
 
-    def send(self, text: str) -> bool:
+    def _put(self, item: str | tuple[str, ...]) -> bool:
         if self.closed:
             return False
         try:
-            self._queue.put_nowait(text)
+            self._queue.put_nowait(item)
         except asyncio.QueueFull:
             logger.warning("WebSocket client too slow: dropping the connection")
             self.closed = True
             self.overflowed.set()
             return False
         return True
+
+    def send(self, text: str) -> bool:
+        return self._put(text)
+
+    def send_batch(self, texts: Sequence[str]) -> bool:
+        """Queue several texts in one place of the queue (they are written in order)."""
+        return self._put(tuple(texts))
+
+    def revoke(self) -> None:
+        """The session ended: the endpoint closes the socket with ``4401``."""
+        self.revoked.set()
 
     def send_json(self, message: Wire) -> bool:
         return self.send(dumps(message))
@@ -201,8 +226,12 @@ class ClientConnection:
 
     async def write_loop(self) -> None:
         while True:
-            text = await self._queue.get()
-            await self._websocket.send_text(text)
+            item = await self._queue.get()
+            if isinstance(item, str):
+                await self._websocket.send_text(item)
+            else:
+                for text in item:
+                    await self._websocket.send_text(text)
 
 
 class ClientSession:
@@ -251,10 +280,7 @@ class ClientSession:
                 self._connection.error("El missatge ha de ser un objecte amb un camp «type».")
                 continue
             kind: str = data["type"]
-            if (
-                kind != "ping"
-                and await self._state.sessions.validate(self._token, self._state.clock()) is None
-            ):
+            if not await self._session_alive(touch=kind != "ping"):
                 return CLOSE_UNAUTHORIZED
             try:
                 await self._dispatch(kind, data)
@@ -269,6 +295,26 @@ class ClientSession:
                     if isinstance(data.get("request_id"), str)
                     else None,
                 )
+
+    async def _session_alive(self, *, touch: bool) -> bool:
+        """Whether the session is still live. Only ``touch`` checks count as activity
+        (they refresh the idle timeout); pings and the watchdog are read-only."""
+        sessions, now = self._state.sessions, self._state.clock()
+        if touch:
+            return await sessions.validate(self._token, now) is not None
+        return await sessions.peek(self._token, now) is not None
+
+    async def watch_session(self) -> int:
+        """Return ``4401`` once the session ends: at once when it is revoked in this
+        process, otherwise within :data:`SESSION_CHECK_SECONDS` (revoked by the CLI,
+        idle or expired) even if the client sends nothing."""
+        while True:
+            try:
+                await asyncio.wait_for(self._connection.revoked.wait(), SESSION_CHECK_SECONDS)
+            except TimeoutError:
+                if await self._session_alive(touch=False):
+                    continue
+            return CLOSE_UNAUTHORIZED
 
     async def _dispatch(self, kind: str, data: dict[str, object]) -> None:
         turns = self._state.turns
@@ -324,25 +370,37 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     connection = ClientConnection(websocket)
     session = ClientSession(state, websocket, connection, token)
+    token_hash = hash_token(token)
+    state.connections.add(token_hash, connection)
     reader = asyncio.create_task(session.read_loop(), name="ws-reader")
     writer = asyncio.create_task(connection.write_loop(), name="ws-writer")
     overflow = asyncio.create_task(connection.overflowed.wait(), name="ws-overflow")
+    watchdog = asyncio.create_task(session.watch_session(), name="ws-session-watchdog")
     close_code: int | None = None
     try:
-        await asyncio.wait((reader, writer, overflow), return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(
+            (reader, writer, overflow, watchdog), return_when=asyncio.FIRST_COMPLETED
+        )
         if overflow.done():
             close_code = CLOSE_TOO_SLOW
         elif reader.done() and not reader.cancelled():
-            error = reader.exception()
-            if error is not None:
-                logger.error("WebSocket reader crashed", exc_info=error)
-                close_code = CLOSE_INTERNAL_ERROR
-            else:
-                close_code = reader.result()
+            close_code = _outcome(reader, "reader")
+        elif watchdog.done() and not watchdog.cancelled():
+            close_code = _outcome(watchdog, "session watchdog")
     finally:
         # Turns keep running: only this connection stops receiving their events.
         connection.closed = True
+        state.connections.discard(token_hash, connection)
         state.turns.detach(connection)
-        await cancel_and_wait((reader, writer, overflow))
+        await cancel_and_wait((reader, writer, overflow, watchdog))
     if close_code is not None:
         await _close(websocket, close_code)
+
+
+def _outcome(task: asyncio.Task[int | None], name: str) -> int | None:
+    """Close code returned by a finished task; ``1011`` if it crashed."""
+    error = task.exception()
+    if error is not None:
+        logger.error("WebSocket %s crashed", name, exc_info=error)
+        return CLOSE_INTERNAL_ERROR
+    return task.result()
