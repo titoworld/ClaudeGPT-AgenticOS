@@ -13,10 +13,10 @@ from agentic_os.domain import AgentName, ProviderMode
 from agentic_os.fx import FxError, FxRate
 from agentic_os.pricing import DEFAULT_PRICES, ModelPrice
 from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus
+from agentic_os.providers.factory import build_provider
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.server.catalog import (
     ModelCatalog,
-    default_fast_model,
     effective_models,
     pricing_to_wire,
 )
@@ -64,18 +64,6 @@ class ListingProvider(FakeProvider):
         return await super().list_models()
 
 
-class PlainProvider(FakeProvider):
-    """A provider whose ``list_models`` takes no ``refresh`` keyword."""
-
-    def __init__(self, agent: AgentName) -> None:
-        super().__init__(agent, chunk_delay=0)
-        self.calls = 0
-
-    async def list_models(self) -> Sequence[ModelInfo]:  # type: ignore[override]
-        self.calls += 1
-        return (ModelInfo(id="only", label="Only", is_default=True),)
-
-
 async def snapshot(
     catalog: ModelCatalog,
     runtime: RuntimeSettings,
@@ -107,25 +95,35 @@ def statuses(**models: str) -> list[ProviderStatus]:
         ("chatgpt", "fake", "fake-chatgpt-mini"),
     ],
 )
-def test_default_fast_models(agent: AgentName, mode: ProviderMode, expected: str) -> None:
-    assert default_fast_model(agent, mode, settings()) == expected
+async def test_default_fast_models(agent: AgentName, mode: ProviderMode, expected: str) -> None:
+    provider = build_provider(agent, mode, settings())
+    try:
+        assert provider.fast_model == expected
+    finally:
+        await provider.aclose()
 
 
-def test_effective_models_prefer_the_dashboard_then_the_environment() -> None:
+async def test_effective_models_prefer_the_dashboard_then_the_environment() -> None:
     env = settings(claude_fast_model="claude-haiku-4-5-20251001")
-    assert effective_models("claude", "cli", "opus", RuntimeSettings(), env) == (
-        "opus",
-        "claude-haiku-4-5-20251001",
-    )
-    runtime = RuntimeSettings(
-        models={"claude": "sonnet", "chatgpt": None},
-        fast_models={"claude": "haiku", "chatgpt": None},
-    )
-    assert effective_models("claude", "cli", "opus", runtime, env) == ("sonnet", "haiku")
-    assert effective_models("chatgpt", "api", "gpt-6-astra", runtime, env) == (
-        "gpt-6-astra",
-        "gpt-6-luna",
-    )
+    claude = build_provider("claude", "cli", env)
+    chatgpt = build_provider("chatgpt", "api", env)
+    try:
+        assert effective_models("claude", claude, "opus", RuntimeSettings()) == (
+            "opus",
+            "claude-haiku-4-5-20251001",
+        )
+        runtime = RuntimeSettings(
+            models={"claude": "sonnet", "chatgpt": None},
+            fast_models={"claude": "haiku", "chatgpt": None},
+        )
+        assert effective_models("claude", claude, "opus", runtime) == ("sonnet", "haiku")
+        assert effective_models("chatgpt", chatgpt, "gpt-6-astra", runtime) == (
+            "gpt-6-astra",
+            "gpt-6-luna",
+        )
+    finally:
+        await claude.aclose()
+        await chatgpt.aclose()
 
 
 # -- catalog -----------------------------------------------------------------------------
@@ -158,17 +156,6 @@ async def test_catalog_of_live_lists_is_cached() -> None:
     assert providers["claude"].calls == [False, False]  # expired
     await snapshot(catalog, runtime, statuses(), refresh=True)
     assert providers["claude"].calls == [False, False, True]  # the provider's cache too
-    await catalog.aclose()
-
-
-async def test_refresh_works_with_providers_without_the_keyword() -> None:
-    plain = PlainProvider("claude")
-    catalog = ModelCatalog({"claude": plain}, settings())
-    listings = await catalog.listings(refresh=True)
-    assert plain.calls == 1
-    listing = listings["claude"]
-    assert listing is not None
-    assert [m.id for m in listing.models] == ["only"]
     await catalog.aclose()
 
 

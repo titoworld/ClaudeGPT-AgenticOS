@@ -111,6 +111,8 @@ class StreamCompleted:
     """Debate revisions only: agreement with the other agent (0-100)."""
     unchanged: bool = False
     """Debate revisions only: the agent kept its previous answer."""
+    cost_basis: str | None = None
+    """"api" (real cost), "equivalent" (subscription value at API prices) or None."""
 
     def to_wire(self) -> Wire:
         return {
@@ -123,6 +125,7 @@ class StreamCompleted:
             "ttft_ms": self.ttft_ms,
             "agreement": self.agreement,
             "unchanged": self.unchanged,
+            "cost_basis": self.cost_basis,
         }
 
 

@@ -264,6 +264,7 @@ export type TurnEvent =
       ttft_ms: number | null;
       agreement: number | null;
       unchanged: boolean;
+      cost_basis?: 'api' | 'equivalent' | null;
     })
   | (TurnEventBase & { type: 'stream.failed'; stream_id: string; error: ErrorInfo })
   | (TurnEventBase & {

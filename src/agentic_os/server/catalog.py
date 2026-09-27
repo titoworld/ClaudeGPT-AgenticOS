@@ -9,15 +9,14 @@ last known list, or only the default model, is answered meanwhile with ``live: f
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import Final
 
 from agentic_os.config import Settings
-from agentic_os.domain import AGENTS, AgentName, ProviderMode
+from agentic_os.domain import AGENTS, AgentName
 from agentic_os.fx import FxRate
 from agentic_os.pricing import DEFAULT_PRICES, ModelPrice, normalize_model
 from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus
@@ -34,37 +33,20 @@ MODELS_TTL_SECONDS: Final = 600.0
 FALLBACK_TTL_SECONDS: Final = 60.0
 """A fallback (not live) list is retried sooner."""
 
-FAST_MODEL_DEFAULTS: Final[Mapping[tuple[AgentName, ProviderMode], str]] = {
-    ("claude", "cli"): "haiku",
-    ("claude", "api"): "claude-haiku-4-5",
-    ("chatgpt", "cli"): "gpt-6-luna",
-    ("chatgpt", "api"): "gpt-6-luna",
-}
-"""Model of the cheap internal calls (summaries) of each provider when neither the
-dashboard nor ``AOS_*_FAST_MODEL`` choose one. Demo providers use ``fake-<agent>-mini``."""
-
 Wire = dict[str, object]
-
-
-def default_fast_model(agent: AgentName, mode: ProviderMode, settings: Settings) -> str:
-    """The provider's own summary model: ``AOS_*_FAST_MODEL`` or the built-in default."""
-    if mode == "fake":
-        return f"fake-{agent}-mini"
-    configured = settings.claude_fast_model if agent == "claude" else settings.chatgpt_fast_model
-    return configured or FAST_MODEL_DEFAULTS[(agent, mode)]
 
 
 def effective_models(
     agent: AgentName,
-    mode: ProviderMode,
+    provider: Provider,
     provider_model: str,
     runtime: RuntimeSettings,
-    settings: Settings,
 ) -> tuple[str, str]:
     """``(default_model, fast_model)`` of an agent: the owner's choice from the
-    dashboard, else the provider's (``provider_model`` is the one its status reports)."""
+    dashboard, else the provider's (``provider_model`` is the one its status reports;
+    the provider's fast model already honours ``AOS_*_FAST_MODEL``)."""
     default = runtime.models.get(agent) or provider_model
-    fast = runtime.fast_models.get(agent) or default_fast_model(agent, mode, settings)
+    fast = runtime.fast_models.get(agent) or provider.fast_model
     return default, fast
 
 
@@ -73,22 +55,6 @@ class ModelListing:
     models: tuple[ModelInfo, ...]
     live: bool
     """False when the provider answered with its static fallback list."""
-
-
-def _accepts_refresh(method: Callable[..., object]) -> bool:
-    try:
-        return "refresh" in inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        return False
-
-
-async def _list_models(provider: Provider, refresh: bool) -> Sequence[ModelInfo]:
-    """``provider.list_models()``, bypassing the provider's own cache on ``refresh``
-    when the implementation supports it (``list_models(*, refresh=True)``)."""
-    if refresh and _accepts_refresh(provider.list_models):
-        method = cast(Callable[..., Awaitable[Sequence[ModelInfo]]], provider.list_models)
-        return await method(refresh=True)
-    return await provider.list_models()
 
 
 class ModelCatalog:
@@ -151,9 +117,7 @@ class ModelCatalog:
             provider_model = status_models.get(agent, "")
             if not provider_model and listing is not None:
                 provider_model = next((m.id for m in listing.models if m.is_default), "")
-            default, fast = effective_models(
-                agent, provider.mode, provider_model, runtime, self._settings
-            )
+            default, fast = effective_models(agent, provider, provider_model, runtime)
             if listing is None:
                 models: tuple[ModelInfo, ...] = (
                     (ModelInfo(id=default, label=default, is_default=True),) if default else ()
@@ -188,7 +152,9 @@ class ModelCatalog:
     async def _fetch(self, agent: AgentName, refresh: bool) -> ModelListing | None:
         provider = self._providers[agent]
         try:
-            models = await asyncio.wait_for(_list_models(provider, refresh), self._hard_timeout)
+            models = await asyncio.wait_for(
+                provider.list_models(refresh=refresh), self._hard_timeout
+            )
         except TimeoutError:
             logger.warning("Listing the models of %s timed out", agent)
             return None
@@ -197,8 +163,7 @@ class ModelCatalog:
             return None
         if not models:
             return None
-        live = getattr(provider, "models_live", True)
-        listing = ModelListing(tuple(models), live=live if isinstance(live, bool) else True)
+        listing = ModelListing(tuple(models), live=provider.models_live)
         ttl = self._ttl if listing.live else min(self._ttl, FALLBACK_TTL_SECONDS)
         self._cache[agent] = (self._monotonic() + ttl, listing)
         return listing

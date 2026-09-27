@@ -104,7 +104,15 @@ class FlakyProvider:
     async def status(self) -> ProviderStatus:
         return await self.inner.status()
 
-    async def list_models(self) -> Sequence[ModelInfo]:
+    @property
+    def fast_model(self) -> str:
+        return "fast"
+
+    @property
+    def models_live(self) -> bool:
+        return True
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
         model = "flaky"
         return (ModelInfo(id=model, label=model, is_default=True),)
 

@@ -73,7 +73,15 @@ class GateProvider:
     async def status(self) -> ProviderStatus:
         return ProviderStatus(self._agent, "fake", True, "gate", "Porta")
 
-    async def list_models(self) -> Sequence[ModelInfo]:
+    @property
+    def fast_model(self) -> str:
+        return "fast"
+
+    @property
+    def models_live(self) -> bool:
+        return True
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
         model = "gate"
         return (ModelInfo(id=model, label=model, is_default=True),)
 

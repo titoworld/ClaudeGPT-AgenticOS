@@ -457,11 +457,12 @@ class App {
         break;
       }
       case 'stream.completed': {
-        // Live events do not say how the cost was obtained: the provider mode does.
+        // The server says how the cost was obtained; older servers only imply it
+        // through the provider mode.
         const stream = turn.streams.find((s) => s.id === ev.stream_id);
         if (stream && !stream.costBasis) {
           const mode = this.providers.find((p) => p.agent === stream.agent)?.mode;
-          stream.costBasis = inferCostBasis(mode, ev.usage);
+          stream.costBasis = ev.cost_basis ?? inferCostBasis(mode, ev.usage);
         }
         break;
       }

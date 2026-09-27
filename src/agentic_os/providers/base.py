@@ -140,9 +140,20 @@ class Provider(Protocol):
 
     async def status(self) -> ProviderStatus: ...
 
-    async def list_models(self) -> Sequence[ModelInfo]:
+    @property
+    def fast_model(self) -> str:
+        """Model of the cheap internal calls (summaries) when none is requested."""
+        ...
+
+    @property
+    def models_live(self) -> bool:
+        """Whether the latest :meth:`list_models` came from the vendor (not a fallback)."""
+        ...
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
         """Models available to this provider, queried live when the vendor allows it
-        (cached by the provider). Never raises: falls back to a static list."""
+        (cached by the provider; ``refresh`` bypasses the cache). Never raises: falls
+        back to a static list."""
         ...
 
     async def aclose(self) -> None: ...

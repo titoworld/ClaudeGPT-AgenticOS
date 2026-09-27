@@ -397,7 +397,7 @@ class Engine:
             if debate.synthesizer not in AGENTS:
                 return ErrorInfo("invalid", "Agent sintetitzador desconegut.")
         for model in (*request.models.values(), *request.fast_models.values()):
-            if not isinstance(model, str) or not _MODEL_ID.match(model):
+            if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
                 return ErrorInfo("invalid", "Identificador de model invàlid.")
         for agent in self._agents(request):
             if agent not in self._providers:
@@ -1018,6 +1018,7 @@ class Engine:
                 result.ttft_ms,
                 agreement=agreement,
                 unchanged=unchanged,
+                cost_basis=_cost_basis(provider.mode, usage),
             )
         )
         return _Outcome(

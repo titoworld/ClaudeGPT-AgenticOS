@@ -422,7 +422,7 @@ def _describe_models(
 ) -> None:
     from agentic_os.server.catalog import effective_models
 
-    default, fast = effective_models(agent, provider.mode, provider_model, runtime, settings)
+    default, fast = effective_models(agent, provider, provider_model, runtime)
     chosen = " (triat al tauler)" if runtime.models.get(agent) else ""
     chosen_fast = " (triat al tauler)" if runtime.fast_models.get(agent) else ""
     report.detail(

@@ -109,9 +109,10 @@ interface AgentSpend {
   api_usd: number;             // cost real de les crides en mode api
   equivalent_usd: number;      // valor de les crides en mode cli a preus d'API
   unpriced_calls: number;      // crides de models sense preu conegut
-  budget_eur: number | null;  budget_used: number | null;   // 0–1+ (api_usd en € / pressupost)
-  plan_eur: number | null;    plan_value: number | null;    // 0–1+ (equivalent en € / preu del pla)
+  budget_eur: number | null;  budget_used: number | null;   // 0–1+ (api_usd en € / pressupost); null sense pressupost
+  plan_eur: number | null;    plan_value: number | null;    // 0–1+ (equivalent en € / preu del pla); null sense preu
 }
+// equivalent_usd inclou tota crida que no és d'API i té preu (també les de demostració si els poses preu).
 
 interface MonthSpend {
   month: string;               // "AAAA-MM" (UTC)
@@ -183,7 +184,7 @@ Una sola connexió persistent per pestanya. El servidor tanca amb el codi `4401`
 {"type": "ping", "t": 1727450000000}
 ```
 
-`mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. Límit: 3 torns simultanis i un de sol per conversa.
+`mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. A `models` (i als `RuntimeSettings`), `null` o `""` vol dir el model per defecte; els identificadors es netegen d'espais. Límit: 3 torns simultanis i un de sol per conversa.
 
 ### Servidor → client
 
@@ -197,7 +198,7 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`) |
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
 | `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
-| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged` | Resposta acabada i desada |
+| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis` | Resposta acabada i desada |
 | `stream.failed` | `stream_id`, `error: {kind, message}` | Aquell model ha fallat (el torn pot continuar amb l'altre) |
 | `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached` | Torn acabat |
 | `turn.failed` | `error: {kind, message}` | Torn avortat |

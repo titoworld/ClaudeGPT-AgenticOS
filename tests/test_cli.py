@@ -150,7 +150,15 @@ class StaticProvider:
     async def status(self) -> ProviderStatus:
         return self._status
 
-    async def list_models(self) -> Sequence[ModelInfo]:
+    @property
+    def fast_model(self) -> str:
+        return "haiku" if self.agent == "claude" else "gpt-6-luna"
+
+    @property
+    def models_live(self) -> bool:
+        return True
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
         model = self._status.model
         return (ModelInfo(id=model, label=model, is_default=True),)
 
