@@ -88,28 +88,32 @@ async def auth_state(request: Request, state: StateDep) -> JSONResponse:
 
 @router.post("/login", status_code=204)
 async def login(request: Request, state: StateDep) -> Response:
-    now = state.clock()
     ip = client_ip(request)
-    wait = await state.throttle.retry_after(ip, now)
+    wait = await state.throttle.retry_after(ip, state.clock())
     if wait > 0:
         return _too_many_attempts(wait)
+    # The body is read outside the lock: a slow upload must not block other logins.
     password, code = _credentials(await read_json(request))
+    async with state.login_lock:
+        now = state.clock()
+        wait = await state.throttle.retry_after(ip, now)  # again, atomically this time
+        if wait > 0:
+            return _too_many_attempts(wait)
+        owner = await state.store.get_owner()
+        step: int | None = None
+        if owner is None:
+            await verify_password_async(await _dummy_password_hash(), password)
+            password_ok = False
+        else:
+            password_ok = await verify_password_async(owner.password_hash, password)
+            step = totp.verify(code, owner.totp_secret, owner.totp_last_step, now=now)
+        # The TOTP step is consumed (replay protection) only with the right password.
+        ok = password_ok and step is not None and await state.store.consume_totp_step(step)
+        if owner is None or not ok:
+            await state.throttle.record_failure(ip, now)
+            raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
+        await state.throttle.record_success(ip)
 
-    owner = await state.store.get_owner()
-    step: int | None = None
-    if owner is None:
-        await verify_password_async(await _dummy_password_hash(), password)
-        password_ok = False
-    else:
-        password_ok = await verify_password_async(owner.password_hash, password)
-        step = totp.verify(code, owner.totp_secret, owner.totp_last_step, now=now)
-    # The TOTP step is consumed (replay protection) only with the right password.
-    ok = password_ok and step is not None and await state.store.consume_totp_step(step)
-    if owner is None or not ok:
-        await state.throttle.record_failure(ip, now)
-        raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
-
-    await state.throttle.record_success(ip)
     if needs_rehash(owner.password_hash):
         try:
             await state.store.update_password_hash(await hash_password_async(password))

@@ -339,6 +339,15 @@ async def test_login_lockout_with_retry_after(tmp_path: Path) -> None:
         assert (await h.login()).status_code == 204
 
 
+async def test_parallel_attempts_cannot_bypass_the_lockout(tmp_path: Path) -> None:
+    async with running(make_settings(tmp_path, login_max_failures=2)) as h:
+        await h.add_owner()
+        responses = await asyncio.gather(
+            *(h.login(password=f"contrasenya incorrecta {i}") for i in range(6))
+        )
+    assert sorted(r.status_code for r in responses) == [401, 401, 429, 429, 429, 429]
+
+
 async def test_session_idle_and_absolute_expiry(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, session_idle_hours=1, session_max_days=1)
     async with running(settings) as h:

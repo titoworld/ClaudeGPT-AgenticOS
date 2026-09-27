@@ -6,9 +6,10 @@ parameters: FastAPI resolves string annotations late and can get them wrong
 from ``request.cookies`` with the name from the settings instead.
 """
 
+import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Final
 
@@ -44,6 +45,9 @@ class AppState:
     turns: TurnManager
     monitor: ProviderMonitor
     clock: Callable[[], datetime]
+    login_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Serializes login attempts so the throttle check and the failure count are
+    atomic: parallel requests cannot test more passwords than the lockout allows."""
 
     @property
     def cookie_name(self) -> str:
