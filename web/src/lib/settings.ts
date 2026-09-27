@@ -10,8 +10,8 @@ export const LIMITS = {
   eur_per_usd: { min: 0.2, max: 5 },
   /** Monthly budgets and plan prices, in euros. */
   eur: { min: 0, max: 100_000 },
-  /** USD per million tokens. */
-  price: { min: 0, max: 10_000 },
+  /** USD per million tokens (storage/models.py MAX_PRICE_PER_MTOK). */
+  price: { min: 0, max: 100_000 },
 } as const;
 
 export const DEFAULT_EUR_PER_USD = 0.86;
@@ -84,9 +84,12 @@ function checkNumber(value: unknown, min: number, max: number): string | null {
   return null;
 }
 
-/** Optional amount in euros: empty (null) means "not set". */
+export const INVALID_AMOUNT = 'Escriu un import vàlid, sense separador de milers (p. ex. 1000 o 50,5).';
+
+/** Optional amount in euros: empty (null) means "not set"; NaN is text that is not an amount. */
 function checkEuros(value: unknown): string | null {
   if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isNaN(value)) return INVALID_AMOUNT;
   if (!isNumber(value) || value < LIMITS.eur.min) return 'Ha de ser un import de 0 € o més.';
   if (value > LIMITS.eur.max) return `Com a màxim ${ca(LIMITS.eur.max)} €.`;
   return null;
@@ -134,6 +137,42 @@ export function validateSettings(s: RuntimeSettings): SettingsErrors {
   }
   for (const [model, price] of Object.entries(s.prices)) set(`price:${model}`, validatePrice(model, price));
   return errors;
+}
+
+// ------------------------------------------------------------ amounts typed as text
+
+const AMOUNT = /^(-?)(\d*)(?:([.,])(\d*))?$/;
+
+/**
+ * Euro amount typed by the owner: `null` when empty, NaN when it is not an
+ * amount (validation reports it instead of clearing the saved value). Both ','
+ * (Catalan) and '.' are decimal separators; "1.000" is rejected because in
+ * Catalan it means a thousand, not one.
+ */
+export function parseAmount(text: string): number | null {
+  const s = text.trim();
+  if (!s) return null;
+  const m = AMOUNT.exec(s);
+  if (!m) return Number.NaN;
+  const [, sign = '', int = '', sep, frac = ''] = m;
+  if (!int && !frac) return Number.NaN;
+  if (sep === '.' && frac.length === 3 && /[1-9]/.test(int)) return Number.NaN;
+  return Number(`${sign}${int || '0'}.${frac || '0'}`);
+}
+
+/** Text of a saved amount, with the Catalan decimal comma ("" when not set). */
+export function formatAmount(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '';
+  return value.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 }).replace('.', ',');
+}
+
+/**
+ * Text an amount input should show for `value`: what the owner typed while it
+ * still means that value (NaN included), else the value itself (e.g. the form was
+ * reset with the saved settings).
+ */
+export function amountText(typed: string, value: number | null | undefined): string {
+  return Object.is(parseAmount(typed), value ?? null) ? typed : formatAmount(value);
 }
 
 /** Empty number inputs bind to null (or undefined); the wire format wants null. */

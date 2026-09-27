@@ -152,6 +152,9 @@ class _Turn:
     """Owner price overrides (over the default prices) for this turn's costs."""
     context: TurnContext = field(default_factory=lambda: build_context(None, ()))
     accounting: TurnAccounting = field(default_factory=TurnAccounting)
+    compaction_usage: Usage | None = None
+    """Priced usage of this turn's compaction summary calls, when any reached a model
+    (stored on the question as ``meta.compaction_usage``)."""
     stored: list[NewMessage] = field(default_factory=list)
     """Assistant messages in storage order (what the cache replays)."""
     final_ids: list[int] = field(default_factory=list)
@@ -339,13 +342,18 @@ class Engine:
             if cached is not None and cached.mode != request.mode:
                 cached = None
 
+        question_meta = self._question_meta(request, agents)
+        if turn.compaction_usage is not None:
+            # The summary ran before the question existed: its cost travels with the
+            # question so a reloaded turn adds up to the live TurnCompleted.usage.
+            question_meta["compaction_usage"] = _usage_json(turn.compaction_usage)
         turn.turn_id = await self._store.add_message(
             NewMessage(
                 conversation_id=turn.conversation_id,
                 kind="question",
                 content=turn.question,
                 final=True,
-                meta=self._question_meta(request, agents),
+                meta=question_meta,
             )
         )
         turn.emit(
@@ -475,9 +483,12 @@ class Engine:
             models=turn.request.fast_models,
             price_overrides=turn.prices,
         )
-        if result is None:
+        if result.billed:
+            # Billed even when the summary came back empty: part of the turn's usage.
+            turn.accounting.add_spent(result.usage)
+            turn.compaction_usage = result.usage
+        if result.context is None:
             return context
-        turn.accounting.add_summary(result.usage)
         turn.accounting.compaction_per_request = result.tokens_removed
         return result.context
 
@@ -896,8 +907,6 @@ class Engine:
         attempt = 0
         while True:
             attempt += 1
-            if carries_context:
-                turn.accounting.add_context_request()
             parser = RevisionStreamParser() if kind == "revision" else None
             progress = _Progress()
             started = time.monotonic()
@@ -925,6 +934,10 @@ class Engine:
                 continue
             return self._stream_failed(turn, agent, stream_id, error)
 
+        if carries_context:
+            # Only a call that reached a model and returned a result sent the compacted
+            # context (an empty reply did too); failed attempts saved nothing.
+            turn.accounting.add_context_request()
         critique: str | None = None
         agreement: int | None = None
         unchanged = False
@@ -933,14 +946,18 @@ class Engine:
                 turn.emit(StreamDelta(turn.request_id, stream_id, section, text))
             parsed = parser.final()
             critique, agreement = parsed.critique, parsed.agreement
-            if parsed.unchanged or not parsed.answer:
-                # The agent keeps its answer: show it again so the live view matches the store.
-                unchanged = True
+            if parsed.answer and not parsed.unchanged:
+                content = parsed.answer
+            elif not parsed.unchanged and not parsed.critique and parsed.agreement is None:
+                content = ""  # nothing usable came back: fails as an empty response
+            else:
+                # UNCHANGED keeps the answer on purpose; a reply cut off before its
+                # answer (or without one) keeps it too, so the debate goes on, but it is
+                # not reported as unchanged. Show it again so the live view matches.
+                unchanged = parsed.unchanged
                 content = previous or ""
                 if content:
                     turn.emit(StreamDelta(turn.request_id, stream_id, "answer", content))
-            else:
-                content = parsed.answer
         else:
             content = result.text.strip()
 
@@ -948,6 +965,8 @@ class Engine:
             result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, turn.prices)
         )
         if not content:
+            # Billed all the same: it counts in the turn's usage (not in its savings).
+            turn.accounting.add_spent(usage)
             error = ProviderError("El model ha retornat una resposta buida.", kind="invalid")
             await self._record_usage(
                 turn,

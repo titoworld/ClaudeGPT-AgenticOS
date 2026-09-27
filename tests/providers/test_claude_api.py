@@ -26,6 +26,9 @@ from agentic_os.providers.claude_api import (
     FALLBACK_BETA,
     STATIC_MODELS,
     ClaudeApiProvider,
+    ModelSupport,
+    RefusalError,
+    model_support,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
 
@@ -221,6 +224,51 @@ def request(purpose: Purpose = "answer", **overrides: Any) -> GenerationRequest:
     return GenerationRequest(system=SYSTEM, prompt="Hola, qui ets?", purpose=purpose, **overrides)
 
 
+def fallback_block(index: int, source: str, target: str, category: str | None) -> list[Event]:
+    block = {
+        "type": "fallback",
+        "from": {"model": source},
+        "to": {"model": target},
+        "trigger": {"type": "refusal", "category": category},
+    }
+    return [
+        (
+            "content_block_start",
+            {"type": "content_block_start", "index": index, "content_block": block},
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": index}),
+    ]
+
+
+def iteration(
+    kind: str, model: str, input_tokens: int, output_tokens: int, cache_read: int = 0
+) -> dict[str, Any]:
+    return {
+        "type": kind,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": 0,
+    }
+
+
+def final_delta(
+    stop_reason: str,
+    usage: dict[str, Any],
+    stop_details: dict[str, Any] | None = None,
+) -> list[Event]:
+    delta = {"stop_reason": stop_reason, "stop_sequence": None, "stop_details": stop_details}
+    return [
+        ("message_delta", {"type": "message_delta", "delta": delta, "usage": usage}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+
+
+def refusal_details(category: str | None) -> dict[str, Any]:
+    return {"type": "refusal", "category": category, "explanation": None}
+
+
 # -- streaming and request shape ------------------------------------------------------------
 
 
@@ -312,6 +360,65 @@ async def test_empty_system_prompt_is_omitted(tmp_path: Path) -> None:
     assert "system" not in api.body
 
 
+ADAPTIVE = ModelSupport("adaptive", effort=True)
+BUDGET = ModelSupport("budget", effort=False)
+NONE = ModelSupport("none", effort=False)
+
+
+@pytest.mark.parametrize(
+    ("model", "support"),
+    [
+        ("claude-opus-5", ADAPTIVE),
+        ("claude-opus-5-5", ADAPTIVE),
+        ("claude-sonnet-5", ADAPTIVE),
+        ("claude-fable-5-1", ADAPTIVE),
+        ("claude-mythos-5-1", ADAPTIVE),
+        ("claude-opus-4-8", ADAPTIVE),
+        ("claude-opus-4-6", ADAPTIVE),
+        ("claude-sonnet-4-6", ADAPTIVE),
+        ("claude-opus-6-preview", ADAPTIVE),
+        ("claude-sonnet-4-5", BUDGET),
+        ("claude-sonnet-4-5-20250929", BUDGET),
+        ("claude-opus-4-5", BUDGET),
+        ("claude-opus-4-1-20250805", BUDGET),
+        ("claude-opus-4-20250514", BUDGET),
+        ("claude-sonnet-4-0", BUDGET),
+        ("claude-3-7-sonnet-20250219", BUDGET),
+        ("claude-haiku-4-5", NONE),
+        ("claude-3-haiku-20240307", NONE),
+        ("claude-3-5-sonnet-20241022", NONE),
+        ("claude-experimental", NONE),
+    ],
+)
+def test_model_support_by_id(model: str, support: ModelSupport) -> None:
+    assert model_support(model) == support
+
+
+@pytest.mark.parametrize(
+    ("model", "purpose", "thinking", "max_tokens"),
+    [
+        ("claude-sonnet-4-5", "answer", {"type": "enabled", "budget_tokens": 8000}, 16_000),
+        ("claude-opus-4-1", "revision", {"type": "enabled", "budget_tokens": 4096}, 16_000),
+        ("claude-opus-4-5", "summary", {"type": "enabled", "budget_tokens": 2048}, 16_000),
+        ("claude-3-5-sonnet-20241022", "answer", None, 8000),
+    ],
+)
+async def test_models_without_adaptive_thinking_get_neither_it_nor_effort(
+    tmp_path: Path, model: str, purpose: Purpose, thinking: dict[str, Any] | None, max_tokens: int
+) -> None:
+    # Adaptive thinking and effort start with the 4.6 models: older ones answer both
+    # with a 400, so they think with a budget (or not at all).
+    api = MockApi(replying(answer(model, ["ok"])))
+    await run(api, request(purpose, model=model), make_settings(tmp_path))
+    body = api.body
+    assert body.get("thinking") == thinking
+    assert "output_config" not in body and "fallbacks" not in body
+    assert body["max_tokens"] == max_tokens
+
+
+# -- model list ------------------------------------------------------------------------------
+
+
 # -- refusals and errors ------------------------------------------------------------------------
 
 
@@ -327,6 +434,168 @@ async def test_refusal_is_invalid(tmp_path: Path) -> None:
     error = await run_error(MockApi(replying(body)), request(), make_settings(tmp_path))
     assert error.kind == "invalid" and not error.retryable
     assert "cyber" in error.message
+
+
+@pytest.mark.parametrize(
+    ("category", "output_tokens", "billed"),
+    [
+        ("cyber", 300, True),  # mid-stream: input and streamed output are billed
+        (None, 300, True),
+        ("cyber", 0, False),  # before any output: billed only in some categories
+        ("general_harms", 0, False),
+        (None, 0, False),
+        ("bio", 0, True),
+        ("frontier_llm", 0, True),
+        ("reasoning_extraction", 0, True),
+    ],
+)
+async def test_refusal_error_carries_the_billed_usage(
+    tmp_path: Path, category: str | None, output_tokens: int, billed: bool
+) -> None:
+    start = message_start("claude-opus-5", cache_read=1000, cache_write=200)
+    start[1]["message"]["usage"]["input_tokens"] = 50_000
+    parts = ["Resposta que es talla"] if output_tokens else []
+    body = sse(
+        [
+            start,
+            *(text_block(0, parts) if parts else []),
+            *message_end("refusal", output_tokens, refusal_details(category)),
+        ]
+    )
+    error = await run_error(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert isinstance(error, RefusalError)
+    assert (error.kind, error.retryable, error.model) == ("invalid", False, "claude-opus-5")
+    # The engine reads it this way to record the cost of the failed call.
+    assert getattr(error, "usage", None) == error.usage
+    expected = Usage(
+        input_tokens=50_000,
+        output_tokens=output_tokens,
+        cache_read_tokens=1000,
+        cache_write_tokens=200,
+        reasoning_tokens=7,
+    )
+    assert error.usage == (expected if billed else Usage())
+    assert error.usage.cost_usd is None  # the engine prices it
+
+
+async def test_mid_stream_fallback_counts_the_declined_attempt(tmp_path: Path) -> None:
+    # Fable 5.1 streams part of the answer, declines, and Opus 4.8 continues. Top-level
+    # usage covers only the serving attempt; usage.iterations holds both.
+    iterations = [
+        iteration("message", "claude-fable-5-1", 20_000, 800, cache_read=500),
+        iteration("fallback_message", "claude-opus-4-8", 20_100, 1200),
+    ]
+    start = message_start("claude-fable-5-1", cache_read=500, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 20_000
+    usage = {
+        "input_tokens": 20_100,
+        "output_tokens": 1200,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens_details": {"thinking_tokens": 90},
+        "iterations": iterations,
+    }
+    body = sse(
+        [
+            start,
+            *text_block(0, ["Part ", "one "]),
+            *fallback_block(1, "claude-fable-5-1", "claude-opus-4-8", "cyber"),
+            *text_block(2, ["part two."]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    req = request(model="claude-fable-5-1")
+    deltas, result = await run(MockApi(replying(body)), req, make_settings(tmp_path))
+    assert "".join(deltas) == result.text == "Part one part two."
+    assert result.model == "claude-opus-4-8"
+    assert result.usage == Usage(
+        input_tokens=40_100,
+        output_tokens=2000,
+        cache_read_tokens=500,
+        cache_write_tokens=0,
+        reasoning_tokens=90,
+    )
+
+
+@pytest.mark.parametrize(("category", "billed"), [("cyber", False), ("bio", True)])
+async def test_pre_output_fallback_counts_only_a_billed_decline(
+    tmp_path: Path, category: str, billed: bool
+) -> None:
+    # A decline before any output: message_start already names the fallback model and
+    # the fallback block comes first. The declined attempt is billed by its category.
+    iterations = [
+        iteration("message", "claude-opus-5", 535, 0),
+        iteration("fallback_message", "claude-opus-4-8", 412, 264),
+    ]
+    start = message_start("claude-opus-4-8", cache_read=0, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 412
+    usage = {"input_tokens": 412, "output_tokens": 264, "iterations": iterations}
+    body = sse(
+        [
+            start,
+            *fallback_block(0, "claude-opus-5", "claude-opus-4-8", category),
+            *text_block(1, ["Hola!"]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert result.model == "claude-opus-4-8"
+    served = Usage(input_tokens=412, output_tokens=264)
+    assert result.usage == (served + Usage(input_tokens=535) if billed else served)
+
+
+async def test_refusal_after_a_fallback_bills_every_billed_attempt(tmp_path: Path) -> None:
+    # Fable 5.1 declines mid-stream, Opus 4.8 also declines before any output (cyber,
+    # not billed): the refusal carries the Fable attempt only.
+    iterations = [
+        iteration("message", "claude-fable-5-1", 9000, 400),
+        iteration("fallback_message", "claude-opus-4-8", 9100, 0),
+    ]
+    start = message_start("claude-fable-5-1", cache_read=0, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 9000
+    usage = {"input_tokens": 9100, "output_tokens": 0, "iterations": iterations}
+    body = sse(
+        [
+            start,
+            *text_block(0, ["Comença"]),
+            *fallback_block(1, "claude-fable-5-1", "claude-opus-4-8", "cyber"),
+            *final_delta("refusal", usage, refusal_details("cyber")),
+        ]
+    )
+    req = request(model="claude-fable-5-1")
+    error = await run_error(MockApi(replying(body)), req, make_settings(tmp_path))
+    assert isinstance(error, RefusalError) and error.model == "claude-opus-4-8"
+    assert error.usage == Usage(input_tokens=9000, output_tokens=400)
+
+
+@pytest.mark.parametrize(
+    "iterations",
+    [
+        # Sticky routing: the fallback model served directly, nothing declined.
+        [iteration("fallback_message", "claude-opus-4-8", 12, 25)],
+        # A plain call that reports its only iteration: never counted twice.
+        [iteration("message", "claude-opus-5", 12, 25)],
+    ],
+)
+async def test_iterations_without_a_declined_attempt_add_nothing(
+    tmp_path: Path, iterations: list[dict[str, Any]]
+) -> None:
+    usage = {
+        "input_tokens": 12,
+        "output_tokens": 25,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "iterations": iterations,
+    }
+    body = sse(
+        [
+            message_start(iterations[0]["model"], cache_read=0, cache_write=0),
+            *text_block(0, ["ok"]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert result.usage == Usage(input_tokens=12, output_tokens=25)
 
 
 @pytest.mark.parametrize(
@@ -430,10 +699,12 @@ async def test_aclose_closes_only_its_own_client(tmp_path: Path) -> None:
     await injected.close()
 
 
-# -- model list ------------------------------------------------------------------------------
-
-
-def model_entry(model_id: str, name: str, context: int = 1_000_000) -> dict[str, Any]:
+def model_entry(
+    model_id: str,
+    name: str,
+    context: int = 1_000_000,
+    capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "type": "model",
         "id": model_id,
@@ -441,7 +712,35 @@ def model_entry(model_id: str, name: str, context: int = 1_000_000) -> dict[str,
         "created_at": "2026-09-01T00:00:00Z",
         "max_input_tokens": context,
         "max_tokens": 128_000,
-        "capabilities": None,
+        "capabilities": capabilities,
+    }
+
+
+def capabilities(
+    *, adaptive: bool, enabled: bool, effort: bool, low: bool = True
+) -> dict[str, Any]:
+    def yes(flag: bool) -> dict[str, bool]:
+        return {"supported": flag}
+
+    return {
+        "batch": yes(True),
+        "citations": yes(True),
+        "code_execution": yes(True),
+        "context_management": {"supported": True},
+        "effort": {
+            "supported": effort,
+            "low": yes(effort and low),
+            "medium": yes(effort),
+            "high": yes(effort),
+            "max": yes(effort),
+        },
+        "image_input": yes(True),
+        "pdf_input": yes(True),
+        "structured_outputs": yes(True),
+        "thinking": {
+            "supported": adaptive or enabled,
+            "types": {"adaptive": yes(adaptive), "enabled": yes(enabled)},
+        },
     }
 
 
@@ -506,6 +805,68 @@ async def test_list_models_falls_back_without_raising(
     assert [m.id for m in models] == [model_id for model_id, _, _ in STATIC_MODELS]
     assert [m.id for m in models if m.is_default] == ["claude-opus-5"]
     assert all(m.description for m in models)
+
+
+async def test_listed_capabilities_decide_thinking_and_effort(tmp_path: Path) -> None:
+    page = models_page(
+        # Budget thinking plus effort (as Opus 4.5 reports), unlike the id-based guess.
+        model_entry(
+            "claude-opus-4-5-20251101",
+            "Claude Opus 4.5",
+            capabilities=capabilities(adaptive=False, enabled=True, effort=True),
+        ),
+        # An id the heuristic does not know, described as adaptive.
+        model_entry(
+            "claude-nova-1",
+            "Claude Nova 1",
+            capabilities=capabilities(adaptive=True, enabled=False, effort=True),
+        ),
+        # Effort without the low level: never sent.
+        model_entry(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            capabilities=capabilities(adaptive=True, enabled=False, effort=True, low=False),
+        ),
+        # Haiku keeps running without thinking whatever it supports.
+        model_entry(
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
+            200_000,
+            capabilities=capabilities(adaptive=False, enabled=True, effort=True),
+        ),
+    )
+
+    async def handler(sent: httpx2.Request) -> httpx2.Response:
+        if sent.url.path == "/v1/models":
+            return page
+        return ok(answer(json.loads(sent.content)["model"], ["ok"]))
+
+    api = MockApi(handler)
+    provider = ClaudeApiProvider(make_settings(tmp_path), api.client())
+    try:
+        await provider.list_models()
+        assert provider.models_live
+
+        async def sent_for(model: str) -> dict[str, Any]:
+            async for _ in provider.stream(request(model=model)):
+                pass
+            return api.body
+
+        body = await sent_for("claude-opus-4-5-20251101")
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 8000}
+        assert body["output_config"] == {"effort": "high"}
+        body = await sent_for("claude-nova-1")
+        assert body["thinking"] == {"type": "adaptive", "display": "omitted"}
+        assert body["output_config"] == {"effort": "high"}
+        body = await sent_for("claude-sonnet-5")
+        assert body["thinking"]["type"] == "adaptive" and "output_config" not in body
+        body = await sent_for("claude-haiku-4-5")
+        assert not {"thinking", "output_config"} & set(body)
+        # Not in the listing: judged by its id.
+        body = await sent_for("claude-sonnet-4-5")
+        assert body["thinking"]["type"] == "enabled" and "output_config" not in body
+    finally:
+        await provider.aclose()
 
 
 async def test_list_models_without_api_key(tmp_path: Path) -> None:

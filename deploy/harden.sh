@@ -12,7 +12,9 @@
 #   4. optional fail2ban jail for SSH (WITH_FAIL2BAN=1);
 #   5. swap file on small machines (< 3.5 GB RAM, no swap yet);
 #   6. Docker Engine + Compose plugin from Docker's official apt repository,
-#      with log rotation and settings that keep real client IPs.
+#      with log rotation and settings that keep real client IPs. Automatic
+#      updates do not cover it (a new Docker release is best installed while
+#      you watch): docs/DESPLEGAMENT.md, "Actualitzar", upgrades it monthly.
 #
 # Environment options:
 #   WITH_FAIL2BAN=1   also install fail2ban with an sshd jail
@@ -162,7 +164,6 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin prohibit-password
-MaxAuthTries 3
 LoginGraceTime 30
 X11Forwarding no
 EOF
@@ -288,6 +289,8 @@ EOF
   fi
   systemctl enable --now docker >/dev/null
   info "No afegeixo cap usuari al grup docker: equival a ser root. Fes servir sudo."
+  info "Docker no s'actualitza sol: un cop al mes, apt-get update && apt-get upgrade"
+  info "(docs/DESPLEGAMENT.md, apartat «Actualitzar»)."
 }
 
 main() {

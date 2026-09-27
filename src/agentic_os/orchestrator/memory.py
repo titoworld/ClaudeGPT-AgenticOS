@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_MAX_OUTPUT_TOKENS = 2000
 SUMMARY_PREFERENCE: tuple[AgentName, ...] = ("claude", "chatgpt")
+EMPTY_SUMMARY_ERROR = "invalid: El resum és buit."
+"""Usage-record error of a summary call that returned no text (billed all the same)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,14 +49,18 @@ class TurnContext:
 
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
-    context: TurnContext
-    """The compacted context."""
+    context: TurnContext | None
+    """The compacted context; None when no provider could write the summary (the
+    context is then left untouched)."""
     tokens_removed: int
     """Estimated tokens removed from every request that carries the context."""
     usage: Usage
-    """Usage of the summary call (priced)."""
-    agent: AgentName
-    """Agent that wrote the summary."""
+    """Priced usage of every summary call that returned a result, including one whose
+    summary came back empty (it was billed all the same)."""
+    agent: AgentName | None
+    """Agent that wrote the summary (None when none did)."""
+    billed: bool
+    """Whether any summary call returned a result, i.e. ``usage`` was spent."""
 
 
 def canonical_messages(messages: Sequence[StoredMessage]) -> tuple[StoredMessage, ...]:
@@ -130,15 +136,18 @@ async def compact(
     max_output_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
     models: Mapping[AgentName, str] | None = None,
     price_overrides: Mapping[str, ModelPrice] | None = None,
-) -> CompactionResult | None:
+) -> CompactionResult:
     """Summarize ``context.messages[:cut]`` (plus the previous summary) with a fast model.
 
     Claude is preferred, ChatGPT is the fallback. ``models`` picks the fast model per
     agent (the provider's own when missing). Every attempt is recorded as usage, priced
-    with ``price_overrides`` over the default prices. Returns None (context left
-    untouched) when no provider could write the summary.
+    with ``price_overrides`` over the default prices: an empty summary keeps its real
+    model and billed tokens. The result's ``context`` is None when no provider could
+    write the summary; its ``usage`` adds up every attempt that reached a model.
     """
     upto_message_id = context.messages[cut - 1].id
+    spent = Usage()
+    billed = False
     for agent in (a for a in SUMMARY_PREFERENCE if a in providers):
         provider = providers[agent]
         request = GenerationRequest(
@@ -154,9 +163,6 @@ async def compact(
         started = time.monotonic()
         try:
             result = await _collect(provider, request)
-            summary = result.text.strip()
-            if not summary:
-                raise ProviderError("El resum és buit.", kind="invalid")
         except Exception as exc:
             if isinstance(exc, ProviderError):
                 error = f"{exc.kind}: {exc.message}"
@@ -183,6 +189,11 @@ async def compact(
         usage = replace(
             result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, price_overrides)
         )
+        spent += usage
+        billed = True
+        summary = result.text.strip()
+        if not summary:
+            logger.warning("Compaction summary by %s came back empty", agent)
         await store.record_usage(
             UsageRecord(
                 conversation_id=conversation_id,
@@ -194,15 +205,19 @@ async def compact(
                 usage=usage,
                 latency_ms=result.latency_ms,
                 ttft_ms=result.ttft_ms,
-                ok=True,
+                ok=bool(summary),
+                error=None if summary else EMPTY_SUMMARY_ERROR,
             )
         )
+        if not summary:
+            continue
         await store.set_summary(conversation_id, summary, upto_message_id)
         compacted = build_context(summary, context.messages[cut:])
         return CompactionResult(
             context=compacted,
             tokens_removed=max(0, context.tokens - compacted.tokens),
-            usage=usage,
+            usage=spent,
             agent=agent,
+            billed=True,
         )
-    return None
+    return CompactionResult(context=None, tokens_removed=0, usage=spent, agent=None, billed=billed)

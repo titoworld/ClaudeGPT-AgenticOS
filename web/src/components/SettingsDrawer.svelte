@@ -12,6 +12,7 @@
   import type { SceneQuality } from '../scene/types';
   import AgentIcon from './AgentIcon.svelte';
   import AgentLabel from './AgentLabel.svelte';
+  import AmountInput from './AmountInput.svelte';
   import Icon from './Icon.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import PriceTable from './PriceTable.svelte';
@@ -45,12 +46,14 @@
     app.catalog?.[agent].mode ?? app.providers.find((p) => p.agent === agent)?.mode ?? null;
 
   // "Per defecte" here means the provider's own model. The catalog's defaults already
-  // include the saved choice, so they only name it while nothing is saved.
+  // include the saved choice, so they only name it while nothing is saved (and the
+  // catalog was fetched after the last save that changed it).
+  const catalogDefaults = (agent: Agent) => (app.catalogStale ? null : (app.catalog?.[agent] ?? null));
   const providerDefault = (agent: Agent): string | null =>
     app.providers.find((p) => p.agent === agent)?.model ||
-    (app.settings.models[agent] == null ? (app.catalog?.[agent].default_model ?? null) : null);
+    (app.settings.models[agent] == null ? (catalogDefaults(agent)?.default_model ?? null) : null);
   const providerFastDefault = (agent: Agent): string | null =>
-    app.settings.fast_models[agent] == null ? (app.catalog?.[agent].fast_model ?? null) : null;
+    app.settings.fast_models[agent] == null ? (catalogDefaults(agent)?.fast_model ?? null) : null;
 
   $effect(() => syncDialog(dialog, app.settingsOpen));
 
@@ -306,7 +309,7 @@
 
         <section>
           <h3>Pressupostos i plans</h3>
-          <p class="hint">Imports mensuals en euros. Deixa-ho en blanc si no en tens.</p>
+          <p class="hint">Imports mensuals en euros (p. ex. 50,5). Deixa-ho en blanc si no en tens.</p>
           <div class="money-grid">
             <span></span>
             <span class="col-head" id="{uid}-budget-head">Pressupost d'API</span>
@@ -316,13 +319,8 @@
               {@const planErr = shownErrors[`plans_eur.${agent}`]}
               <AgentLabel {agent} size={15} />
               <div class="money">
-                <input
+                <AmountInput
                   class="input"
-                  type="number"
-                  inputmode="decimal"
-                  min={LIMITS.eur.min}
-                  max={LIMITS.eur.max}
-                  step="0.01"
                   placeholder="—"
                   bind:value={form.budgets_eur[agent]}
                   aria-label="Pressupost mensual d'API de {AGENT_LABEL[agent]}, en euros"
@@ -331,13 +329,8 @@
                 {#if budgetErr}<small class="error-text">{budgetErr}</small>{/if}
               </div>
               <div class="money">
-                <input
+                <AmountInput
                   class="input"
-                  type="number"
-                  inputmode="decimal"
-                  min={LIMITS.eur.min}
-                  max={LIMITS.eur.max}
-                  step="0.01"
                   placeholder="—"
                   bind:value={form.plans_eur[agent]}
                   aria-label="Preu mensual de la subscripció de {AGENT_LABEL[agent]}, en euros"
@@ -586,18 +579,12 @@
     gap: 0.2rem;
   }
 
-  .money .input {
+  /* The input lives in AmountInput, outside this component's scope. */
+  .money :global(.input) {
     min-height: 2.25rem;
     padding: 0.4rem 1.7rem 0.4rem 0.65rem;
     text-align: right;
     font-variant-numeric: tabular-nums;
-    appearance: textfield;
-  }
-
-  .money .input::-webkit-inner-spin-button,
-  .money .input::-webkit-outer-spin-button {
-    appearance: none;
-    margin: 0;
   }
 
   .unit {

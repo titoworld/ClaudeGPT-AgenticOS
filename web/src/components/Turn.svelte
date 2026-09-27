@@ -6,6 +6,7 @@
   import { MODE_LABEL } from '../lib/text';
   import {
     DEFAULT_CONSENSUS_THRESHOLD,
+    INCOMPLETE_KIND,
     isTerminal,
     revisionRounds,
     streamsByAgent,
@@ -111,7 +112,10 @@
     {/if}
   {/if}
 
-  {#if turn.status === 'failed'}
+  {#if turn.status === 'failed' && turn.error?.kind === INCOMPLETE_KIND}
+    <!-- Stored turn that never finished: the server does not say whether it was stopped or failed. -->
+    <div class="banner"><Icon name="info" size={16} /><span>{turn.error.message}</span></div>
+  {:else if turn.status === 'failed'}
     <div class="banner bad" role="alert">
       <Icon name="alert" size={16} />
       <span><strong>El torn ha fallat.</strong> {turn.error?.message ?? ''}</span>

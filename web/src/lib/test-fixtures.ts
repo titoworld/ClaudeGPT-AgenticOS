@@ -108,3 +108,86 @@ export function debateMessages(): Message[] {
     message({ id: 47, turn_id: t, kind: 'synthesis', agent: 'claude', round: 2, content: 'Síntesi final', final: true, meta: { model: 'claude-sonnet', usage: usage(300, 60), latency_ms: 2000, ttft_ms: 350 } }),
   ];
 }
+
+export const priced = (input: number, output: number, costUsd: number): Usage => ({
+  ...usage(input, output),
+  cost_usd: costUsd,
+});
+
+// A duel that compacted the history first, with the numbers the real engine
+// produces (fake providers, priced): turn.completed.usage is the two answers
+// plus the summary call, which the question stores as meta.compaction_usage.
+const SUMMARY = priced(768, 54, 0.003114);
+const DUEL_CLAUDE = priced(456, 113, 0.003063);
+const DUEL_CHATGPT = priced(456, 122, 0.003198);
+
+export function compactedDuelEvents(requestId = 'req-c'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'phase', phase: 'compaction', round: 0 },
+    { type: 'turn.started', conversation_id: 3, turn_id: 9, mode: 'duel', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'fake-claude' },
+    { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'fake-chatgpt' },
+    {
+      type: 'stream.completed', stream_id: 'c', message_id: 10, usage: DUEL_CLAUDE, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    {
+      type: 'stream.completed', stream_id: 'g', message_id: 11, usage: DUEL_CHATGPT, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    {
+      type: 'turn.completed', conversation_id: 3, turn_id: 9, final_message_ids: [10, 11],
+      usage: priced(1680, 289, 0.009375),
+      savings: { cache: 0, compaction: 822, early_stop: 0, unchanged: 0, total: 822, cost_usd: 0.0039 },
+      consensus: null, cached: false,
+    },
+  ]);
+}
+
+export function compactedDuelMessages(): Message[] {
+  const savings = { cache: 0, compaction: 822, early_stop: 0, unchanged: 0, total: 822, cost_usd: 0.0039 };
+  return [
+    message({ id: 9, turn_id: 9, kind: 'question', content: 'I ara?', final: true, meta: { mode: 'duel', compaction_usage: SUMMARY } }),
+    message({
+      id: 10, turn_id: 9, kind: 'answer', agent: 'claude', final: true,
+      meta: { model: 'fake-claude', usage: DUEL_CLAUDE, cost_basis: 'equivalent', savings },
+    }),
+    message({
+      id: 11, turn_id: 9, kind: 'answer', agent: 'chatgpt', final: true,
+      meta: { model: 'fake-chatgpt', usage: DUEL_CHATGPT, cost_basis: 'equivalent', savings },
+    }),
+  ];
+}
+
+// A three-round debate stopped after revision round 1 (no consensus yet): what
+// the client sees live and what the server stored (no synthesis).
+const LONG_DEBATE = { debate: { rounds: 3, consensus_threshold: 85, synthesizer: 'claude' as const }, use_cache: false };
+
+export function cancelledDebateEvents(requestId = 'req-x'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 5, turn_id: 20, mode: 'debate', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.started', stream_id: 'g0', agent: 'chatgpt', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.completed', stream_id: 'c0', message_id: 21, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    { type: 'stream.completed', stream_id: 'g0', message_id: 22, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    { type: 'phase', phase: 'revision', round: 1 },
+    { type: 'stream.started', stream_id: 'c1', agent: 'claude', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.started', stream_id: 'g1', agent: 'chatgpt', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.completed', stream_id: 'c1', message_id: 23, usage: usage(20, 5), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
+    { type: 'stream.completed', stream_id: 'g1', message_id: 24, usage: usage(20, 5), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
+    { type: 'turn.cancelled' },
+  ]);
+}
+
+export function cancelledDebateMessages(): Message[] {
+  const t = 20;
+  return [
+    message({ id: 20, turn_id: t, kind: 'question', content: 'Debat llarg', final: true, meta: { mode: 'debate', options: LONG_DEBATE } }),
+    message({ id: 21, turn_id: t, kind: 'answer', agent: 'claude', meta: { model: 'm', usage: usage(10, 5) } }),
+    message({ id: 22, turn_id: t, kind: 'answer', agent: 'chatgpt', meta: { model: 'm', usage: usage(10, 5) } }),
+    message({ id: 23, turn_id: t, kind: 'revision', agent: 'claude', round: 1, meta: { model: 'm', usage: usage(20, 5), agreement: 60 } }),
+    message({ id: 24, turn_id: t, kind: 'revision', agent: 'chatgpt', round: 1, meta: { model: 'm', usage: usage(20, 5), agreement: 60 } }),
+  ];
+}

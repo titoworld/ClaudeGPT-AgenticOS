@@ -32,3 +32,19 @@ La recerca (setembre 2026, versions 2.1.283 i 0.157.1) va verificar:
 - Les versions de les CLI queden fixades a la imatge Docker; `app-server` és experimental i una actualització pot trencar el protocol.
 - Si Anthropic o OpenAI canvien els termes o la facturació, n'hi ha prou de canviar `AOS_*_MODE=api`.
 - Una `ANTHROPIC_API_KEY` a l'entorn de la CLI passaria per davant de la subscripció: l'entorn dels processos és una llista tancada.
+
+## Nota (2026-09-27): les eines de Codex
+
+La decisió no canvia; aquesta nota corregeix una afirmació de la secció «Decisió». «Sense eines» només és exacte per a Claude: amb `--tools ""` la petició no declara cap eina. Una revisió de seguretat amb Codex 0.157.1 va comprovar que el catàleg de models que porta incorporat activa, per als models `gpt-6-*`, el mode de codi i els subagents, i que la configuració no ho desactiva. ChatGPT continua rebent:
+
+- una eina de codi (`exec`) que s'executa dins del mateix procés d'`app-server`, en un entorn aïllat V8 sense accés als fitxers ni a la xarxa;
+- les eines de subagents (`spawn_agent` i relacionades), que obren fils nous dins del mateix `app-server`.
+
+Una injecció de prompt (un text enganxat o la resposta de Claude dins d'un debat) pot fer que ChatGPT les faci servir: gastar CPU amb bucles o obrir subagents que continuen consumint el pla quan la crida ja ha acabat. Mitigacions aplicades:
+
+- `agents.max_threads=1`: com a màxim un subagent per crida;
+- l'aplicació interromp qualsevol torn d'un fil que no pertanyi a una crida en curs;
+- límit de CPU del contenidor de l'aplicació (`cpus`, `APP_CPUS` a `.env`);
+- l'estat SQLite i els registres de Codex, que guarden el text de cada crida, viuen en un tmpfs privat (`/run/codex-state`, `AOS_CODEX_STATE_DIR`), fora de `CODEX_HOME`, dels volums i de les còpies de seguretat.
+
+Treure-les del tot vol dir fixar un catàleg de models propi sense aquestes eines (`model_catalog_json`): congelaria la llista de models (els nous només funcionarien pel seu identificador) i caldria refer-lo a cada versió de Codex. Queda pendent de provar-ho amb el servei real de ChatGPT; si es fa, o si una versió nova de Codex les permet desactivar, caldrà revisar aquesta nota.

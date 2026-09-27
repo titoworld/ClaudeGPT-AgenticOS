@@ -60,10 +60,14 @@ RUN apt-get update \
 
 # Non-root user with a fixed UID so volume ownership survives rebuilds. /data
 # and the HOME (CLI logins) are volumes; everything else stays read-only.
+# /run/codex-state holds Codex's SQLite state and logs, which record every
+# prompt: docker-compose.yml mounts a private tmpfs there, so they never reach
+# the volumes (or their backups).
 RUN groupadd --system --gid 10001 app \
  && useradd --system --uid 10001 --gid app --home-dir /home/app --create-home \
       --shell /usr/sbin/nologin app \
  && install -d -o app -g app -m 0700 /data /home/app/.claude /home/app/.codex \
+      /run/codex-state \
  && install -d -m 0755 /opt/cli \
  && ln -s /opt/codex/bin/codex /opt/cli/codex
 
@@ -100,6 +104,7 @@ ENV PATH=/app/.venv/bin:/opt/cli:$PATH \
     AOS_WEB_DIST=/app/web/dist \
     AOS_CLAUDE_CLI_PATH=/opt/cli/claude \
     AOS_CODEX_CLI_PATH=/opt/cli/codex \
+    AOS_CODEX_STATE_DIR=/run/codex-state \
     CLAUDE_CONFIG_DIR=/home/app/.claude \
     CODEX_HOME=/home/app/.codex \
     DISABLE_AUTOUPDATER=1

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { copyText } from '../lib/clipboard';
+  import { copyVisible } from '../lib/clipboard';
+  import { toasts } from '../lib/toasts.svelte';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -12,8 +13,16 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   async function copy(): Promise<void> {
-    const ok = await copyText(text);
+    // Hidden characters (Trojan Source) are copied as the visible marks the answer shows.
+    const { ok, revealed } = await copyVisible(text);
     state = ok ? 'ok' : 'error';
+    if (ok && revealed) {
+      toasts.push(
+        revealed === 1
+          ? "La resposta tenia 1 caràcter invisible: s'ha copiat com a ⟨U+…⟩."
+          : `La resposta tenia ${revealed} caràcters invisibles: s'han copiat com a ⟨U+…⟩.`,
+      );
+    }
     clearTimeout(timer);
     timer = setTimeout(() => (state = 'idle'), 1600);
   }

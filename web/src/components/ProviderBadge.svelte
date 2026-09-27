@@ -1,6 +1,6 @@
 <script lang="ts">
   import { spendLine } from '../lib/costs';
-  import { formatDay, formatRelative, formatTime } from '../lib/format';
+  import { limitLevel, resetText, shortUntil } from '../lib/limits';
   import Icon from './Icon.svelte';
   import type { MonthSpend, ProviderStatus } from '../lib/protocol';
   import { PROVIDER_MODE_LABEL } from '../lib/text';
@@ -21,28 +21,6 @@
   let open = $state(false);
 
   const limits = $derived(provider.limits.filter((l) => l.used_percent != null || l.resets_at));
-
-  function level(status: string, used: number | null): 'ok' | 'warn' | 'bad' {
-    if (status === 'rejected' || (used ?? 0) >= 100) return 'bad';
-    if (status === 'warning' || (used ?? 0) >= 80) return 'warn';
-    return 'ok';
-  }
-
-  function resetText(iso: string): string {
-    const d = new Date(iso);
-    const sameDay = d.toDateString() === new Date().toDateString();
-    return `Es restableix ${formatRelative(iso)} (${sameDay ? formatTime(iso) : `${formatDay(iso)}, ${formatTime(iso)}`})`;
-  }
-
-  /** "35 min", "2 h", "3 d": time left until the window resets. */
-  function shortUntil(iso: string): string {
-    const ms = new Date(iso).getTime() - Date.now();
-    if (ms <= 60_000) return 'ara';
-    const hours = ms / 3_600_000;
-    if (hours < 1) return `${Math.round(ms / 60_000)} min`;
-    if (hours < 48) return `${Math.round(hours)} h`;
-    return `${Math.round(hours / 24)} d`;
-  }
 </script>
 
 <div class="provider {provider.agent}">
@@ -63,7 +41,7 @@
 
   {#each limits as limit (limit.window)}
     {@const used = limit.used_percent}
-    {@const lvl = level(limit.status, used)}
+    {@const lvl = limitLevel(limit.status, used)}
     <div class="limit {lvl}">
       <span class="window">{limit.window}</span>
       <span

@@ -2,9 +2,16 @@
 
 Prompt caching: the system prompt is a block with its own breakpoint and top-level
 automatic caching moves a second breakpoint to the end of the append-only history,
-so each call re-reads the prefix the previous one wrote. Thinking models run with
-adaptive thinking (text omitted) and an effort per call purpose; Haiku runs without
-thinking. Opus 5 / Opus 5.5 / Fable requests opt into server-side refusal fallbacks.
+so each call re-reads the prefix the previous one wrote. Models of the 4.6 generation
+on run with adaptive thinking (text omitted) and an effort per call purpose; older
+Claude 4 / 3.7 models get a thinking budget instead, and Haiku or unknown ids run
+without thinking (what each model accepts comes from the Models API when it says so).
+Opus 5 / Opus 5.5 / Fable requests opt into server-side refusal fallbacks.
+
+Usage is what Anthropic bills: a refusal still bills its input and any streamed output
+(and, before any output, the categories in ``BILLED_BEFORE_OUTPUT``), so a refusal
+raises :class:`RefusalError` carrying that usage, and a turn served by a fallback model
+also counts the billed attempts of the models that declined before it.
 """
 
 from __future__ import annotations
@@ -12,12 +19,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 import anthropic
-from anthropic import omit
-from anthropic.types.beta import BetaMessageParam, BetaTextBlockParam
+from anthropic import Omit, omit
+from anthropic.types import ModelCapabilities
+from anthropic.types.beta import (
+    BetaFallbackBlock,
+    BetaMessage,
+    BetaMessageIterationUsage,
+    BetaMessageParam,
+    BetaTextBlockParam,
+    BetaThinkingConfigParam,
+)
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Usage
@@ -32,6 +50,7 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.claude_cli import (
     EFFORT_BY_PURPOSE,
+    Effort,
     family_description,
     is_haiku,
     redact,
@@ -44,12 +63,19 @@ DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_FAST_MODEL = "claude-haiku-4-5"
 MIN_THINKING_MAX_TOKENS = 16_000
 """max_tokens caps thinking and visible text together on thinking models."""
+THINKING_BUDGET_BY_EFFORT: dict[Effort, int] = {"low": 2_048, "medium": 4_096, "high": 8_192}
+"""budget_tokens for models without adaptive thinking (at least 1024, below max_tokens)."""
 
 FALLBACK_MODELS = frozenset(
     {"claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1"}
 )
 """Models whose safety classifiers can decline; they get ``fallbacks="default"``."""
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+BILLED_BEFORE_OUTPUT = frozenset({"bio", "frontier_llm", "reasoning_extraction"})
+"""Refusal categories Anthropic bills even when the decline comes before any output
+("How refusals are billed", September 2026). A decline before any output in another
+category, or with no category, is not billed; a decline after output always is."""
 
 MODELS_TTL_SECONDS = 600.0
 FALLBACK_TTL_SECONDS = 60.0
@@ -64,6 +90,125 @@ STATIC_MODELS: tuple[tuple[str, str, int], ...] = (
     ("claude-fable-5-1", "Claude Fable 5.1", 1_000_000),
 )
 """(id, label, context window) shown when the Models API cannot be queried."""
+
+
+ThinkingMode = Literal["adaptive", "budget", "none"]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSupport:
+    """Request features a model accepts."""
+
+    thinking: ThinkingMode
+    """``adaptive`` thinking, a thinking ``budget`` (budget_tokens) or ``none``."""
+    effort: bool
+    """Whether it takes ``output_config.effort`` (low, medium and high)."""
+
+
+NO_THINKING = ModelSupport("none", effort=False)
+_ADAPTIVE_MODEL = re.compile(r"claude-(?:(?:opus|sonnet)-(?:4-[6-9]|[5-9])|fable|mythos)")
+_BUDGET_MODEL = re.compile(r"claude-(?:(?:opus|sonnet)-4|3-7-sonnet)")
+
+
+def model_support(model: str) -> ModelSupport:
+    """What ``model`` accepts, judged by its id (for ids the Models API did not describe).
+
+    Adaptive thinking and effort exist from the 4.6 generation on (Opus / Sonnet 4.6+,
+    5.x, Fable, Mythos); older Claude 4 and 3.7 models think with a budget and reject
+    both. Haiku runs without thinking (cheap internal calls), and so does any unknown
+    id: a plain request is valid on every model.
+    """
+    lowered = model.lower()
+    if is_haiku(lowered):
+        return NO_THINKING
+    if _ADAPTIVE_MODEL.search(lowered):
+        return ModelSupport("adaptive", effort=True)
+    if _BUDGET_MODEL.search(lowered):
+        return ModelSupport("budget", effort=False)
+    return NO_THINKING
+
+
+def support_from_capabilities(
+    model: str, capabilities: ModelCapabilities | None
+) -> ModelSupport | None:
+    """What ``model`` accepts according to the Models API (None if it does not say).
+    Haiku keeps running without thinking whatever it supports."""
+    if capabilities is None or is_haiku(model):
+        return None
+    try:
+        thinking = capabilities.thinking
+        effort = capabilities.effort
+        mode: ThinkingMode = "none"
+        if thinking.supported and thinking.types.adaptive.supported:
+            mode = "adaptive"
+        elif thinking.supported and thinking.types.enabled.supported:
+            mode = "budget"
+        levels = (effort.low, effort.medium, effort.high)
+        takes_effort = effort.supported and all(level.supported for level in levels)
+    except AttributeError:  # a partial capability tree: judge by the id instead
+        return None
+    return ModelSupport(mode, effort=takes_effort)
+
+
+class RefusalError(ProviderError):
+    """Claude declined the request (``stop_reason: "refusal"``).
+
+    Anthropic may still bill it: ``usage`` holds the billed tokens (all zero when
+    nothing is billed) and ``model`` the model that returned the refusal, so the call's
+    cost can be recorded (read them with ``getattr(exc, "usage", None)``).
+    """
+
+    def __init__(self, message: str, *, usage: Usage, model: str) -> None:
+        super().__init__(message, kind="invalid")
+        self.usage = usage
+        self.model = model
+
+
+def _attempt_billed(output_tokens: int, category: str | None) -> bool:
+    return output_tokens > 0 or category in BILLED_BEFORE_OUTPUT
+
+
+def billed_usage(message: BetaMessage) -> Usage:
+    """Tokens Anthropic bills for ``message``, without cost (the engine prices them).
+
+    Top-level ``usage`` covers only the attempt that produced the message; with
+    server-side fallbacks every earlier attempt is a ``message`` entry of
+    ``usage.iterations`` (the served one is ``fallback_message``), paired in order with
+    the ``fallback`` content blocks that give each decline's category (no tools are
+    sent, so every ``message`` entry is a declined hop, never a tool-loop step). The
+    billed declined attempts are added at their token counts, so the engine prices them
+    at the serving model's rates.
+    """
+    usage = message.usage
+    details = usage.output_tokens_details
+    billed = Usage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_write_tokens=usage.cache_creation_input_tokens or 0,
+        reasoning_tokens=details.thinking_tokens if details else 0,
+    )
+    if message.stop_reason == "refusal":
+        category = message.stop_details.category if message.stop_details else None
+        if not _attempt_billed(usage.output_tokens, category):
+            billed = Usage()
+    iterations = usage.iterations or []
+    if not any(entry.type == "fallback_message" for entry in iterations):
+        return billed  # no fallback ran: top-level usage is the whole call
+    categories = [
+        block.trigger.category for block in message.content if isinstance(block, BetaFallbackBlock)
+    ]
+    declined = [entry for entry in iterations if isinstance(entry, BetaMessageIterationUsage)]
+    for index, entry in enumerate(declined):
+        category = categories[index] if index < len(categories) else None
+        if _attempt_billed(entry.output_tokens, category):
+            billed += Usage(
+                input_tokens=entry.input_tokens,
+                output_tokens=entry.output_tokens,
+                cache_read_tokens=entry.cache_read_input_tokens or 0,
+                cache_write_tokens=entry.cache_creation_input_tokens or 0,
+            )
+    return billed
 
 
 def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...]:
@@ -139,6 +284,8 @@ class ClaudeApiProvider:
         self._models_cache: tuple[float, tuple[ModelInfo, ...], bool] | None = None
         """(expiry on the monotonic clock, models, live)."""
         self._models_lock = asyncio.Lock()
+        self._listed_support: dict[str, ModelSupport] = {}
+        """What each model of the latest live listing accepts, from its capabilities."""
 
     @property
     def agent(self) -> AgentName:
@@ -182,10 +329,26 @@ class ClaudeApiProvider:
             return self.fast_model
         return self.default_model
 
+    def support(self, model: str) -> ModelSupport:
+        """What ``model`` accepts: its listed capabilities, else judged by its id."""
+        return self._listed_support.get(model) or model_support(model)
+
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         client = self._get_client()
         model = self._model(request)
-        thinking = not is_haiku(model)  # Haiku 4.5 takes neither adaptive thinking nor effort
+        support = self.support(model)
+        effort = EFFORT_BY_PURPOSE[request.purpose]
+        max_tokens = (
+            max(request.max_output_tokens, MIN_THINKING_MAX_TOKENS)
+            if support.thinking != "none"
+            else request.max_output_tokens
+        )
+        thinking: BetaThinkingConfigParam | Omit = omit
+        if support.thinking == "adaptive":
+            thinking = {"type": "adaptive", "display": "omitted"}
+        elif support.thinking == "budget":
+            budget = min(THINKING_BUDGET_BY_EFFORT[effort], max_tokens // 2)
+            thinking = {"type": "enabled", "budget_tokens": budget}
         fallbacks = model in FALLBACK_MODELS
         system: list[BetaTextBlockParam] = []
         if request.system:
@@ -198,16 +361,12 @@ class ClaudeApiProvider:
         ]
         manager = client.beta.messages.stream(
             model=model,
-            max_tokens=(
-                max(request.max_output_tokens, MIN_THINKING_MAX_TOKENS)
-                if thinking
-                else request.max_output_tokens
-            ),
+            max_tokens=max_tokens,
             system=system or omit,
             messages=messages,
             cache_control={"type": "ephemeral"},
-            thinking={"type": "adaptive", "display": "omitted"} if thinking else omit,
-            output_config={"effort": EFFORT_BY_PURPOSE[request.purpose]} if thinking else omit,
+            thinking=thinking,
+            output_config={"effort": effort} if support.effort else omit,
             fallbacks="default" if fallbacks else omit,
             betas=[FALLBACK_BETA] if fallbacks else omit,
         )
@@ -237,25 +396,19 @@ class ClaudeApiProvider:
             raise map_api_error(exc) from exc
         latency_ms = int((time.monotonic() - started) * 1000)
 
+        # No cost here: the engine prices every call (owner price overrides included).
+        usage = billed_usage(final)
         if final.stop_reason == "refusal":
             category = final.stop_details.category if final.stop_details else None
             reason = f" (categoria: {category})" if category else ""
-            raise ProviderError(
-                f"Claude ha declinat respondre aquesta petició{reason}.", kind="invalid"
+            raise RefusalError(
+                f"Claude ha declinat respondre aquesta petició{reason}.",
+                usage=usage,
+                model=final.model,
             )
-        usage = final.usage
-        details = usage.output_tokens_details
-        # No cost here: the engine prices every call (owner price overrides included).
-        result_usage = Usage(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_input_tokens or 0,
-            cache_write_tokens=usage.cache_creation_input_tokens or 0,
-            reasoning_tokens=details.thinking_tokens if details else 0,
-        )
         yield GenerationResult(
             text="".join(chunks),
-            usage=result_usage,
+            usage=usage,
             model=final.model,
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,
@@ -308,8 +461,11 @@ class ClaudeApiProvider:
         try:
             client = self._get_client()
             listed: list[ModelInfo] = []
+            supports: dict[str, ModelSupport] = {}
             async with asyncio.timeout(LIST_TIMEOUT_SECONDS):
                 async for model in client.models.list(limit=100):
+                    if support := support_from_capabilities(model.id, model.capabilities):
+                        supports[model.id] = support
                     listed.append(
                         ModelInfo(
                             id=model.id,
@@ -337,6 +493,7 @@ class ClaudeApiProvider:
                 for model_id, label, window in STATIC_MODELS
             ]
             return _with_default(listed, default), False
+        self._listed_support = supports
         return _with_default(listed, default), True
 
     async def aclose(self) -> None:

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { LIMIT_WARN_PERCENT } from '../limits';
 import type { ProviderStatus, Stats, Usage } from '../protocol';
 import {
   AGENT_SERIES,
@@ -215,6 +216,26 @@ describe('subscription limits', () => {
     expect(limitTone('warning', 90).tone).toBe('warning');
     expect(limitTone('rejected', null).tone).toBe('critical');
     expect(limitTone('???', 100).tone).toBe('critical');
+  });
+
+  it('warns about a nearly full window at the sidebar threshold, whatever the status says (F7)', () => {
+    // claude_cli reports "allowed" for every window but the enforced one until it is full.
+    const cards = providerCards([
+      {
+        agent: 'claude', mode: 'cli', available: true, model: 'opus', detail: '',
+        limits: [
+          { window: '7d', used_percent: 95, resets_at: null, status: 'allowed' },
+          { window: '5h', used_percent: 79, resets_at: null, status: 'allowed' },
+        ],
+      } as ProviderStatus,
+    ]);
+    expect(cards[0]!.limits.map((l) => [l.tone, l.statusLabel])).toEqual([
+      ['warning', 'A prop del límit'],
+      ['ok', 'Dins del límit'],
+    ]);
+    expect(limitTone('allowed', LIMIT_WARN_PERCENT).tone).toBe('warning');
+    expect(limitTone('???', LIMIT_WARN_PERCENT).tone).toBe('warning');
+    expect(limitTone('???', 50).tone).toBe('unknown');
   });
 
   it('describes when a window resets', () => {

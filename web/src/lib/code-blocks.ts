@@ -1,6 +1,9 @@
 // Enhances rendered markdown: a copy button and language label on each code
 // block, then lazy syntax highlighting. Buttons are created with DOM APIs
 // (no HTML strings) so nothing here goes through the sanitizer.
+// Blocks where renderMarkdown revealed hidden characters (⟨U+XXXX⟩ marks) get
+// a warning on the code bar and are not highlighted: highlighting would flatten
+// the marks. The copy button copies the visible text, marks included.
 
 import { copyText } from './clipboard';
 
@@ -22,6 +25,17 @@ export function enhanceCodeBlocks(root: HTMLElement): void {
     const label = document.createElement('span');
     label.className = 'code-lang';
     label.textContent = lang ?? 'codi';
+    bar.append(label);
+    if (code?.querySelector('.invisible-char')) {
+      code.removeAttribute('class'); // keep it out of the highlighter
+      const warning = document.createElement('span');
+      warning.className = 'code-warning';
+      warning.textContent = 'Caràcters invisibles';
+      warning.title =
+        'Aquest codi conté caràcters invisibles o de control de direcció que poden amagar què fa. ' +
+        'Es mostren com a ⟨U+…⟩ i es copien igual.';
+      bar.append(warning);
+    }
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'code-copy';
@@ -37,7 +51,7 @@ export function enhanceCodeBlocks(root: HTMLElement): void {
         }, 1600);
       });
     });
-    bar.append(label, button);
+    bar.append(button);
     pre.prepend(bar);
   }
   if (root.querySelector('pre code[class*="language-"]')) {

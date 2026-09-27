@@ -4,7 +4,15 @@ import pytest
 
 from agentic_os.domain import Usage
 from agentic_os.fx import FxError, parse_ecb_daily
-from agentic_os.pricing import ModelPrice, estimate_cost_usd, find_price, normalize_model
+from agentic_os.pricing import (
+    DEFAULT_PRICES,
+    ModelPrice,
+    estimate_cost_usd,
+    find_price,
+    lookup_price,
+    normalize_model,
+    price_table,
+)
 
 ECB_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 <gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01"
@@ -42,6 +50,78 @@ def test_overrides_take_precedence_and_add_new_models() -> None:
     assert find_price("unknown-model", overrides) is None
 
 
+def test_an_owner_price_on_a_family_keeps_the_more_specific_defaults() -> None:
+    family = ModelPrice(1.0, 1.0, 0.1, 1.25)
+    # Same normalized id as the default claude-opus-5 row (the pricing page replaces it).
+    for key in ("claude-opus-5", "Claude-Opus-5-20260101"):
+        overrides = {key: family}
+        assert (
+            find_price("claude-opus-5-5-20260901", overrides) == DEFAULT_PRICES["claude-opus-5-5"]
+        )
+        assert find_price("claude-opus-5-5[1m]", overrides) == DEFAULT_PRICES["claude-opus-5-5"]
+        assert find_price("claude-opus-5", overrides) == family
+        assert find_price("claude-opus-5-20260101", overrides) == family
+    fable = {"claude-fable-5": family}
+    assert find_price("claude-fable-5-1", fable) == DEFAULT_PRICES["claude-fable-5-1"]
+    # A longer owner id still beats a shorter default prefix.
+    longer = {"claude-opus-5-5-fast": family}
+    assert find_price("claude-opus-5-5-fast-20261001", longer) == family
+    assert find_price("claude-opus-5-5", longer) == DEFAULT_PRICES["claude-opus-5-5"]
+
+
+def test_price_table_is_what_the_engine_charges() -> None:
+    overrides = {
+        "Claude-Opus-5-20260101": ModelPrice(1.0, 1.0, 0.1, 1.25),
+        "gpt-7": ModelPrice(1.0, 2.0, 0.1, 1.25),
+    }
+    table = price_table(overrides)
+    assert table["claude-opus-5"].source == "custom"
+    assert table["claude-opus-5"].model == "Claude-Opus-5-20260101"
+    assert table["claude-opus-5-5"].source == "default"
+    assert table["gpt-7"].source == "custom"
+    assert len(table) == len(DEFAULT_PRICES) + 1
+    for entry in table.values():
+        assert find_price(entry.model, overrides) == entry.price
+    found = lookup_price("gpt-7-mini", table)
+    assert found is not None and found.model == "gpt-7"
+    assert lookup_price("", table) is None
+
+
+@pytest.mark.parametrize("key", ["openai/", "x/[1m]", "a/-latest", "anthropic/anthropic.", " "])
+def test_keys_that_normalize_to_nothing_price_nothing(key: str) -> None:
+    free = {key: ModelPrice(0.0, 0.0, 0.0, 0.0)}
+    assert normalize_model(key) == ""
+    assert find_price("gpt-6-sol", free) == DEFAULT_PRICES["gpt-6-sol"]
+    assert find_price("claude-opus-5-5", free) == DEFAULT_PRICES["claude-opus-5-5"]
+    assert find_price("mystery-model", free) is None
+    assert "" not in price_table(free)
+    assert len(price_table(free)) == len(DEFAULT_PRICES)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-opus-4-0", ModelPrice(15.0, 75.0, 1.5, 18.75)),
+        ("claude-opus-4-20250514", ModelPrice(15.0, 75.0, 1.5, 18.75)),
+        ("claude-opus-4-1-20250805", ModelPrice(15.0, 75.0, 1.5, 18.75)),
+        ("claude-opus-4-5-20251101", ModelPrice(5.0, 25.0, 0.5, 6.25)),
+        ("claude-opus-4-6", ModelPrice(5.0, 25.0, 0.5, 6.25)),
+        ("claude-opus-4-7", ModelPrice(5.0, 25.0, 0.5, 6.25)),
+        ("claude-opus-4-8", ModelPrice(5.0, 25.0, 0.5, 6.25)),
+        ("claude-mythos-5-1", ModelPrice(10.0, 50.0, 0.25, 12.5)),
+        ("anthropic.claude-mythos-5-1", ModelPrice(10.0, 50.0, 0.25, 12.5)),
+        ("claude-mythos-5", ModelPrice(10.0, 50.0, 1.0, 12.5)),
+        ("claude-fable-5-1", ModelPrice(10.0, 50.0, 0.25, 12.5)),
+        ("claude-sonnet-4-6", ModelPrice(3.0, 15.0, 0.3, 3.75)),
+        ("claude-haiku-4-5-20251001", ModelPrice(1.0, 5.0, 0.1, 1.25)),
+    ],
+)
+def test_default_prices_of_served_models(model: str, expected: ModelPrice) -> None:
+    price = find_price(model)
+    assert price is not None
+    assert price.to_wire() == pytest.approx(expected.to_wire())
+
+
 def test_estimate_cost_uses_every_usage_component() -> None:
     usage = Usage(
         input_tokens=1_000_000,
@@ -62,6 +142,9 @@ def test_price_from_wire_validates() -> None:
         ModelPrice.from_wire({"input": 1, "output": -2, "cache_read": 0, "cache_write": 0})
     with pytest.raises(ValueError, match="input"):
         ModelPrice.from_wire({"input": True, "output": 2, "cache_read": 0, "cache_write": 0})
+    # A valid JSON integer too large for a float is a ValueError (a 422), not a crash.
+    with pytest.raises(ValueError, match="cache_write"):
+        ModelPrice.from_wire({"input": 1, "output": 2, "cache_read": 0, "cache_write": 10**400})
 
 
 def test_parse_ecb_daily() -> None:

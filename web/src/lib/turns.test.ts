@@ -8,9 +8,22 @@ import {
   streamsByAgent,
   turnUsage,
   turnsFromMessages,
+  INCOMPLETE_KIND,
   type TurnView,
 } from './turns.svelte';
-import { debateEvents, debateMessages, message, sequence, usage } from './test-fixtures';
+import { turnCost } from './costs';
+import {
+  cancelledDebateEvents,
+  cancelledDebateMessages,
+  compactedDuelEvents,
+  compactedDuelMessages,
+  debateEvents,
+  debateMessages,
+  message,
+  priced,
+  sequence,
+  usage,
+} from './test-fixtures';
 import type { Savings, TurnEvent } from './protocol';
 
 const live = (requestId = 'req-1'): TurnView =>
@@ -273,6 +286,62 @@ describe('turnsFromMessages', () => {
     expect(turns[0]?.streams[0]?.cached).toBe(true);
     expect(turns[1]?.cached).toBe(false);
     expect(turns[2]?.status).toBe('failed');
+  });
+});
+
+describe('turnsFromMessages: turn totals after a reload (F1)', () => {
+  const liveTurn = () => {
+    const t = createLiveTurn({ requestId: 'req-c', question: 'I ara?', mode: 'duel', conversationId: 3 });
+    applyAll(t, compactedDuelEvents());
+    return t;
+  };
+
+  it('adds the compaction summary call, as the live total does', () => {
+    const live = liveTurn();
+    const [stored] = turnsFromMessages(compactedDuelMessages(), 3);
+    const a = turnUsage(live)!;
+    const b = turnUsage(stored!)!;
+    expect([b.input_tokens, b.output_tokens]).toEqual([a.input_tokens, a.output_tokens]);
+    expect(b.cost_usd).toBeCloseTo(a.cost_usd!, 12);
+    expect(turnCost(stored!).totalUsd).toBeCloseTo(turnCost(live).totalUsd!, 12);
+    // The split between API cost and subscription value still comes from the answers.
+    expect(turnCost(stored!).equivalentUsd).toBeCloseTo(0.003063 + 0.003198, 12);
+  });
+
+  it('prefers a stored turn total and never adds the summary twice', () => {
+    const total = priced(2000, 300, 0.01);
+    const msgs = compactedDuelMessages().map((m) => (m.id === 11 ? { ...m, meta: { ...m.meta, turn_usage: total } } : m));
+    const [t] = turnsFromMessages(msgs);
+    expect(turnUsage(t!)).toEqual(total);
+  });
+
+  it('keeps summing the answers when there was no compaction', () => {
+    const msgs = compactedDuelMessages().map((m) => (m.kind === 'question' ? { ...m, meta: { mode: 'duel' as const } } : m));
+    const [t] = turnsFromMessages(msgs);
+    expect(t!.usage).toBeNull();
+    expect(turnUsage(t!)).toMatchObject({ input_tokens: 912, output_tokens: 235 });
+  });
+});
+
+describe('turnsFromMessages: debates that did not finish (F4)', () => {
+  it('a debate stored without a synthesis is incomplete, not done', () => {
+    const [t] = turnsFromMessages(cancelledDebateMessages(), 5);
+    expect(t!.status).toBe('failed');
+    expect(t!.error).toEqual({ kind: INCOMPLETE_KIND, message: 'Aquest torn no es va completar.' });
+    // Same phase and round the live turn had when it stopped.
+    const live = createLiveTurn({ requestId: 'req-x', question: 'Debat llarg', mode: 'debate', conversationId: 5 });
+    applyAll(live, cancelledDebateEvents());
+    expect([t!.phase, t!.round]).toEqual([live.phase, live.round]);
+  });
+
+  it('a debate stopped while answering is incomplete too', () => {
+    const msgs = cancelledDebateMessages().filter((m) => m.kind !== 'revision');
+    expect(turnsFromMessages(msgs)[0]!.status).toBe('failed');
+  });
+
+  it('a debate with its synthesis, and solo and duel turns with answers, are done', () => {
+    expect(turnsFromMessages(debateMessages())[0]!.status).toBe('done');
+    expect(turnsFromMessages(compactedDuelMessages())[0]!.status).toBe('done');
   });
 });
 

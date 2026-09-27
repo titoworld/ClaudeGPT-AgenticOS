@@ -127,10 +127,6 @@ export class Conversations {
     this.list = this.list.filter((c) => c.id !== id);
   }
 
-  questionFor(turnId: number): string | null {
-    return this.storedTurns.find((t) => t.turnId === turnId)?.question || null;
-  }
-
   clear(): void {
     this.startNew();
     this.list = [];

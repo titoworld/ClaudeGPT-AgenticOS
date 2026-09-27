@@ -22,12 +22,6 @@
     shown.map((a) => `${AGENT_LABEL[a]}: ${app.modelFor(a) ?? 'per defecte'}`).join(', '),
   );
 
-  const defaultFor = (agent: Agent): string | null =>
-    app.settings.models[agent] ??
-    app.catalog?.[agent].default_model ??
-    app.providers.find((p) => p.agent === agent)?.model ??
-    null;
-
   function onToggle(e: Event): void {
     if ((e as ToggleEvent).newState === 'open') void app.loadModels();
   }
@@ -80,7 +74,7 @@
         value={prefs.models[agent] ?? null}
         onchange={(v) => prefs.setModel(agent, v)}
         {models}
-        defaultModel={defaultFor(agent)}
+        defaultModel={app.defaultModel(agent)}
         onenter={() => popover?.hidePopover()} />
     </section>
   {/each}

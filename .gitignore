@@ -22,6 +22,9 @@ htmlcov/
 !.env.example
 .claude/settings.local.json
 /data/
+# Backups left in the clone (docs/DESPLEGAMENT.md writes them to /var/backups)
+/backups/
+/env-*
 
 # Editores y sistema operativo
 .vscode/

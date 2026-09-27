@@ -177,9 +177,9 @@ async def test_no_compaction_below_the_threshold(
 async def test_cache_hit_replays_without_calling_models(
     engine: Engine, store: InMemoryStore, fakes: dict[AgentName, FakeProvider]
 ) -> None:
-    first = await collect(engine.run(TurnRequest("r1", "Què és  uv?", "solo")))
+    first = await collect(engine.run(TurnRequest("r1", "Què és uv?\r\nI pip?", "solo")))
     calls = len(fakes["claude"].requests)
-    second = await collect(engine.run(TurnRequest("r2", "  Què és uv?\n", "solo")))
+    second = await collect(engine.run(TurnRequest("r2", "  Què és uv?\nI pip?\n", "solo")))
     assert len(fakes["claude"].requests) == calls
 
     kinds = [type(e).__name__ for e in second]

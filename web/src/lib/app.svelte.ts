@@ -51,6 +51,11 @@ class App {
   settings: RuntimeSettings = $state(normalizeSettings(DEFAULT_SETTINGS));
   /** Models each agent can use (live from the vendor when possible), cached per session. */
   catalog: ModelCatalog | null = $state(null);
+  /**
+   * The catalog's default and fast models include the saved choice: after a save
+   * that changed it, they are stale until the catalog is fetched again.
+   */
+  catalogStale = $state(false);
   catalogLoading = $state(false);
   catalogError: string | null = $state(null);
   /** Price table and exchange rate (loaded by the settings drawer). */
@@ -146,6 +151,7 @@ class App {
     this.convs.clear();
     this.providers = [];
     this.catalog = null;
+    this.catalogStale = false;
     this.#catalogTicket++;
     this.#catalogRequest = null;
     this.catalogLoading = false;
@@ -191,24 +197,39 @@ class App {
   }
 
   async saveSettings(s: RuntimeSettings): Promise<void> {
+    const before = this.settings;
     const saved = normalizeSettings(await api.saveSettings(s));
     this.settings = saved;
     this.applyDefaults(saved);
     // Prices, the exchange rate mode and budgets change what these report.
     void this.loadPricing();
     void this.refreshSpend();
+    if (savedModelsChanged(before, saved)) {
+      this.catalogStale = true;
+      void this.reloadModels();
+    }
   }
 
   /** Loads the model catalog once per session; `refresh` asks the server to query the vendors again. */
   loadModels(refresh = false): Promise<void> {
     if (this.#catalogRequest && !refresh) return this.#catalogRequest;
     if (this.catalog && !refresh) return Promise.resolve();
+    return this.#fetchModels(refresh);
+  }
+
+  /** Fetches the catalog again (the server's cached lists, without asking the vendors). */
+  reloadModels(): Promise<void> {
+    return this.#fetchModels(false);
+  }
+
+  #fetchModels(refresh: boolean): Promise<void> {
     this.catalogLoading = true;
     const ticket = ++this.#catalogTicket;
     const request = api.models(refresh).then(
       (catalog) => {
         if (ticket !== this.#catalogTicket) return;
         this.catalog = catalog;
+        this.catalogStale = false;
         this.catalogError = null;
       },
       (err: unknown) => {
@@ -255,13 +276,16 @@ class App {
 
   /** Model an agent will use in the next turn of this tab. */
   modelFor(agent: Agent): string | null {
-    return (
-      prefs.models[agent] ??
-      this.settings.models[agent] ??
-      this.catalog?.[agent].default_model ??
-      this.providers.find((p) => p.agent === agent)?.model ??
-      null
-    );
+    return prefs.models[agent] ?? this.defaultModel(agent);
+  }
+
+  /** Model an agent uses when this tab picks none: the saved one, else the provider's. */
+  defaultModel(agent: Agent): string | null {
+    const saved = this.settings.models[agent];
+    if (saved) return saved;
+    const provider = this.providers.find((p) => p.agent === agent)?.model || null;
+    const catalog = this.catalogStale ? null : this.catalog?.[agent].default_model;
+    return catalog || provider;
   }
 
   async refreshProviders(): Promise<void> {
@@ -444,7 +468,7 @@ class App {
 
     switch (ev.type) {
       case 'turn.started':
-        if (!turn.question) turn.question = this.convs.questionFor(ev.turn_id) ?? '';
+        this.#fillFromStored(turn);
         if (wasDraft && this.convs.currentId == null && router.route.name === 'chat' && router.route.id == null) {
           this.convs.adopt(ev.conversation_id);
           router.replace({ name: 'chat', id: ev.conversation_id });
@@ -516,12 +540,30 @@ class App {
     }
   }
 
-  /** Live turns replayed after a reload have no question text until the conversation loads. */
+  /**
+   * Live turns replayed after a reload (or started in another tab) only know what
+   * the events say: the question text, options and target come from the stored
+   * question once the conversation is loaded.
+   */
   #fillQuestions(): void {
-    for (const t of this.turns.forConversation(this.convs.currentId)) {
-      if (!t.question && t.turnId != null) t.question = this.convs.questionFor(t.turnId) ?? '';
-    }
+    for (const t of this.turns.forConversation(this.convs.currentId)) this.#fillFromStored(t);
   }
+
+  #fillFromStored(turn: TurnView): void {
+    if (turn.turnId == null) return;
+    const stored = this.convs.storedTurns.find((t) => t.turnId === turn.turnId);
+    if (!stored) return;
+    if (!turn.question) turn.question = stored.question;
+    turn.options ??= stored.options;
+    turn.target ??= stored.target;
+  }
+}
+
+/** Whether a save changed the saved default or fast model of any agent. */
+function savedModelsChanged(before: RuntimeSettings, after: RuntimeSettings): boolean {
+  return AGENTS.some(
+    (a) => before.models[a] !== after.models[a] || before.fast_models[a] !== after.fast_models[a],
+  );
 }
 
 export const app = new App();

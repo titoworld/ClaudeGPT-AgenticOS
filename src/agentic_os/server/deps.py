@@ -95,6 +95,7 @@ class AppState:
     """Serializes login attempts so the throttle check and the failure count are
     atomic: parallel requests cannot test more passwords than the lockout allows."""
     connections: SessionConnections = field(default_factory=SessionConnections)
+    """Open WebSockets by session, closed when the session ends (logout)."""
 
     @property
     def cookie_name(self) -> str:

@@ -2,8 +2,10 @@
 
 Every call is stateless (``store=False``): the system prompt goes in ``instructions``
 and the conversation in ``input``, append-only across turns so OpenAI's automatic
-prompt cache keeps hitting; ``prompt_cache_key`` is stable per purpose. openai>=3
-uses httpx2 (never httpx) for its client, timeouts and transports.
+prompt cache keeps hitting; ``prompt_cache_key`` is stable per purpose. Reasoning
+models (GPT-5 on, o-series) get an effort per purpose; older chat models such as gpt-4o
+reject ``reasoning`` and run without it. openai>=3 uses httpx2 (never httpx) for its
+client, timeouts and transports.
 """
 
 from __future__ import annotations
@@ -69,6 +71,8 @@ _NOT_CHAT = re.compile(
     r"embedding|audio|realtime|tts|transcribe|image|dall-e|whisper|moderation|search|instruct"
 )
 _SNAPSHOT = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+_REASONING_MODEL = re.compile(r"^(o\d|gpt-([5-9]|[1-9]\d))")
+_NOT_REASONING = re.compile(r"-chat\b|^o1-(mini|preview)")
 _SECRET_RE = re.compile(r"(sk-)[A-Za-z0-9_\-*]{8,}|(Bearer\s+)\S+")
 _SERVER_CODES = frozenset({"server_error", "vector_store_timeout"})
 
@@ -81,6 +85,13 @@ def is_chat_model(model_id: str) -> bool:
         and not _NOT_CHAT.search(model_id)
         and not _SNAPSHOT.search(model_id)
     )
+
+
+def supports_reasoning(model_id: str) -> bool:
+    """Whether the Responses API takes ``reasoning.effort`` for this model: GPT-5 and
+    later and the o-series, except their ``-chat`` variants. Other chat models (gpt-4o,
+    gpt-4.1, chatgpt-4o-latest...) answer a request that carries it with a 400."""
+    return bool(_REASONING_MODEL.match(model_id) and not _NOT_REASONING.search(model_id))
 
 
 def _int(value: object) -> int:
@@ -242,7 +253,11 @@ class OpenAIApiProvider:
                     input=messages,
                     stream=True,
                     store=False,
-                    reasoning={"effort": EFFORT_BY_PURPOSE[request.purpose]},
+                    reasoning=(
+                        {"effort": EFFORT_BY_PURPOSE[request.purpose]}
+                        if supports_reasoning(model)
+                        else omit
+                    ),
                     max_output_tokens=request.max_output_tokens,
                     prompt_cache_key=f"agentic-os-chatgpt-{request.purpose}",
                 ),

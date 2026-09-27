@@ -76,13 +76,13 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 
 ## Seguretat (un sol usuari)
 
-- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna.
-- Inici de sessió amb contrasenya (argon2id) **i** codi TOTP; bloqueig exponencial després d'intents fallits.
+- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. Caddy llegeix sencer el cos de les peticions (màxim 1 MiB, en 30 s) abans de passar-lo a l'aplicació, així que una pujada lenta no ocupa connexions de l'aplicació; els WebSockets no passen per aquest límit.
+- Inici de sessió amb contrasenya (argon2id) **i** codi TOTP; bloqueig exponencial després d'intents fallits. Un navegador on ja s'ha entrat (cookie de dispositiu conegut) només es bloqueja pels seus propis errors; `agentic-os reset-throttle` aixeca tots els bloquejos.
 - Sessions al servidor (només se'n desa el hash), cookie `__Host-` HttpOnly, Secure, SameSite=Strict, caducitat per inactivitat i absoluta.
 - Comprovació d'`Origin` a totes les peticions que canvien estat i al WebSocket.
 - CSP estricta (`script-src 'self'`), HSTS, `frame-ancestors 'none'`; el markdown dels models es neteja amb DOMPurify.
-- Les CLI s'executen sense eines ni *shell*, sense accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar.
-- Contenidors sense root, `no-new-privileges`, sense *capabilities*.
+- Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi dins del mateix procés (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació limita els subagents a un per crida (`agents.max_threads=1`) i interromp els torns que no són de cap crida en curs ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat.
+- Contenidors sense root (l'aplicació amb l'usuari 10001 i Caddy amb el 10002; només `caddy-init` corre uns segons com a root, sense xarxa i amb només les *capabilities* que necessita `chown`, per donar els volums de Caddy al seu usuari), `no-new-privileges`, sense *capabilities* efectives i amb límits de memòria, CPU i processos.
 
 ## Latència i connexió
 

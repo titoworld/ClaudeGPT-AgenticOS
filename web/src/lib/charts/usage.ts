@@ -2,6 +2,7 @@
 // dashboard renders (KPIs, chart data, subscription limits).
 
 import { AGENT_LABEL } from '../format';
+import { limitLevel } from '../limits';
 import { AGENTS, type Agent, type ProviderMode, type ProviderStatus, type SavingKind, type Stats, type TurnMode } from '../protocol';
 import { axisDayLabel, dayRange, fullDayLabel, rangeEnd, utcDay } from './dates';
 import { positive } from './stack';
@@ -240,18 +241,13 @@ export function windowLabel(window: string): string {
   return `Finestra de ${n} ${n === 1 ? one : many}`;
 }
 
+/** Same thresholds as the sidebar badges (limitLevel); an unknown status stays unknown below them. */
 export function limitTone(status: string, usedPercent: number | null): { tone: LimitTone; label: string } {
-  switch (status) {
-    case 'allowed':
-      return { tone: 'ok', label: 'Dins del límit' };
-    case 'warning':
-      return { tone: 'warning', label: 'A prop del límit' };
-    case 'rejected':
-      return { tone: 'critical', label: 'Límit exhaurit' };
-    default:
-      if (usedPercent != null && usedPercent >= 100) return { tone: 'critical', label: 'Límit exhaurit' };
-      return { tone: 'unknown', label: 'Estat desconegut' };
-  }
+  const level = limitLevel(status, usedPercent);
+  if (level === 'bad') return { tone: 'critical', label: 'Límit exhaurit' };
+  if (level === 'warn') return { tone: 'warning', label: 'A prop del límit' };
+  if (status === 'allowed') return { tone: 'ok', label: 'Dins del límit' };
+  return { tone: 'unknown', label: 'Estat desconegut' };
 }
 
 export function providerCards(providers: ProviderStatus[] | null | undefined): ProviderCard[] {

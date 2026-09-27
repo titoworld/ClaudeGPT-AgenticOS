@@ -27,6 +27,7 @@ from agentic_os.providers.openai_api import (
     TIMEOUT,
     OpenAIApiProvider,
     is_chat_model,
+    supports_reasoning,
     usage_from_response,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
@@ -244,6 +245,48 @@ async def test_model_and_effort(
     assert body["reasoning"] == {"effort": effort}
     purpose = request_fields.get("purpose", "answer")
     assert body["prompt_cache_key"] == f"agentic-os-chatgpt-{purpose}"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5.2-pro",
+        "gpt-6-astra",
+        "gpt-6-sol-codex",
+        "gpt-10",
+        "o3",
+        "o4-mini",
+    ],
+)
+def test_reasoning_models(model: str) -> None:
+    assert supports_reasoning(model)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-4.1-nano",
+        "gpt-3.5-turbo",
+        "chatgpt-4o-latest",
+        "gpt-5-chat-latest",
+        "o1-mini",
+        "o1-preview",
+    ],
+)
+async def test_non_reasoning_models_get_no_reasoning_effort(tmp_path: Path, model: str) -> None:
+    # They are listed (is_chat_model) but answer a request with reasoning.effort with a 400.
+    assert is_chat_model(model) and not supports_reasoning(model)
+    recorder = Recorder(lambda: streaming(sse(delta("Hola"), completed())))
+    provider = make_provider(tmp_path, recorder)
+    _, result = await collect(provider, make_request(model=model, purpose="synthesis"))
+    [body] = recorder.bodies
+    assert body["model"] == model and "reasoning" not in body
+    assert body["max_output_tokens"] == 8000 and result.text == "Hola"
 
 
 async def test_incomplete_response_keeps_the_partial_text(tmp_path: Path) -> None:

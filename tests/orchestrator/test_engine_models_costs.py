@@ -249,9 +249,14 @@ async def test_savings_are_valued_at_the_average_price_of_the_turn(store: InMemo
     events = await collect(engine.run(turn("debate", options=options), price_overrides=PRICES))
     done = completed(events)
     assert done.savings.early_stop > 0 and done.savings.unchanged > 0
+    assert done.consensus is not None and done.consensus.round == 1
     calls = sum((e.usage for e in of_type(events, StreamCompleted)), Usage())
     assert calls.cost_usd is not None
-    expected = done.savings.total * calls.cost_usd / calls.total_tokens
+    # Kept answers at the average price per token; the 3 skipped rounds at the average
+    # cost of a revision pair (the fakes report no cache tokens).
+    revisions = [u.usage.cost_usd or 0.0 for u in store.usage if u.purpose == "revision"]
+    skipped = 3 * 2 * sum(revisions) / len(revisions)
+    expected = done.savings.unchanged * calls.cost_usd / calls.total_tokens + skipped
     assert done.savings.cost_usd == pytest.approx(expected)
     # The final message carries the same savings, for a reloaded conversation.
     (synthesis,) = finals(store, done)

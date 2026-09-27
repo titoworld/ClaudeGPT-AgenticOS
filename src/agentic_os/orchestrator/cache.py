@@ -13,8 +13,9 @@ from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 
-CACHE_KEY_VERSION = 1
-"""Bump when prompts or the replay format change, to invalidate old entries."""
+CACHE_KEY_VERSION = 2
+"""Bump when prompts, the replay format or the key itself change, to invalidate old
+entries (2: the question keeps its inner whitespace)."""
 
 
 def _digest(payload: object) -> str:
@@ -23,8 +24,10 @@ def _digest(payload: object) -> str:
 
 
 def normalize_question(text: str) -> str:
-    """Strip and collapse whitespace."""
-    return " ".join(text.split())
+    """Only outer whitespace and line endings (CRLF/CR become LF) are normalized: inner
+    newlines and indentation carry meaning (code, lists, tables), so two questions that
+    differ there must not share an answer."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def context_fingerprint(context: TurnContext) -> str:

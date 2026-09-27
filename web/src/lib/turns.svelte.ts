@@ -374,10 +374,26 @@ function inferMode(streams: StreamView[]): TurnMode {
   return agents.size > 1 ? 'duel' : 'solo';
 }
 
+/** Error of a stored turn that never finished (cancelled, failed or still running). */
+export const INCOMPLETE_KIND = 'incomplete';
+const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: 'Aquest torn no es va completar.' });
+
+/**
+ * Whether stored messages hold a finished turn: every finished debate stores a
+ * synthesis (real, degraded or replayed from the cache); solo and duel turns
+ * store their answers.
+ */
+function storedTurnFinished(mode: TurnMode, streams: StreamView[]): boolean {
+  if (!streams.length) return false;
+  return mode !== 'debate' || streams.some((s) => s.kind === 'synthesis');
+}
+
 /**
  * Map stored messages (oldest first) into turns. Turn-level `savings`,
  * `consensus` and `usage` are read from any message meta when the backend
  * stores them; otherwise consensus is derived from the last revision round.
+ * The total usage is the answers' plus the compaction summary's
+ * (`question.meta.compaction_usage`), as in the live `turn.completed`.
  */
 export function turnsFromMessages(messages: Message[], conversationId: number | null = null): TurnView[] {
   const groups = new Map<number, Message[]>();
@@ -418,11 +434,16 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
     }
     savings = asSavings(qmeta.savings) ?? savings;
     consensus = asConsensus(qmeta.consensus) ?? consensus;
+    const compaction = asUsage(qmeta.compaction_usage);
+    if (!usage && compaction) {
+      usage = streams.reduce((total, s) => (s.usage ? addUsage(total, s.usage) : total), compaction);
+    }
 
     const mode: TurnMode =
       qmeta.mode === 'solo' || qmeta.mode === 'duel' || qmeta.mode === 'debate' ? qmeta.mode : inferMode(streams);
     const target: Agent | null = qmeta.target === 'claude' || qmeta.target === 'chatgpt' ? qmeta.target : null;
     const last = streams.at(-1);
+    const finished = storedTurnFinished(mode, streams);
 
     const turn: TurnView = {
       key: `t${turnId}`,
@@ -434,7 +455,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       options: asOptions(qmeta.options),
       question: question?.content ?? '',
       createdAt: question?.created_at ?? group[0]!.created_at,
-      status: streams.length ? 'done' : 'failed',
+      status: finished ? 'done' : 'failed',
       phase: last ? (last.kind === 'revision' ? 'revision' : last.kind === 'synthesis' ? 'synthesis' : 'answer') : null,
       round: last?.round ?? 0,
       streams,
@@ -443,7 +464,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       savings,
       consensus,
       cached: streams.length > 0 && streams.every((s) => s.cached),
-      error: streams.length ? null : { kind: 'incomplete', message: 'Aquest torn no es va completar.' },
+      error: finished ? null : incomplete(),
       finalMessageIds: group.filter((m) => m.final && m.kind !== 'question').map((m) => m.id),
       live: false,
     };

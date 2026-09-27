@@ -159,14 +159,14 @@ def test_cache_key_normalization_and_sensitivity() -> None:
             "mode": "duel",
             "target": "claude",
             "options": TurnOptions(),
-            "question": "Hola  món",
+            "question": "Hola món",
             "context_fingerprint": fingerprint,
             "identities": identities,
         }
         args.update(overrides)
         return turn_cache_key(**args)  # type: ignore[arg-type]
 
-    assert normalize_question("  Hola\n\t món ") == "Hola món"
+    assert normalize_question("  Hola\r\n\t món ") == "Hola\n\t món"
     assert key() == key(question=" Hola món\n")
     assert key() == key(target="chatgpt")  # the target only matters in solo
     assert key() == key(options=TurnOptions(debate=DebateOptions(rounds=3)))
@@ -223,7 +223,7 @@ def test_accounting_savings() -> None:
     accounting.add_call(Usage(input_tokens=100, output_tokens=50), "answer")
     accounting.add_call(Usage(input_tokens=300, output_tokens=100), "revision")
     accounting.add_call(Usage(input_tokens=200, output_tokens=0), "revision")
-    accounting.add_summary(Usage(input_tokens=10, output_tokens=5))
+    accounting.add_spent(Usage(input_tokens=10, output_tokens=5))
     accounting.add_early_stop(2)  # 2 rounds x (2 x 300 average per call)
     accounting.add_unchanged("x" * 40)
     accounting.compaction_per_request = 30
