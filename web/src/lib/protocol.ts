@@ -148,6 +148,7 @@ export interface MessageMeta {
   ttft_ms?: number | null;
   cached?: boolean;
   cost_basis?: 'api' | 'equivalent';
+  compaction_usage?: Usage; // question only: the turn's compaction summary call
   savings?: Savings;
   consensus?: Consensus;
   degraded?: boolean;

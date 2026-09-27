@@ -161,7 +161,7 @@ interface Stats {
 
 ### Metadades de missatge (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha).
+- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha) i `compaction_usage` (`Usage` de la crida de resum, si el torn ha compactat l'historial; el total d'un torn recarregat és la suma dels `usage` dels seus missatges més aquest).
 - Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
 - Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`), `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva.
 - Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.

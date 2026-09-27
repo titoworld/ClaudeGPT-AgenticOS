@@ -89,6 +89,8 @@ class SavingRecord:
     tokens_saved: int
     """Estimated tokens avoided (input + output)."""
     detail: str = ""
+    cost_usd: float | None = None
+    """Estimated value of the avoided tokens (None when the turn had no priced call)."""
 
 
 @dataclass(frozen=True, slots=True)
