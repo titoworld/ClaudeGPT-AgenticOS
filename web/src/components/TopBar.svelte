@@ -1,0 +1,122 @@
+<script lang="ts">
+  import { app } from '../lib/app.svelte';
+  import { prefs } from '../lib/prefs.svelte';
+  import { router } from '../lib/router.svelte';
+  import { MODE_LABEL } from '../lib/text';
+  import ConnectionIndicator from './ConnectionIndicator.svelte';
+  import Icon from './Icon.svelte';
+
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
+  const title = $derived(router.route.name === 'dashboard' ? 'Tauler' : app.convs.currentTitle);
+  const lastMode = $derived(
+    router.route.name === 'chat' && app.convs.currentId != null
+      ? (app.convs.list.find((c) => c.id === app.convs.currentId)?.last_mode ?? null)
+      : null,
+  );
+  const showMenu = $derived(prefs.narrow || prefs.sidebarCollapsed);
+
+  function toggleSidebar(): void {
+    if (prefs.narrow) app.sidebarOpen = true;
+    else prefs.setSidebarCollapsed(false);
+  }
+</script>
+
+<svelte:head>
+  <title>{title === 'Nova conversa' ? 'ClaudeGPT OS' : `${title} · ClaudeGPT OS`}</title>
+</svelte:head>
+
+<header class="topbar">
+  {#if showMenu}
+    <button
+      type="button"
+      class="icon-btn"
+      onclick={toggleSidebar}
+      aria-label={prefs.narrow ? 'Obre el menú' : 'Mostra la barra lateral'}>
+      <Icon name={prefs.narrow ? 'menu' : 'sidebar'} />
+    </button>
+  {/if}
+  <h1 class="title">
+    <span class="text">{title}</span>
+    {#if lastMode}<span class="chip"><Icon name="mode-{lastMode}" size={12} />{MODE_LABEL[lastMode]}</span>{/if}
+  </h1>
+  <div class="right">
+    <ConnectionIndicator />
+    <button type="button" class="palette-btn" onclick={() => (app.paletteOpen = true)} aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'}>
+      <Icon name="search" size={15} />
+      <span class="palette-text">Cerca i ordres</span>
+      <kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd>
+    </button>
+  </div>
+</header>
+
+<style>
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 3.5rem;
+    padding: 0.55rem clamp(0.6rem, 2vw, 1.2rem);
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(rgb(7 8 13 / 0.55), rgb(7 8 13 / 0.2));
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+  }
+
+  .title {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-md);
+    font-weight: 650;
+  }
+
+  .text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .palette-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-height: 1.9rem;
+    padding: 0.2rem 0.4rem 0.2rem 0.65rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgb(7 8 13 / 0.4);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    transition:
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+
+  .palette-btn:hover {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+
+  @media (max-width: 640px) {
+    .palette-text,
+    .palette-btn kbd {
+      display: none;
+    }
+
+    .palette-btn {
+      padding: 0.2rem 0.55rem;
+    }
+
+    .title .chip {
+      display: none;
+    }
+  }
+</style>

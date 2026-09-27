@@ -19,15 +19,15 @@ export interface MoodTargets {
 }
 
 const TARGETS: Record<SceneMood, MoodTargets> = {
-  idle: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.45 },
+  idle: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.55 },
   thinking: { stream: 0, synth: 0, breathe: 1, energy: 0.15, core: 0.7 },
-  speaking: { stream: 0.12, synth: 0, breathe: 0, energy: 0.35, core: 0.55 },
+  speaking: { stream: 0, synth: 0, breathe: 0, energy: 0.35, core: 0.55 },
   debate: { stream: 1, synth: 0, breathe: 0, energy: 0.5, core: 0.65 },
   synthesis: { stream: 0.75, synth: 1, breathe: 0.3, energy: 0.6, core: 1 },
   // Transient moods: the one-shot effect is triggered separately and the
   // continuous state settles back to idle ("brief flash, then back to idle").
-  consensus: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.45 },
-  error: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.45 },
+  consensus: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.55 },
+  error: { stream: 0, synth: 0, breathe: 0, energy: 0, core: 0.55 },
 };
 
 export const SCENE_MOODS = Object.keys(TARGETS) as SceneMood[];

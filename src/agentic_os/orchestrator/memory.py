@@ -126,6 +126,7 @@ async def compact(
     conversation_id: int,
     providers: Mapping[AgentName, Provider],
     store: Store,
+    max_output_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
 ) -> CompactionResult | None:
     """Summarize ``context.messages[:cut]`` (plus the previous summary) with a fast model.
 
@@ -142,7 +143,7 @@ async def compact(
             context_summary=context.summary,
             purpose="summary",
             fast=True,
-            max_output_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
+            max_output_tokens=min(max_output_tokens, SUMMARY_MAX_OUTPUT_TOKENS),
         )
         started = time.monotonic()
         try:

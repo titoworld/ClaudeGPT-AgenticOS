@@ -129,7 +129,8 @@ def synthesis_prompt(
     answers: Mapping[AgentName, str],
     critiques: Mapping[AgentName, str | None],
 ) -> str:
-    """Synthesis prompt: the question, both final answers and the last critiques."""
+    """Synthesis prompt: the question, both final answers and the last critiques
+    (empty or "None" critiques are left out)."""
     parts = [
         f'<answer from="{AGENT_LABELS[agent]}">\n{answers[agent]}\n</answer>'
         for agent in AGENTS
@@ -137,10 +138,9 @@ def synthesis_prompt(
     ]
     for agent in AGENTS:
         critique = (critiques.get(agent) or "").strip()
-        if critique:
+        if critique and critique.strip(" -*.").lower() != "none":
             target = AGENT_LABELS[other_agent(agent)]
             parts.append(
-                f'<critique from="{AGENT_LABELS[agent]}" about="{target}">\n'
-                f"{critique}\n</critique>"
+                f'<critique from="{AGENT_LABELS[agent]}" about="{target}">\n{critique}\n</critique>'
             )
     return SYNTHESIS_TEMPLATE.format(question=question, answers="\n\n".join(parts))

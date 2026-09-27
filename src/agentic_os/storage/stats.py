@@ -11,17 +11,19 @@ Definitions:
 - ``latency``: nearest-rank percentiles over successful calls.
 - ``turns``: question messages created in the window, by their ``meta.mode``.
 - ``consensus``: completed debates (a debate question with a synthesis message).
-  A debate reached consensus when, in its last revision round, both agents
-  reported ``agreement`` >= the threshold of the question's
-  ``meta.options.debate.consensus_threshold`` (default 85). ``avg_rounds`` is the
-  mean of that last round number (0 for a debate without revisions).
+  When the synthesis has ``meta.consensus`` (``{"reached", "round", ...}``, as the
+  engine writes it) that is used. Otherwise it is derived: the debate reached
+  consensus when, in its last revision round, both agents reported
+  ``agreement`` >= the question's ``meta.options.debate.consensus_threshold``
+  (default 85), and its round is that last revision round (0 without revisions).
+  ``avg_rounds`` is the mean round over the counted debates.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Final, TypedDict
 
@@ -139,6 +141,20 @@ def _number(value: object) -> float | None:
     return float(value)
 
 
+def _derive_consensus(
+    by_round: Mapping[int, Mapping[AgentName, float | None]], threshold: float
+) -> tuple[bool, int]:
+    """(reached, last round) of a debate from its revisions' agreements."""
+    if not by_round:
+        return False, 0
+    last_round = max(by_round)
+    scores = by_round[last_round]
+    reached = all(
+        (score := scores.get(agent)) is not None and score >= threshold for agent in AGENTS
+    )
+    return reached, last_round
+
+
 async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
     """Aggregate the stats of the ``days``-day window ending on ``now``'s UTC date."""
     dates, start, end = window(days, now)
@@ -178,11 +194,14 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
     debate_rows = await tx.fetchall(
         """
         SELECT m.turn_id, m.kind, m.agent, m.round,
-               json_extract(m.meta, '$.agreement') AS agreement
+               json_extract(m.meta, '$.agreement') AS agreement,
+               json_extract(m.meta, '$.consensus.reached') AS reached,
+               json_extract(m.meta, '$.consensus.round') AS consensus_round
         FROM messages AS q JOIN messages AS m ON m.turn_id = q.id
         WHERE q.kind = 'question' AND q.created_at >= ? AND q.created_at < ?
           AND json_extract(q.meta, '$.mode') = 'debate'
           AND m.kind IN ('revision', 'synthesis')
+        ORDER BY m.id
         """,
         (start, end),
     )
@@ -289,14 +308,20 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
             thresholds[int(row["id"])] = (
                 threshold if threshold is not None else DebateOptions().consensus_threshold
             )
-    synthesized: set[int] = set()
+    # turn -> (reached, round) from the synthesis meta; None when it has no consensus.
+    synthesized: dict[int, tuple[bool, int] | None] = {}
     revisions: dict[int, dict[int, dict[AgentName, float | None]]] = defaultdict(
         lambda: defaultdict(dict)
     )
     for row in debate_rows:
         turn_id = int(row["turn_id"])
         if row["kind"] == "synthesis":
-            synthesized.add(turn_id)
+            stored_round = row["consensus_round"]
+            synthesized[turn_id] = (
+                (bool(row["reached"]), int(stored_round))
+                if row["reached"] is not None and isinstance(stored_round, int)
+                else None
+            )
             continue
         agent = _agent(row["agent"])
         if agent is not None:
@@ -305,17 +330,11 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
     rounds_total = 0
     debates = [turn_id for turn_id in thresholds if turn_id in synthesized]
     for turn_id in debates:
-        by_round = revisions.get(turn_id)
-        if not by_round:
-            continue
-        last_round = max(by_round)
-        rounds_total += last_round
-        scores = by_round[last_round]
-        if all(
-            (score := scores.get(agent)) is not None and score >= thresholds[turn_id]
-            for agent in AGENTS
-        ):
-            reached += 1
+        outcome = synthesized[turn_id]
+        if outcome is None:
+            outcome = _derive_consensus(revisions.get(turn_id, {}), thresholds[turn_id])
+        reached += outcome[0]
+        rounds_total += outcome[1]
 
     return Stats(
         days=days,

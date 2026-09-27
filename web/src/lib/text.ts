@@ -1,0 +1,93 @@
+// Small UI helpers: conversation grouping, fuzzy matching, compact numbers.
+
+import type { ConversationSummary, ProviderMode, TurnMode } from './protocol';
+
+export type DateGroup = 'Avui' | 'Ahir' | 'Últims 7 dies' | 'Anteriors';
+export const DATE_GROUPS: readonly DateGroup[] = ['Avui', 'Ahir', 'Últims 7 dies', 'Anteriors'];
+
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+export function dateGroup(iso: string, now: Date = new Date()): DateGroup {
+  const day = startOfDay(new Date(iso));
+  const today = startOfDay(now);
+  const diffDays = Math.round((today - day) / 86_400_000);
+  if (diffDays <= 0) return 'Avui';
+  if (diffDays === 1) return 'Ahir';
+  if (diffDays < 7) return 'Últims 7 dies';
+  return 'Anteriors';
+}
+
+export interface ConversationGroup {
+  label: DateGroup;
+  items: ConversationSummary[];
+}
+
+/** Groups conversations (already sorted newest first) by last update. */
+export function groupConversations(list: readonly ConversationSummary[], now: Date = new Date()): ConversationGroup[] {
+  const map = new Map<DateGroup, ConversationSummary[]>();
+  for (const c of list) {
+    const g = dateGroup(c.updated_at, now);
+    const items = map.get(g);
+    if (items) items.push(c);
+    else map.set(g, [c]);
+  }
+  return DATE_GROUPS.filter((g) => map.has(g)).map((label) => ({ label, items: map.get(label)! }));
+}
+
+/** Lowercase and strip accents so "revisio" matches "Revisió". */
+export function normalize(s: string): string {
+  return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+}
+
+/**
+ * Fuzzy score of `query` against `text` (higher is better, null = no match).
+ * Characters must appear in order; contiguous runs and word starts score more.
+ */
+export function fuzzyScore(query: string, text: string): number | null {
+  const q = normalize(query.trim());
+  if (!q) return 0;
+  const t = normalize(text);
+  const direct = t.indexOf(q);
+  if (direct >= 0) return 1000 - direct + (direct === 0 || /\W/.test(t[direct - 1] ?? '') ? 200 : 0);
+  let score = 0;
+  let ti = 0;
+  let run = 0;
+  for (const ch of q) {
+    if (ch === ' ') continue;
+    const found = t.indexOf(ch, ti);
+    if (found < 0) return null;
+    run = found === ti ? run + 1 : 0;
+    score += 1 + run * 2 + (found === 0 || /\W/.test(t[found - 1] ?? '') ? 3 : 0);
+    ti = found + 1;
+  }
+  return score;
+}
+
+export function fuzzyFilter<T>(items: readonly T[], query: string, key: (item: T) => string): T[] {
+  if (!query.trim()) return [...items];
+  return items
+    .map((item, i) => ({ item, i, score: fuzzyScore(query, key(item)) }))
+    .filter((x): x is { item: T; i: number; score: number } => x.score != null)
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .map((x) => x.item);
+}
+
+const oneDecimal = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 1 });
+const integer = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 0 });
+
+/** 950 -> "950", 3200 -> "3,2k", 1250000 -> "1,3M". */
+export function formatK(n: number): string {
+  const abs = Math.abs(n);
+  if (abs < 1000) return integer.format(n);
+  if (abs < 1_000_000) return `${oneDecimal.format(n / 1000)}k`;
+  return `${oneDecimal.format(n / 1_000_000)}M`;
+}
+
+/** Rough prompt size estimate used across the app: characters / 4. */
+export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+
+export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Consell' };
+
+export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = { cli: 'Subscripció', api: 'API', fake: 'Demo' };

@@ -38,7 +38,7 @@ _MAX_UNCHANGED_CHARS = 24
 _FALLBACK_AFTER_CHARS = 200
 """Untagged text longer than this before any tag is streamed as the answer."""
 
-_NUMBER_RE = re.compile(r"\d{1,3}")
+_NUMBER_RE = re.compile(r"-?\d{1,3}")
 _LOOSE_AGREEMENT_RE = re.compile(r"agreement\W{0,5}(\d{1,3})", re.IGNORECASE)
 
 
@@ -91,9 +91,7 @@ class _Section:
         if self._holding:
             self._held += text
             candidate = self._held.rstrip()
-            if len(candidate) <= _MAX_UNCHANGED_CHARS and _UNCHANGED_PREFIX_RE.fullmatch(
-                candidate
-            ):
+            if len(candidate) <= _MAX_UNCHANGED_CHARS and _UNCHANGED_PREFIX_RE.fullmatch(candidate):
                 return ""
             self._holding = False
             text, self._held = self._held, ""

@@ -72,8 +72,21 @@ class InMemoryStore:
         )
 
     async def add_message(self, message: NewMessage) -> int:
+        """Store a message. Same rules as the SQLite store: a question starts its own
+        turn (``turn_id`` None); any other message references a question of the same
+        conversation."""
         if message.conversation_id not in self.conversations:
             raise KeyError(f"unknown conversation {message.conversation_id}")
+        if message.kind == "question":
+            if message.turn_id is not None:
+                raise ValueError("a question starts its own turn: turn_id must be None")
+        elif not any(
+            m.id == message.turn_id
+            and m.kind == "question"
+            and m.conversation_id == message.conversation_id
+            for m in self.messages
+        ):
+            raise ValueError(f"a {message.kind} message needs the turn_id of its question")
         message_id = self._next_message_id
         self._next_message_id += 1
         self.messages.append(
