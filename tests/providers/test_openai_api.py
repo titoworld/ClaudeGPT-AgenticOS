@@ -23,9 +23,10 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.openai_api import (
     MAX_RETRIES,
+    MODEL_DESCRIPTIONS,
     TIMEOUT,
     OpenAIApiProvider,
-    estimate_cost,
+    is_chat_model,
     usage_from_response,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
@@ -178,7 +179,7 @@ async def failure(provider: OpenAIApiProvider, request: GenerationRequest) -> Pr
 # -- streaming -------------------------------------------------------------------------------
 
 
-async def test_streams_text_usage_and_cost(tmp_path: Path) -> None:
+async def test_streams_text_and_usage_without_cost(tmp_path: Path) -> None:
     recorder = Recorder(lambda: streaming(sse(delta("Bon "), delta("dia."), completed())))
     provider = make_provider(tmp_path, recorder)
     request = make_request(
@@ -192,14 +193,14 @@ async def test_streams_text_usage_and_cost(tmp_path: Path) -> None:
     assert deltas == ["Bon ", "dia."]
     assert result.text == "Bon dia."
     assert result.model == "gpt-6-astra-2026-09-03"
-    # 1000 input tokens include 600 cache reads and 100 cache writes.
+    # 1000 input tokens include 600 cache reads and 100 cache writes. No cost: the
+    # engine prices every call centrally (owner overrides included).
     assert result.usage == Usage(
         input_tokens=300,
         output_tokens=50,
         cache_read_tokens=600,
         cache_write_tokens=100,
         reasoning_tokens=10,
-        cost_usd=round((300 * 10 + 600 * 1 + 100 * 12.5 + 50 * 50) / 1e6, 6),
     )
     assert result.ttft_ms is not None
     assert result.latency_ms >= result.ttft_ms
@@ -259,9 +260,7 @@ async def test_incomplete_response_keeps_the_partial_text(tmp_path: Path) -> Non
     _, result = await collect(provider, make_request())
     assert result.text == "Mig "
     # Missing details (None at runtime despite the int typing) count as 0.
-    assert result.usage == Usage(
-        input_tokens=10, output_tokens=5, cost_usd=round((10 * 10 + 5 * 50) / 1e6, 6)
-    )
+    assert result.usage == Usage(input_tokens=10, output_tokens=5)
 
 
 async def test_missing_usage_has_no_cost(tmp_path: Path) -> None:
@@ -453,13 +452,93 @@ async def test_an_injected_client_is_not_closed(tmp_path: Path) -> None:
     await client.close()
 
 
-def test_estimate_cost_matches_models_and_snapshots() -> None:
-    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
-    assert estimate_cost("gpt-6-sol", usage) == 12.0
-    assert estimate_cost("gpt-6-luna-2026-09-22", usage) == 0.6
-    assert estimate_cost("gpt-6-luna-mini", usage) is None
-    assert estimate_cost("gpt-5.5", usage) is None
-
-
 def test_usage_from_response_without_details() -> None:
-    assert usage_from_response(None, "gpt-6-sol") == Usage()
+    assert usage_from_response(None) == Usage()
+
+
+# -- model list ------------------------------------------------------------------------------
+
+
+def listing(*ids: str) -> Callable[[httpx2.Request], httpx2.Response]:
+    data = [
+        {"id": model_id, "object": "model", "created": 1_700_000_000 + i, "owned_by": "openai"}
+        for i, model_id in enumerate(ids)
+    ]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "GET" and request.url.path == "/v1/models"
+        return httpx2.Response(200, json={"object": "list", "data": data})
+
+    return handler
+
+
+def test_is_chat_model() -> None:
+    chat = ["gpt-6-sol", "gpt-7", "o4-mini", "o9", "chatgpt-6o-latest", "gpt-6-sol-codex"]
+    other = [
+        "text-embedding-3-large",
+        "gpt-6-sol-2026-09-22",
+        "gpt-realtime",
+        "gpt-4o-mini-tts",
+        "gpt-4o-transcribe",
+        "gpt-image-2",
+        "gpt-4o-audio-preview",
+        "gpt-4o-search-preview",
+        "gpt-3.5-turbo-instruct",
+        "dall-e-3",
+        "whisper-1",
+        "omni-moderation-latest",
+        "davinci-002",
+    ]
+    assert all(is_chat_model(model) for model in chat)
+    assert not any(is_chat_model(model) for model in other)
+
+
+async def test_list_models_live_newest_first_and_cached(tmp_path: Path) -> None:
+    calls: list[int] = []
+    inner = listing("gpt-6-luna", "whisper-1", "gpt-6-astra", "o4-mini", "gpt-7-preview")
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return inner(request)
+
+    provider = make_provider(tmp_path, handler)
+    models = await provider.list_models()
+    assert provider.models_live and provider.fast_model == "gpt-6-luna"
+    assert [(m.id, m.is_default) for m in models] == [
+        ("gpt-7-preview", False),
+        ("o4-mini", False),
+        ("gpt-6-astra", True),
+        ("gpt-6-luna", False),
+    ]
+    assert models[2].description == MODEL_DESCRIPTIONS["gpt-6-astra"]
+    assert models[0].label == "gpt-7-preview" and models[0].description == ""
+    assert await provider.list_models() == models and len(calls) == 1
+    await provider.list_models(refresh=True)
+    assert len(calls) == 2
+
+
+async def test_list_models_adds_the_configured_model(tmp_path: Path) -> None:
+    provider = make_provider(tmp_path, listing("gpt-6-sol"), chatgpt_model="gpt-6-sol-mini")
+    models = await provider.list_models()
+    assert [(m.id, m.is_default) for m in models] == [
+        ("gpt-6-sol-mini", True),
+        ("gpt-6-sol", False),
+    ]
+
+
+async def test_list_models_falls_back_without_raising(tmp_path: Path) -> None:
+    def broken(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, json={"error": {"message": "boom"}})
+
+    for handler in (broken, listing("text-embedding-3-small")):
+        provider = make_provider(tmp_path, handler)
+        models = await provider.list_models()
+        assert not provider.models_live
+        assert [(m.id, m.is_default) for m in models] == [
+            ("gpt-6-astra", True),
+            ("gpt-6-sol", False),
+            ("gpt-6-luna", False),
+        ]
+        assert all(m.description for m in models)
+    no_key = OpenAIApiProvider(make_settings(tmp_path, openai_api_key=None))
+    assert len(await no_key.list_models()) == 3 and not no_key.models_live

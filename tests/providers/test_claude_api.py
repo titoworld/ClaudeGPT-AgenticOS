@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +24,8 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.claude_api import (
     FALLBACK_BETA,
+    STATIC_MODELS,
     ClaudeApiProvider,
-    estimate_cost,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
 
@@ -225,7 +224,7 @@ def request(purpose: Purpose = "answer", **overrides: Any) -> GenerationRequest:
 # -- streaming and request shape ------------------------------------------------------------
 
 
-async def test_streams_text_usage_and_cost(tmp_path: Path) -> None:
+async def test_streams_text_and_usage_without_cost(tmp_path: Path) -> None:
     api = MockApi(replying(answer("claude-opus-5", ["Hola", ", ", "món!"])))
     req = request(
         history=(
@@ -239,16 +238,14 @@ async def test_streams_text_usage_and_cost(tmp_path: Path) -> None:
     assert deltas == ["Hola", ", ", "món!"]
     assert result.text == "Hola, món!"
     assert result.model == "claude-opus-5"
-    expected = Usage(
+    # No cost: the engine prices every call centrally (owner overrides included).
+    assert result.usage == Usage(
         input_tokens=12,
         output_tokens=25,
         cache_read_tokens=3000,
         cache_write_tokens=40,
         reasoning_tokens=7,
     )
-    cost = (12 * 5 + 40 * 5 * 1.25 + 3000 * 0.5 + 25 * 25) / 1_000_000
-    assert replace(result.usage, cost_usd=None) == expected
-    assert result.usage.cost_usd == pytest.approx(cost)
     assert result.ttft_ms is not None and result.ttft_ms <= result.latency_ms
 
     (sent,) = api.requests
@@ -285,15 +282,12 @@ async def test_effort_per_purpose(tmp_path: Path, purpose: Purpose, effort: str)
 
 async def test_haiku_runs_without_thinking_effort_or_fallbacks(tmp_path: Path) -> None:
     api = MockApi(replying(answer("claude-haiku-4-5", ["ok"])))
-    _, result = await run(api, request("summary", fast=True), make_settings(tmp_path))
+    await run(api, request("summary", fast=True), make_settings(tmp_path))
     body = api.body
     assert body["model"] == "claude-haiku-4-5"
     assert body["max_tokens"] == 8000
     assert not {"thinking", "output_config", "fallbacks"} & set(body)
     assert "anthropic-beta" not in api.requests[0].headers
-    assert result.usage.cost_usd == pytest.approx(
-        (12 * 1 + 40 * 1 * 1.25 + 3000 * 0.1 + 25 * 5) / 1_000_000
-    )
 
 
 async def test_sonnet_thinks_but_has_no_fallbacks(tmp_path: Path) -> None:
@@ -309,9 +303,7 @@ async def test_explicit_model_and_opus_5_5_fallbacks(tmp_path: Path) -> None:
     api = MockApi(replying(answer("claude-opus-5-5", ["ok"])))
     _, result = await run(api, request(model="claude-opus-5-5"), make_settings(tmp_path))
     assert api.body["model"] == "claude-opus-5-5" and api.body["fallbacks"] == "default"
-    assert result.usage.cost_usd == pytest.approx(
-        (12 * 4 + 40 * 4 * 1.25 + 3000 * 0.2 + 25 * 20) / 1_000_000
-    )
+    assert result.model == "claude-opus-5-5" and result.usage.cost_usd is None
 
 
 async def test_empty_system_prompt_is_omitted(tmp_path: Path) -> None:
@@ -438,12 +430,86 @@ async def test_aclose_closes_only_its_own_client(tmp_path: Path) -> None:
     await injected.close()
 
 
-def test_estimate_cost() -> None:
-    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
-    assert estimate_cost("claude-opus-5", usage) == 30.0
-    assert estimate_cost("claude-opus-5-5", usage) == 24.0
-    assert estimate_cost("claude-opus-5-20260101", usage) == 30.0
-    assert estimate_cost("claude-sonnet-5", usage) == 12.0
-    assert estimate_cost("claude-haiku-4-5", Usage(cache_read_tokens=1_000_000)) == 0.1
-    assert estimate_cost("claude-haiku-4-5", Usage(cache_write_tokens=1_000_000)) == 1.25
-    assert estimate_cost("claude-unknown-9", usage) is None
+# -- model list ------------------------------------------------------------------------------
+
+
+def model_entry(model_id: str, name: str, context: int = 1_000_000) -> dict[str, Any]:
+    return {
+        "type": "model",
+        "id": model_id,
+        "display_name": name,
+        "created_at": "2026-09-01T00:00:00Z",
+        "max_input_tokens": context,
+        "max_tokens": 128_000,
+        "capabilities": None,
+    }
+
+
+def models_page(*entries: dict[str, Any]) -> httpx2.Response:
+    body = {
+        "data": list(entries),
+        "has_more": False,
+        "first_id": entries[0]["id"] if entries else None,
+        "last_id": entries[-1]["id"] if entries else None,
+    }
+    return httpx2.Response(200, headers={"request-id": "req_mock"}, json=body)
+
+
+async def test_list_models_live_and_cached(tmp_path: Path) -> None:
+    page = models_page(
+        model_entry("claude-fable-5-1", "Claude Fable 5.1"),
+        model_entry("claude-opus-5", "Claude Opus 5"),
+        model_entry("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000),
+    )
+    api = MockApi(failing(page))
+    provider = ClaudeApiProvider(make_settings(tmp_path), api.client())
+    try:
+        models = await provider.list_models()
+        assert provider.models_live and provider.fast_model == "claude-haiku-4-5"
+        assert [(m.id, m.label, m.is_default, m.context_window) for m in models] == [
+            ("claude-fable-5-1", "Claude Fable 5.1", False, 1_000_000),
+            ("claude-opus-5", "Claude Opus 5", True, 1_000_000),
+            ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", False, 200_000),
+        ]
+        assert models[2].description.startswith("El més ràpid")
+        assert api.requests[0].url.path == "/v1/models"
+        assert await provider.list_models() == models  # cached: no second request
+        assert len(api.requests) == 1
+        await provider.list_models(refresh=True)
+        assert len(api.requests) == 2
+    finally:
+        await provider.aclose()
+
+
+async def test_list_models_adds_a_configured_model_missing_from_the_list(tmp_path: Path) -> None:
+    api = MockApi(failing(models_page(model_entry("claude-opus-5", "Claude Opus 5"))))
+    settings = make_settings(tmp_path, claude_model="claude-opus-6-preview")
+    provider = ClaudeApiProvider(settings, api.client())
+    models = await provider.list_models()
+    await provider.aclose()
+    assert [(m.id, m.is_default) for m in models] == [
+        ("claude-opus-6-preview", True),
+        ("claude-opus-5", False),
+    ]
+
+
+@pytest.mark.parametrize(
+    "response", [error(500, "api_error", "boom"), models_page(), error(401, "auth", "no")]
+)
+async def test_list_models_falls_back_without_raising(
+    tmp_path: Path, response: httpx2.Response
+) -> None:
+    provider = ClaudeApiProvider(make_settings(tmp_path), MockApi(failing(response)).client())
+    models = await provider.list_models()
+    await provider.aclose()
+    assert not provider.models_live
+    assert [m.id for m in models] == [model_id for model_id, _, _ in STATIC_MODELS]
+    assert [m.id for m in models if m.is_default] == ["claude-opus-5"]
+    assert all(m.description for m in models)
+
+
+async def test_list_models_without_api_key(tmp_path: Path) -> None:
+    provider = ClaudeApiProvider(make_settings(tmp_path, anthropic_api_key=None))
+    models = await provider.list_models()
+    assert not provider.models_live and len(models) == len(STATIC_MODELS)
+    await provider.aclose()

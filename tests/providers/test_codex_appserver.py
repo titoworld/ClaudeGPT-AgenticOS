@@ -427,6 +427,70 @@ async def test_status_reports_the_plan_and_default_model(fake: FakeCodex) -> Non
     assert len(fake.received("account/read")) == 1
 
 
+# -- model list ------------------------------------------------------------------------------
+
+
+async def test_list_models_reads_the_visible_catalog(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    fake.options(page_size=1)  # three pages: the client follows nextCursor
+    models = await provider.list_models()
+    assert provider.models_live and provider.fast_model == "gpt-6-luna"
+    assert [(m.id, m.label, m.is_default) for m in models] == [
+        ("gpt-6-astra", "GPT-6-Astra", True),
+        ("gpt-6-sol", "GPT-6-Sol", False),
+        ("gpt-7-nova", "GPT-7-Nova", False),
+    ]  # the hidden entry is left out
+    assert models[0].description == "El més capaç, per a la feina més exigent."
+    assert models[2].description == "GPT-7-Nova (vendor description)."
+    assert all(p.get("includeHidden") is False for p in fake.params("model/list")[-4:])
+    requests = len(fake.params("model/list"))
+    assert await provider.list_models() == models  # cached
+    assert len(fake.params("model/list")) == requests
+    await provider.list_models(refresh=True)
+    assert len(fake.params("model/list")) > requests
+
+
+@pytest.mark.parametrize(
+    ("setting", "config_model", "default", "first"),
+    [
+        ("gpt-6-sol", None, "gpt-6-sol", "gpt-6-astra"),
+        (None, "gpt-6-sol", "gpt-6-sol", "gpt-6-astra"),
+        (None, "gpt-9-lab", "gpt-9-lab", "gpt-9-lab"),
+    ],
+)
+async def test_list_models_marks_the_configured_default(
+    fake: FakeCodex, setting: str | None, config_model: str | None, default: str, first: str
+) -> None:
+    fake.options(config_model=config_model)
+    codex = CodexAppServerProvider(fake.settings(chatgpt_model=setting))
+    try:
+        models = await codex.list_models()
+    finally:
+        await codex.aclose()
+    assert [m.id for m in models if m.is_default] == [default]
+    assert models[0].id == first
+
+
+async def test_list_models_falls_back_to_the_default(fake: FakeCodex, tmp_path: Path) -> None:
+    fake.options(model_list_error=True)
+    codex = CodexAppServerProvider(fake.settings(chatgpt_model="gpt-6-sol"))
+    try:
+        models = await codex.list_models()
+    finally:
+        await codex.aclose()
+    assert not codex.models_live
+    assert [(m.id, m.is_default) for m in models] == [("gpt-6-sol", True)]
+
+    missing = CodexAppServerProvider(fake.settings(codex_cli_path=str(tmp_path / "nope")))
+    try:
+        models = await missing.list_models()
+    finally:
+        await missing.aclose()
+    assert [(m.id, m.is_default) for m in models] == [("gpt-6-astra", True)]
+    assert not missing.models_live
+
+
 async def test_status_without_login_recycles_the_process(
     fake: FakeCodex, provider: CodexAppServerProvider
 ) -> None:

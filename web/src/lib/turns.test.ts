@@ -11,7 +11,7 @@ import {
   type TurnView,
 } from './turns.svelte';
 import { debateEvents, debateMessages, message, sequence, usage } from './test-fixtures';
-import type { TurnEvent } from './protocol';
+import type { Savings, TurnEvent } from './protocol';
 
 const live = (requestId = 'req-1'): TurnView =>
   createLiveTurn({ requestId, question: 'Pregunta?', mode: 'debate', conversationId: null });
@@ -133,7 +133,7 @@ describe('applyTurnEvent: failures', () => {
         },
         {
           type: 'turn.completed', conversation_id: 1, turn_id: 2, final_message_ids: [3], usage: usage(1, 1),
-          savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0 }, consensus: null, cached: false,
+          savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null }, consensus: null, cached: false,
         },
       ]),
     );
@@ -178,7 +178,7 @@ describe('applyTurnEvent: cached turn', () => {
         },
         {
           type: 'turn.completed', conversation_id: 1, turn_id: 9, final_message_ids: [10], usage: usage(0, 0),
-          savings: { cache: 812, compaction: 0, early_stop: 0, unchanged: 0, total: 812 }, consensus: null, cached: true,
+          savings: { cache: 812, compaction: 0, early_stop: 0, unchanged: 0, total: 812, cost_usd: null }, consensus: null, cached: true,
         },
       ]),
     );
@@ -229,7 +229,7 @@ describe('turnsFromMessages', () => {
             ...m,
             meta: {
               ...m.meta,
-              savings: { cache: 0, compaction: 10, early_stop: 20, unchanged: 30, total: 60 },
+              savings: { cache: 0, compaction: 10, early_stop: 20, unchanged: 30, total: 60, cost_usd: 0.0021 },
               consensus: { reached: false, round: 2, scores: { claude: 50, chatgpt: 60 } },
             },
           }
@@ -237,7 +237,24 @@ describe('turnsFromMessages', () => {
     );
     const [t] = turnsFromMessages(msgs);
     expect(t?.savings?.total).toBe(60);
+    expect(t?.savings?.cost_usd).toBe(0.0021);
     expect(t?.consensus?.reached).toBe(false);
+  });
+
+  it('reads the cost basis of each answer and tolerates savings without a value', () => {
+    // Stored before savings carried a value.
+    const legacySavings = { cache: 5, compaction: 0, early_stop: 0, unchanged: 0, total: 5 } as unknown as Savings;
+    const msgs = [
+      message({ id: 1, turn_id: 1, kind: 'question', content: 'a', meta: { mode: 'duel' } }),
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'claude', meta: { usage: usage(1, 1), cost_basis: 'api' } }),
+      message({
+        id: 3, turn_id: 1, kind: 'answer', agent: 'chatgpt', final: true,
+        meta: { usage: usage(1, 1), cost_basis: 'equivalent', savings: legacySavings },
+      }),
+    ];
+    const [t] = turnsFromMessages(msgs);
+    expect(t?.streams.map((s) => s.costBasis)).toEqual(['api', 'equivalent']);
+    expect(t?.savings).toMatchObject({ total: 5, cost_usd: null });
   });
 
   it('groups several turns, infers modes and flags cached answers', () => {

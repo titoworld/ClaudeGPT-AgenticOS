@@ -59,7 +59,8 @@ def _chunks(text: str) -> list[str]:
 
 class FakeProvider:
     """Provider that never leaves the process. ``requests`` and ``prewarmed`` record
-    every call, which tests use to check what the engine sent."""
+    every call, which tests use to check what the engine sent. Results report the
+    requested model (``fake-<agent>`` or ``fake-<agent>-mini`` for fast calls by default)."""
 
     def __init__(
         self,
@@ -91,6 +92,14 @@ class FakeProvider:
     def model(self) -> str:
         return f"fake-{self._agent}"
 
+    @property
+    def fast_model(self) -> str:
+        return f"fake-{self._agent}-mini"
+
+    @property
+    def models_live(self) -> bool:
+        return True
+
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         self.requests.append(request)
         started = time.monotonic()
@@ -113,7 +122,7 @@ class FakeProvider:
         yield GenerationResult(
             text=text,
             usage=Usage(input_tokens=prompt_tokens, output_tokens=_estimate(text)),
-            model=self.model,
+            model=request.model or (self.fast_model if request.fast else self.model),
             latency_ms=int((time.monotonic() - started) * 1000),
             ttft_ms=ttft_ms,
         )
@@ -130,9 +139,20 @@ class FakeProvider:
             detail="Mode demostració",
         )
 
-    async def list_models(self) -> Sequence[ModelInfo]:
-        model = f"fake-{self.agent}"
-        return (ModelInfo(id=model, label=model, is_default=True),)
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        return (
+            ModelInfo(
+                id=self.model,
+                label=f"{AGENT_LABELS[self._agent]} (demostració)",
+                description="Respostes predefinides, sense cap model real ni cost.",
+                is_default=True,
+            ),
+            ModelInfo(
+                id=self.fast_model,
+                label=f"{AGENT_LABELS[self._agent]} mini (demostració)",
+                description="Variant ràpida de demostració, la dels resums.",
+            ),
+        )
 
     async def aclose(self) -> None:
         self.closed = True

@@ -71,7 +71,7 @@ export function debateEvents(requestId = 'req-1'): TurnEvent[] {
     },
     {
       type: 'turn.completed', conversation_id: 7, turn_id: 40, final_message_ids: [47], usage: usage(1250, 161, 50),
-      savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 3200, total: 3200 },
+      savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 3200, total: 3200, cost_usd: 0.004 },
       consensus: { reached: true, round: 2, scores: { claude: 92, chatgpt: 88 } }, cached: false,
     },
   ]);

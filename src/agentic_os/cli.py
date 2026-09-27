@@ -25,9 +25,10 @@ from pydantic import ValidationError
 from agentic_os import __version__
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
+from agentic_os.fx import FxRate, manual_rate
 from agentic_os.providers.base import Provider, ProviderStatus
 from agentic_os.providers.prompt_format import AGENT_LABELS
-from agentic_os.storage import SchemaVersionError, SqliteStore
+from agentic_os.storage import RuntimeSettings, SchemaVersionError, SqliteStore, utc_now
 
 WS_MAX_BYTES: Final = 1024 * 1024
 KEEP_ALIVE_SECONDS: Final = 75
@@ -287,23 +288,54 @@ def _check_data_dir(settings: Settings, report: _Report) -> None:
         _check_permissions(str(db), stat.S_IMODE(db.stat().st_mode), 0o600, report)
 
 
-async def _check_owner(settings: Settings, report: _Report) -> None:
+@dataclass(frozen=True, slots=True)
+class _Stored:
+    """What the dashboard stored: the owner's settings and the current exchange rate."""
+
+    runtime: RuntimeSettings
+    fx: FxRate
+
+
+async def _check_database(settings: Settings, report: _Report) -> _Stored:
+    """Check the owner; returns the stored settings (the defaults without a database)."""
+    defaults = _Stored(RuntimeSettings(), manual_rate(RuntimeSettings().fx.eur_per_usd))
     if not settings.db_path.exists():
         report.fail("Encara no hi ha base de dades ni propietari: executa «agentic-os init».")
-        return
+        return defaults
     try:
         async with await SqliteStore.open(settings.db_path) as store:
             owner = await store.get_owner()
+            stored = _Stored(await store.get_runtime_settings(), await store.current_fx(utc_now()))
     except SchemaVersionError as exc:
         report.fail(str(exc))
-        return
+        return defaults
     except Exception as exc:
         report.fail(f"No s'ha pogut obrir la base de dades: {exc}")
-        return
+        return defaults
     if owner is None:
         report.fail("No hi ha cap propietari configurat: executa «agentic-os init».")
     else:
         report.ok("Propietari configurat (contrasenya i TOTP).")
+    return stored
+
+
+def _decimal(value: float) -> str:
+    """Catalan decimal notation with 2 to 4 decimals (``0,86``, ``0,8547``)."""
+    whole, _, decimals = f"{value:.4f}".rstrip("0").partition(".")
+    return f"{whole},{decimals.ljust(2, '0')}"
+
+
+def _report_fx(stored: _Stored, report: _Report) -> None:
+    rate = f"1 $ = {_decimal(stored.fx.eur_per_usd)} €"
+    if stored.fx.source == "ecb" and stored.fx.as_of is not None:
+        report.ok(f"Tipus de canvi del BCE del {stored.fx.as_of.strftime('%d/%m/%Y')}: {rate}.")
+    elif stored.runtime.fx.mode == "manual":
+        report.ok(f"Tipus de canvi manual: {rate}.")
+    else:
+        report.skip(
+            f"Tipus de canvi manual de reserva: {rate} (encara no hi ha cap tipus recent del "
+            "BCE; el servidor el baixa en arrencar)."
+        )
 
 
 def _check_web(settings: Settings, report: _Report) -> None:
@@ -380,21 +412,46 @@ async def _provider_status(provider: Provider, timeout: float) -> ProviderStatus
     return await asyncio.wait_for(provider.status(), timeout)
 
 
+def _describe_models(
+    agent: AgentName,
+    provider: Provider,
+    provider_model: str,
+    settings: Settings,
+    runtime: RuntimeSettings,
+    report: _Report,
+) -> None:
+    from agentic_os.server.catalog import effective_models
+
+    default, fast = effective_models(agent, provider.mode, provider_model, runtime, settings)
+    chosen = " (triat al tauler)" if runtime.models.get(agent) else ""
+    chosen_fast = " (triat al tauler)" if runtime.fast_models.get(agent) else ""
+    report.detail(
+        f"Model per defecte: {default or '?'}{chosen}; per als resums: {fast}{chosen_fast}."
+    )
+
+
 def _report_provider(
-    agent: AgentName, provider: Provider, result: ProviderStatus | BaseException, report: _Report
+    agent: AgentName,
+    provider: Provider,
+    result: ProviderStatus | BaseException,
+    report: _Report,
+    settings: Settings,
+    runtime: RuntimeSettings,
 ) -> None:
     label = AGENT_LABELS[agent]
-    if isinstance(result, TimeoutError):
-        report.fail(f"{label} (mode {provider.mode}): el proveïdor no respon.")
-        return
     if isinstance(result, BaseException):
-        report.fail(f"{label} (mode {provider.mode}): error en consultar l'estat: {result}")
+        if isinstance(result, TimeoutError):
+            report.fail(f"{label} (mode {provider.mode}): el proveïdor no respon.")
+        else:
+            report.fail(f"{label} (mode {provider.mode}): error en consultar l'estat: {result}")
+        _describe_models(agent, provider, "", settings, runtime, report)
         return
     line = f"{label} (mode {result.mode}, model {result.model or '?'}): {result.detail}"
     if result.available:
         report.ok(line)
     else:
         report.fail(line)
+    _describe_models(agent, provider, result.model, settings, runtime, report)
     _describe_limits(result, report)
 
 
@@ -411,7 +468,8 @@ async def run_doctor(
     out(f"ClaudeGPT OS {__version__}: diagnosi")
     _check_config(settings, report)
     _check_data_dir(settings, report)
-    await _check_owner(settings, report)
+    stored = await _check_database(settings, report)
+    _report_fx(stored, report)
     _check_web(settings, report)
     await _check_cli(
         "Claude Code",
@@ -437,7 +495,7 @@ async def run_doctor(
             return_exceptions=True,
         )
         for (agent, provider), result in zip(active.items(), results, strict=True):
-            _report_provider(agent, provider, result, report)
+            _report_provider(agent, provider, result, report, settings, stored.runtime)
     finally:
         await asyncio.gather(*(p.aclose() for p in owned.values()), return_exceptions=True)
 

@@ -18,8 +18,9 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
 
 Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
 ``requiresOpenaiAuth``, ``config_model``, ``rate_limits_delay`` (seconds before answering
-account/rateLimits/read), ``init_error`` and ``spawn_child`` (start a ``sleep`` child to
-check process-group kills). Every message received is appended to
+account/rateLimits/read), ``init_error``, ``spawn_child`` (start a ``sleep`` child to
+check process-group kills), ``models`` / ``page_size`` / ``model_list_error`` (the
+model/list catalog, its page size and a forced error). Every message received is appended to
 ``$CODEX_HOME/requests.jsonl`` with the pid; the environment goes to ``env.json``.
 Standard library only.
 """
@@ -44,6 +45,29 @@ OPTIONS: dict[str, Any] = (
 )
 PID = os.getpid()
 DEFAULT_ACCOUNT = {"type": "chatgpt", "email": "owner@example.com", "planType": "plus"}
+
+
+def model_entry(
+    slug: str, name: str, *, default: bool = False, hidden: bool = False
+) -> dict[str, Any]:
+    return {
+        "id": slug,
+        "model": slug,
+        "displayName": name,
+        "description": f"{name} (vendor description).",
+        "hidden": hidden,
+        "isDefault": default,
+        "supportedReasoningEfforts": [],
+        "defaultReasoningEffort": "medium",
+    }
+
+
+DEFAULT_MODELS = [
+    model_entry("gpt-6-astra", "GPT-6-Astra", default=True),
+    model_entry("gpt-6-sol", "GPT-6-Sol"),
+    model_entry("codex-auto-review", "Codex Auto Review", hidden=True),
+    model_entry("gpt-7-nova", "GPT-7-Nova"),
+]
 
 _out_lock = threading.Lock()
 _log_lock = threading.Lock()
@@ -323,8 +347,19 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
             {"config": {"model": OPTIONS.get("config_model")}, "origins": {}, "layers": None},
         )
     elif method == "model/list":
-        entry = {"id": "gpt-6-astra", "model": "gpt-6-astra", "isDefault": True, "hidden": False}
-        respond(request_id, {"data": [entry], "nextCursor": None})
+        if OPTIONS.get("model_list_error"):
+            fail(request_id, -32603, "model catalog unavailable")
+            return
+        # Hidden entries are returned too, so the client's own filter is exercised.
+        models = OPTIONS.get("models", DEFAULT_MODELS)
+        size = int(OPTIONS.get("page_size", 100))
+        start = int(params.get("cursor") or 0)
+        more = start + size < len(models)
+        page = {
+            "data": models[start : start + size],
+            "nextCursor": str(start + size) if more else None,
+        }
+        respond(request_id, page)
     elif method == "thread/start":
         thread_id = str(uuid.uuid4())
         model = params.get("model") or OPTIONS.get("config_model") or "gpt-6-astra"

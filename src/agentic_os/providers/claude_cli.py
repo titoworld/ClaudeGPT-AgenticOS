@@ -46,6 +46,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "opus"
 DEFAULT_FAST_MODEL = "haiku"
 
+CLAUDE_FAMILIES: tuple[tuple[str, str, str], ...] = (
+    ("opus", "Claude Opus", "Raonament profund i tasques llargues."),
+    ("sonnet", "Claude Sonnet", "Equilibri entre qualitat i velocitat."),
+    ("haiku", "Claude Haiku", "El més ràpid i econòmic; bo per als resums."),
+    ("fable", "Claude Fable", "El més capaç; pot no estar inclòs en tots els plans."),
+)
+"""(CLI alias, label, Catalan description) per model family. The CLI aliases always
+point to the newest model of their family (verified on Claude Code 2.1.283)."""
+
 Effort = Literal["low", "medium", "high"]
 
 EFFORT_BY_PURPOSE: dict[Purpose, Effort] = {
@@ -108,6 +117,12 @@ class _Key(NamedTuple):
 
 def is_haiku(model: str) -> bool:
     return "haiku" in model.lower()
+
+
+def family_description(model: str) -> str:
+    """Catalan description of a Claude model id or alias by its family ("" if unknown)."""
+    lowered = model.lower()
+    return next((text for family, _, text in CLAUDE_FAMILIES if family in lowered), "")
 
 
 def redact(text: str) -> str:
@@ -302,6 +317,8 @@ class ClaudeCliProvider:
         """Every process not reaped yet: warm, serving a call or finishing."""
         self._tasks: set[asyncio.Task[None]] = set()
         self._limits: dict[str, UsageLimit] = {}
+        self._resolved: dict[str, str] = {}
+        """Model each requested name (e.g. the alias "opus") resolved to in real calls."""
         self._status_cache: tuple[float, bool, str] | None = None
         self._status_lock = asyncio.Lock()
         self._sandbox: Path | None = None
@@ -318,6 +335,11 @@ class ClaudeCliProvider:
     @property
     def default_model(self) -> str:
         return self._settings.claude_model or DEFAULT_MODEL
+
+    @property
+    def fast_model(self) -> str:
+        """Model of the cheap internal calls (summaries) when none is requested."""
+        return self._settings.claude_fast_model or DEFAULT_FAST_MODEL
 
     # -- Provider API ----------------------------------------------------------
 
@@ -350,6 +372,8 @@ class ClaudeCliProvider:
         result = turn.result
         if result is None:  # pragma: no cover - the loop only ends with a result
             raise ProviderError("La CLI de Claude no ha enviat cap resultat.", kind="internal")
+        if turn.model_reported and turn.model != key.model:
+            self._resolved[key.model] = turn.model
         if result.get("is_error"):
             raise self._result_error(result, turn)
         text = "".join(turn.chunks)
@@ -409,9 +433,33 @@ class ClaudeCliProvider:
             limits=tuple(self._limits.values()),
         )
 
-    async def list_models(self) -> Sequence[ModelInfo]:
-        model = self._settings.claude_model or "opus"
-        return (ModelInfo(id=model, label=model, is_default=True),)
+    @property
+    def models_live(self) -> bool:
+        """The alias list is authoritative: each alias follows its family's newest model."""
+        return True
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        """The CLI aliases (Claude Code has no command to list models), with the model
+        each one resolved to in the latest real call. A configured full id goes first."""
+        default = self.default_model
+        models: list[ModelInfo] = []
+        if default not in (alias for alias, _, _ in CLAUDE_FAMILIES):
+            models.append(
+                ModelInfo(
+                    id=default,
+                    label=default,
+                    description=family_description(default) or "Model configurat al servidor.",
+                    is_default=True,
+                )
+            )
+        for alias, label, text in CLAUDE_FAMILIES:
+            resolved = self._resolved.get(alias)
+            description = f"Sempre la versió més nova. {text}"
+            if resolved:
+                description += f" Ara: {resolved}"
+            is_default = alias == default
+            models.append(ModelInfo(alias, label, description, is_default=is_default))
+        return models
 
     async def aclose(self) -> None:
         self._closed = True
@@ -427,7 +475,7 @@ class ClaudeCliProvider:
         if request.model:
             model = request.model
         elif request.fast:
-            model = self._settings.claude_fast_model or DEFAULT_FAST_MODEL
+            model = self.fast_model
         else:
             model = self.default_model
         if is_haiku(model):

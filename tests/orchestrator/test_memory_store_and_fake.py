@@ -151,6 +151,20 @@ async def test_fake_summary_and_chunk_delay() -> None:
     )
     assert time.monotonic() - started >= 0.001
     assert text.startswith("Resum") and result.usage != Usage()
+    assert result.model == "fake-chatgpt-mini"
+
+
+async def test_fake_echoes_the_requested_model_and_lists_two() -> None:
+    provider = FakeProvider("claude", chunk_delay=0)
+    _, result = await run_fake(provider, GenerationRequest(system="s", prompt="p", model="x-1"))
+    assert result.model == "x-1" and result.usage.cost_usd is None
+    models = await provider.list_models()
+    assert [(m.id, m.is_default) for m in models] == [
+        ("fake-claude", True),
+        ("fake-claude-mini", False),
+    ]
+    assert all(m.label and m.description for m in models)
+    assert provider.models_live
 
 
 async def test_fake_agreement_sequence_restarts_for_a_new_question() -> None:

@@ -1,14 +1,18 @@
 <script lang="ts">
-  import { formatInt } from '../lib/format';
+  import { savingsEur } from '../lib/costs';
+  import { formatEur, formatInt } from '../lib/format';
   import type { Savings, SavingKind } from '../lib/protocol';
   import { formatK } from '../lib/text';
   import Icon from './Icon.svelte';
 
   interface Props {
     savings: Savings;
+    /** Euros per dollar, to show the value of the saved tokens. */
+    eurPerUsd: number;
   }
 
-  let { savings }: Props = $props();
+  let { savings, eurPerUsd }: Props = $props();
+  const value = $derived(savingsEur(savings, eurPerUsd));
   let open = $state(false);
   const id = $props.id();
 
@@ -28,7 +32,9 @@
     aria-expanded={open}
     onclick={() => (open = !open)}
     onblur={() => (open = false)}>
-    <Icon name="bolt" size={12} />−{formatK(savings.total)} tokens estalviats
+    <Icon name="bolt" size={12} />−{formatK(savings.total)} tokens estalviats{#if value != null}<span
+        class="value">≈ {formatEur(value)}</span
+      >{/if}
   </button>
   <span class="tip" role="tooltip" {id}>
     <strong>Tokens estalviats en aquest torn</strong>
@@ -38,6 +44,10 @@
       </span>
     {/each}
     <span class="row total">Total<b>{formatInt(savings.total)}</b></span>
+    {#if value != null}
+      <span class="row money">Valor aproximat<b>≈ {formatEur(value)}</b></span>
+      <small>Al preu mitjà dels tokens d'aquest torn.</small>
+    {/if}
   </span>
 </span>
 
@@ -125,6 +135,20 @@
 
   .unchanged i {
     background: var(--saving-unchanged);
+  }
+
+  .value {
+    margin-left: 0.2rem;
+    padding-left: 0.45rem;
+    border-left: 1px solid rgb(62 207 142 / 0.35);
+  }
+
+  .money b {
+    color: #9ff0c9;
+  }
+
+  small {
+    color: var(--text-muted);
   }
 
   .total {

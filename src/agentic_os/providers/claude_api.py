@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
-from dataclasses import replace
 
 import anthropic
 from anthropic import omit
@@ -30,8 +30,15 @@ from agentic_os.providers.base import (
     ProviderStatus,
     TextDelta,
 )
-from agentic_os.providers.claude_cli import EFFORT_BY_PURPOSE, is_haiku, redact
+from agentic_os.providers.claude_cli import (
+    EFFORT_BY_PURPOSE,
+    family_description,
+    is_haiku,
+    redact,
+)
 from agentic_os.providers.prompt_format import to_chat_messages
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_FAST_MODEL = "claude-haiku-4-5"
@@ -44,33 +51,32 @@ FALLBACK_MODELS = frozenset(
 """Models whose safety classifiers can decline; they get ``fallbacks="default"``."""
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
-    # model: (input, output, cache read) in USD per million tokens
-    "claude-opus-5-5": (4.0, 20.0, 0.20),
-    "claude-opus-5": (5.0, 25.0, 0.50),
-    "claude-opus-4-8": (5.0, 25.0, 0.50),  # target of the server-side fallback
-    "claude-sonnet-5": (2.0, 10.0, 0.20),
-    "claude-haiku-4-5": (1.0, 5.0, 0.10),
-}
-CACHE_WRITE_MULTIPLIER = 1.25
-"""5-minute cache writes cost 1.25x the input price."""
+MODELS_TTL_SECONDS = 600.0
+FALLBACK_TTL_SECONDS = 60.0
+"""A failed listing is retried sooner than a live one is refreshed."""
+LIST_TIMEOUT_SECONDS = 15.0
+MAX_LISTED_MODELS = 200
+
+STATIC_MODELS: tuple[tuple[str, str, int], ...] = (
+    ("claude-opus-5", "Claude Opus 5", 1_000_000),
+    ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000),
+    ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000),
+    ("claude-fable-5-1", "Claude Fable 5.1", 1_000_000),
+)
+"""(id, label, context window) shown when the Models API cannot be queried."""
 
 
-def estimate_cost(model: str, usage: Usage) -> float | None:
-    """List-price cost of one call, or None for a model missing from the table."""
-    for name in sorted(PRICES_PER_MTOK, key=len, reverse=True):
-        if model == name or model.startswith(f"{name}-"):
-            price_in, price_out, price_read = PRICES_PER_MTOK[name]
-            break
-    else:
-        return None
-    total = (
-        usage.input_tokens * price_in
-        + usage.cache_write_tokens * price_in * CACHE_WRITE_MULTIPLIER
-        + usage.cache_read_tokens * price_read
-        + usage.output_tokens * price_out
+def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...]:
+    """``models`` with the configured default first if the listing does not include it."""
+    if any(model.id == default for model in models):
+        return tuple(models)
+    extra = ModelInfo(
+        id=default,
+        label=default,
+        description=family_description(default) or "Model configurat al servidor.",
+        is_default=True,
     )
-    return round(total / 1_000_000, 6)
+    return (extra, *models)
 
 
 def _error_detail(exc: anthropic.APIStatusError) -> str:
@@ -130,6 +136,9 @@ class ClaudeApiProvider:
         self._settings = settings
         self._client = client
         self._owns_client = client is None
+        self._models_cache: tuple[float, tuple[ModelInfo, ...], bool] | None = None
+        """(expiry on the monotonic clock, models, live)."""
+        self._models_lock = asyncio.Lock()
 
     @property
     def agent(self) -> AgentName:
@@ -142,6 +151,11 @@ class ClaudeApiProvider:
     @property
     def default_model(self) -> str:
         return self._settings.claude_model or DEFAULT_MODEL
+
+    @property
+    def fast_model(self) -> str:
+        """Model of the cheap internal calls (summaries) when none is requested."""
+        return self._settings.claude_fast_model or DEFAULT_FAST_MODEL
 
     def _configured(self) -> bool:
         key = self._settings.anthropic_api_key
@@ -165,7 +179,7 @@ class ClaudeApiProvider:
         if request.model:
             return request.model
         if request.fast:
-            return self._settings.claude_fast_model or DEFAULT_FAST_MODEL
+            return self.fast_model
         return self.default_model
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
@@ -231,6 +245,7 @@ class ClaudeApiProvider:
             )
         usage = final.usage
         details = usage.output_tokens_details
+        # No cost here: the engine prices every call (owner price overrides included).
         result_usage = Usage(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
@@ -240,7 +255,7 @@ class ClaudeApiProvider:
         )
         yield GenerationResult(
             text="".join(chunks),
-            usage=replace(result_usage, cost_usd=estimate_cost(final.model, result_usage)),
+            usage=result_usage,
             model=final.model,
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,
@@ -273,10 +288,56 @@ class ClaudeApiProvider:
             ),
         )
 
-    async def list_models(self) -> Sequence[ModelInfo]:
-        # Placeholder until live listing is implemented: the configured default only.
-        status = await self.status()
-        return (ModelInfo(id=status.model, label=status.model, is_default=True),)
+    @property
+    def models_live(self) -> bool:
+        """Whether the latest :meth:`list_models` came from the Models API."""
+        return self._models_cache is not None and self._models_cache[2]
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        """Models of the Models API (cached ~10 min), or a static list if it fails."""
+        async with self._models_lock:
+            cached = self._models_cache
+            if refresh or cached is None or time.monotonic() >= cached[0]:
+                models, live = await self._fetch_models()
+                ttl = MODELS_TTL_SECONDS if live else FALLBACK_TTL_SECONDS
+                cached = self._models_cache = (time.monotonic() + ttl, models, live)
+        return cached[1]
+
+    async def _fetch_models(self) -> tuple[tuple[ModelInfo, ...], bool]:
+        default = self.default_model
+        try:
+            client = self._get_client()
+            listed: list[ModelInfo] = []
+            async with asyncio.timeout(LIST_TIMEOUT_SECONDS):
+                async for model in client.models.list(limit=100):
+                    listed.append(
+                        ModelInfo(
+                            id=model.id,
+                            label=model.display_name or model.id,
+                            description=family_description(model.id),
+                            is_default=model.id == default,
+                            context_window=model.max_input_tokens,
+                        )
+                    )
+                    if len(listed) >= MAX_LISTED_MODELS:
+                        break
+            if not listed:
+                raise ProviderError("L'API d'Anthropic no ha retornat cap model.", kind="internal")
+        except Exception as exc:
+            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            logger.warning("Could not list the Anthropic models (%s); using the fallback", reason)
+            listed = [
+                ModelInfo(
+                    id=model_id,
+                    label=label,
+                    description=family_description(model_id),
+                    is_default=model_id == default,
+                    context_window=window,
+                )
+                for model_id, label, window in STATIC_MODELS
+            ]
+            return _with_default(listed, default), False
+        return _with_default(listed, default), True
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:

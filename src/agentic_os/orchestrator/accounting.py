@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from agentic_os.domain import Purpose, SavingKind, Usage
 from agentic_os.orchestrator.events import Savings
 from agentic_os.orchestrator.store import SavingRecord
@@ -24,8 +26,13 @@ class TurnAccounting:
         """Requests of this turn that carried the (compacted) conversation context."""
         self.rounds_skipped = 0
         self.unchanged_count = 0
+        self.cache_cost: float | None = None
+        """Value of the turn a cache hit replays (its cost at current prices), if known."""
         self._revision_tokens = 0
         self._revision_calls = 0
+        self._priced_cost = 0.0
+        self._priced_tokens = 0
+        """Cost and tokens of the calls with a known price (the turn's average price)."""
 
     def add_summary(self, usage: Usage) -> None:
         self.usage += usage
@@ -34,6 +41,9 @@ class TurnAccounting:
         """A successful model call that produced a message of the turn."""
         self.usage += usage
         self.turn_usage += usage
+        if usage.cost_usd is not None:
+            self._priced_cost += usage.cost_usd
+            self._priced_tokens += usage.total_tokens
         if purpose == "revision":
             self._revision_tokens += usage.total_tokens
             self._revision_calls += 1
@@ -59,12 +69,21 @@ class TurnAccounting:
         return self.compaction_per_request * self.context_requests
 
     def savings(self) -> Savings:
-        return Savings(
+        """Tokens saved so far and their value: a cache hit is worth what the replayed
+        turn cost; other savings are valued at this turn's average price per token.
+        ``cost_usd`` is None while no call of the turn has a known price."""
+        saved = Savings(
             cache=self.cache,
             compaction=self.compaction,
             early_stop=self.early_stop,
             unchanged=self.unchanged,
         )
+        if self.cache_cost is None and not self._priced_tokens:
+            return saved
+        value = self.cache_cost or 0.0
+        if self._priced_tokens:
+            value += (saved.total - self.cache) * self._priced_cost / self._priced_tokens
+        return replace(saved, cost_usd=value)
 
     def saving_records(self, conversation_id: int, turn_id: int) -> list[SavingRecord]:
         """One record per kind with a positive saving (details in Catalan)."""

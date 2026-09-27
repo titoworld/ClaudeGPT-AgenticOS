@@ -1,20 +1,24 @@
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agentic_os.domain import Usage
+from agentic_os.fx import FxRate
 from agentic_os.orchestrator.store import (
     CachedTurn,
     NewMessage,
     Store,
     UsageRecord,
 )
+from agentic_os.pricing import ModelPrice
 from agentic_os.storage import (
     ConversationNotFoundError,
+    FxSettings,
     RuntimeSettings,
     SqliteStore,
+    StoredFxRate,
 )
 from agentic_os.storage.models import parse_ts
 
@@ -396,6 +400,66 @@ async def test_invalid_stored_runtime_settings_fall_back_to_defaults(store: Sqli
             "INSERT INTO settings (key, value) VALUES ('runtime', '{\"default_mode\": \"x\"}')"
         )
     assert await store.get_runtime_settings() == RuntimeSettings()
+
+
+async def test_models_prices_and_money_settings_roundtrip(store: SqliteStore) -> None:
+    custom = RuntimeSettings(
+        models={"claude": "claude-opus-5", "chatgpt": None},
+        fast_models={"claude": None, "chatgpt": "gpt-6-luna"},
+        prices={"gpt-7-nova": ModelPrice(3.0, 12.0, 0.3, 0.0)},
+        fx=FxSettings(mode="manual", eur_per_usd=0.92),
+        budgets_eur={"claude": 20.0, "chatgpt": None},
+        plans_eur={"claude": 90.0, "chatgpt": 23.0},
+    )
+    await store.put_runtime_settings(custom)
+    assert await store.get_runtime_settings() == custom
+
+
+async def test_settings_stored_by_the_previous_version_get_the_new_defaults(
+    store: SqliteStore,
+) -> None:
+    old = '{"default_mode": "solo", "default_target": "chatgpt", "use_cache": false}'
+    async with store._db.transaction() as tx:
+        await tx.execute("INSERT INTO settings (key, value) VALUES ('runtime', ?)", (old,))
+    settings = await store.get_runtime_settings()
+    assert settings == RuntimeSettings(
+        default_mode="solo", default_target="chatgpt", use_cache=False
+    )
+    assert settings.fx == FxSettings(mode="auto", eur_per_usd=0.86)
+
+
+# --------------------------------------------------------------------------
+# Exchange rate
+# --------------------------------------------------------------------------
+
+ECB = FxRate(eur_per_usd=0.8547, as_of=date(2026, 9, 25), source="ecb")
+
+
+async def test_ecb_rate_storage_and_current_fx(store: SqliteStore) -> None:
+    manual = FxRate(eur_per_usd=0.86, as_of=None, source="manual")
+    assert await store.get_ecb_rate() is None
+    assert await store.current_fx(T0) == manual
+
+    await store.put_ecb_rate(ECB, T0)
+    assert await store.get_ecb_rate() == StoredFxRate(rate=ECB, fetched_at=T0)
+    assert await store.current_fx(T0 + timedelta(days=3)) == ECB
+    # Too old: back to the manual rate (the owner's one).
+    await store.put_runtime_settings(RuntimeSettings(fx=FxSettings(eur_per_usd=0.9)))
+    assert await store.current_fx(T0 + timedelta(days=11)) == FxRate(0.9, None, "manual")
+    # Manual mode ignores the ECB rate.
+    await store.put_runtime_settings(RuntimeSettings(fx=FxSettings(mode="manual")))
+    assert await store.current_fx(T0) == manual
+
+    later = FxRate(eur_per_usd=0.85, as_of=date(2026, 9, 26), source="ecb")
+    await store.put_ecb_rate(later, T0 + timedelta(days=1))
+    assert await store.get_ecb_rate() == StoredFxRate(later, T0 + timedelta(days=1))
+
+
+async def test_an_invalid_stored_ecb_rate_is_ignored(store: SqliteStore) -> None:
+    async with store._db.transaction() as tx:
+        await tx.execute("INSERT INTO settings (key, value) VALUES ('fx_ecb', '{\"x\": 1}')")
+    assert await store.get_ecb_rate() is None
+    assert (await store.current_fx(T0)).source == "manual"
 
 
 # --------------------------------------------------------------------------

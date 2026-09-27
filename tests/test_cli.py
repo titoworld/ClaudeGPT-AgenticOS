@@ -1,6 +1,7 @@
 import asyncio
 import stat
 from collections.abc import Iterator, Sequence
+from datetime import date
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,10 @@ from agentic_os import __version__
 from agentic_os.cli import log_config, main, run_doctor
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
+from agentic_os.fx import FxRate
 from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus, UsageLimit
 from agentic_os.providers.fake import FakeProvider
-from agentic_os.storage import SqliteStore
+from agentic_os.storage import FxSettings, RuntimeSettings, SqliteStore, utc_now
 
 
 def isolated_settings(**values: Any) -> Settings:
@@ -192,8 +194,38 @@ async def test_doctor_all_good(tmp_path: Path) -> None:
     assert "[ -- ] CLI de Claude Code: no cal (mode fake)." in out
     assert "[ OK ] Claude (mode fake, model fake-claude): Mode demostració" in out
     assert "[ OK ] ChatGPT (mode fake, model fake-chatgpt): Mode demostració" in out
+    assert "       Model per defecte: fake-claude; per als resums: fake-claude-mini." in out
+    assert (
+        "[ -- ] Tipus de canvi manual de reserva: 1 $ = 0,86 € (encara no hi ha cap tipus "
+        "recent del BCE; el servidor el baixa en arrencar)."
+    ) in out
     assert "[AVÍS]" not in out
     assert out.endswith("Tot correcte.")
+
+
+async def test_doctor_shows_the_chosen_models_and_the_ecb_rate(tmp_path: Path) -> None:
+    settings = await ready_settings(tmp_path)
+    async with await SqliteStore.open(settings.db_path) as store:
+        await store.put_runtime_settings(
+            RuntimeSettings(
+                models={"claude": "claude-opus-5", "chatgpt": None},
+                fast_models={"claude": "claude-haiku-4-5", "chatgpt": None},
+            )
+        )
+        await store.put_ecb_rate(FxRate(0.8547, date(2026, 9, 25), "ecb"), utc_now())
+    code, out = await doctor(settings, fakes())
+    assert code == 0, out
+    assert (
+        "       Model per defecte: claude-opus-5 (triat al tauler); per als resums: "
+        "claude-haiku-4-5 (triat al tauler)."
+    ) in out
+    assert "       Model per defecte: fake-chatgpt; per als resums: fake-chatgpt-mini." in out
+    assert "[ OK ] Tipus de canvi del BCE del 25/09/2026: 1 $ = 0,8547 €." in out
+
+    async with await SqliteStore.open(settings.db_path) as store:
+        await store.put_runtime_settings(RuntimeSettings(fx=FxSettings("manual", 0.9)))
+    code, out = await doctor(settings, fakes())
+    assert "[ OK ] Tipus de canvi manual: 1 $ = 0,90 €." in out
 
 
 async def test_doctor_reports_cli_versions_and_limits(tmp_path: Path) -> None:
@@ -238,7 +270,23 @@ async def test_doctor_reports_critical_problems(tmp_path: Path) -> None:
     assert "[AVÍS] No s'ha trobat la interfície web compilada" in out
     assert "[ERROR] No es troba la CLI de Codex" in out
     assert "[ERROR] ChatGPT (mode cli, model gpt-5): Sense sessió" in out
+    assert "       Model per defecte: gpt-5; per als resums: gpt-6-luna." in out
     assert out.endswith("Hi ha 3 problemes crítics.")
+
+
+async def test_doctor_describes_the_models_of_a_provider_that_does_not_answer(
+    tmp_path: Path,
+) -> None:
+    class Hanging(FakeProvider):
+        async def status(self) -> ProviderStatus:
+            await asyncio.sleep(10)
+            raise AssertionError("unreachable")
+
+    settings = await ready_settings(tmp_path)
+    code, out = await doctor(settings, {"claude": Hanging("claude"), "chatgpt": fakes()["chatgpt"]})
+    assert code == 1
+    assert "[ERROR] Claude (mode fake): el proveïdor no respon." in out
+    assert "       Model per defecte: ?; per als resums: fake-claude-mini." in out
 
 
 async def test_doctor_warns_about_loose_permissions(tmp_path: Path) -> None:

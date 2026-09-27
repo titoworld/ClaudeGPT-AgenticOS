@@ -1,28 +1,43 @@
 <script lang="ts">
   /**
-   * Usage dashboard: consumption, savings and performance of both agents, plus
-   * subscription limits. Data: api.stats(days) and api.providers().
+   * Usage dashboard: consumption, savings, costs in euros and performance of
+   * both agents, plus this month's subscription windows, API budgets and
+   * subscription value. Data: api.stats(days) (includes the month spend) and
+   * api.providers().
    */
   import { onMount, untrack } from 'svelte';
   import { api, ApiError } from '../lib/api';
+  import { app } from '../lib/app.svelte';
   import ChartCard from '../lib/charts/ChartCard.svelte';
   import HBars from '../lib/charts/HBars.svelte';
   import Meter from '../lib/charts/Meter.svelte';
+  import {
+    costKpis,
+    formatAmount,
+    formatCost,
+    formatEurTick,
+    fxNote,
+    monthCards,
+    monthLabel,
+    rateOf,
+    unpricedText,
+    type MoneyRow,
+    type StatusIcon,
+  } from '../lib/charts/spend';
   import StackedColumns from '../lib/charts/StackedColumns.svelte';
   import { chartTable } from '../lib/charts/table';
   import {
     AGENT_SERIES,
     COUNT_SERIES,
+    dailyCost,
     dailySavings,
     dailyTokens,
     formatCompact,
-    formatDuration,
     isEmpty,
     kpis,
     latencyData,
     MODE_LABEL,
     plural,
-    providerCards,
     resetLabel,
     SAVING_KINDS,
     SAVING_LABEL,
@@ -30,7 +45,7 @@
     TURN_MODES,
     turnsData,
   } from '../lib/charts/usage';
-  import { AGENT_LABEL, formatInt, formatPercent, formatTime, formatTokens, formatUsd } from '../lib/format';
+  import { AGENT_LABEL, formatInt, formatMs, formatPercent, formatTime, formatTokens } from '../lib/format';
   import { AGENTS, type ProviderStatus, type SavingKind, type Stats } from '../lib/protocol';
 
   const RANGES = [7, 30, 90] as const;
@@ -90,6 +105,10 @@
     void load(days, true);
   }
 
+  function openSettings(): void {
+    app.settingsOpen = true;
+  }
+
   // Reload statistics whenever the range changes (providers only on first load
   // and on refresh). untrack: load() reads state that must not become a dependency.
   $effect(() => {
@@ -104,17 +123,29 @@
   });
 
   const k = $derived(stats ? kpis(stats) : null);
+  const money = $derived(stats ? costKpis(stats) : null);
   const tokenDays = $derived(stats ? dailyTokens(stats) : []);
+  const costDays = $derived(stats && money ? dailyCost(stats, rateOf(money.fx) ?? 0) : []);
   const savingDays = $derived(stats ? dailySavings(stats) : []);
   const latency = $derived(stats ? latencyData(stats) : []);
   const turns = $derived(stats ? turnsData(stats) : []);
-  const cards = $derived(providerCards(providers));
+  const month = $derived(monthCards(providers, stats?.month));
+  const monthName = $derived(monthLabel(stats?.month?.month));
 
   const tokensTable = $derived(
     chartTable(tokenDays, AGENT_SERIES, {
       caption: 'Tokens consumits per dia i agent',
       categoryLabel: 'Dia',
       format: formatInt,
+      total: true,
+      skipEmpty: true,
+    }),
+  );
+  const costTable = $derived(
+    chartTable(costDays, AGENT_SERIES, {
+      caption: 'Cost per dia i agent, en euros',
+      categoryLabel: 'Dia',
+      format: formatCost,
       total: true,
       skipEmpty: true,
     }),
@@ -129,7 +160,7 @@
     }),
   );
   const latencyTable = $derived(
-    chartTable(latency, AGENT_SERIES, { caption: 'Latència per agent', categoryLabel: 'Mesura', format: formatDuration }),
+    chartTable(latency, AGENT_SERIES, { caption: 'Latència per agent', categoryLabel: 'Mesura', format: formatMs }),
   );
   const turnsTable = $derived(
     chartTable(turns, COUNT_SERIES, { caption: 'Torns per mode', categoryLabel: 'Mode', format: formatInt }),
@@ -140,11 +171,58 @@
   );
 </script>
 
+{#snippet statusIcon(icon: StatusIcon)}
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    {#if icon === 'ok' || icon === 'good'}
+      <path d="M3.5 8.5l3 3 6-7" />
+    {:else if icon === 'warning'}
+      <path d="M8 2.5l6 11H2zM8 6.5v3.5M8 12v.01" />
+    {:else if icon === 'critical'}
+      <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM5.5 5.5l5 5m0-5l-5 5" />
+    {:else}
+      <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 11.5v.01M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1" />
+    {/if}
+  </svg>
+{/snippet}
+
+{#snippet agentAmounts(values: Record<string, number>)}
+  <ul class="agents">
+    {#each AGENTS as a (a)}
+      <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]}<strong>{formatAmount(values[a])}</strong></li>
+    {/each}
+  </ul>
+{/snippet}
+
+{#snippet moneyRow(row: MoneyRow)}
+  <li>
+    <div class="limit-head">
+      <span>{row.label}</span>
+      <span class="pct">{row.headText}</span>
+    </div>
+    {#if row.ratio != null}
+      <Meter value={row.ratio * 100} tone={row.tone} label={row.meterLabel} valueText={row.valueText} />
+    {/if}
+    <div class="limit-foot">
+      {#if row.status}
+        <span class="tone {row.status.icon}">{@render statusIcon(row.status.icon)}{row.status.label}</span>
+      {:else}
+        <span>
+          {row.caption}
+          {#if row.action}
+            <button type="button" class="link" onclick={openSettings}>{row.action}</button>
+          {/if}
+        </span>
+      {/if}
+      {#if row.amountText}<span class="aside">{row.amountText}</span>{/if}
+    </div>
+  </li>
+{/snippet}
+
 <section class="dashboard" aria-labelledby="dashboard-title" aria-busy={loading}>
   <header class="top">
     <div class="heading">
       <h2 id="dashboard-title">Ús i estalvi</h2>
-      <p>Consum, estalvi i rendiment de Claude i ChatGPT</p>
+      <p>Consum, cost, estalvi i rendiment de Claude i ChatGPT</p>
     </div>
     <div class="controls">
       <fieldset class="range">
@@ -185,7 +263,7 @@
     </div>
   {:else}
     <div class="content" class:stale={loading}>
-      <!-- KPI tiles -->
+      <!-- KPI tiles: tokens -->
       <section class="kpis" aria-label="Resum del període">
         <article class="tile hero">
           <h3>Tokens estalviats</h3>
@@ -242,20 +320,6 @@
         </article>
 
         <article class="tile">
-          <h3>Cost estimat</h3>
-          <p class="value">{k.cost.total == null ? '—' : formatUsd(k.cost.total)}</p>
-          {#if k.cost.total == null}
-            <p class="sub">Només es calcula en mode API. Amb la subscripció no hi ha cost per token.</p>
-          {:else}
-            <ul class="agents">
-              {#each AGENTS as a (a)}
-                <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]}<strong>{formatUsd(k.cost.byAgent[a])}</strong></li>
-              {/each}
-            </ul>
-          {/if}
-        </article>
-
-        <article class="tile">
           <h3>Torns</h3>
           <p class="value">{formatInt(k.turns.total)}</p>
           <p class="sub">
@@ -293,9 +357,9 @@
               {#each AGENTS as a (a)}
                 <tr>
                   <th scope="row"><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]}</th>
-                  <td>{formatDuration(k.latency[a].p50)}</td>
-                  <td>{formatDuration(k.latency[a].p95)}</td>
-                  <td>{formatDuration(k.latency[a].ttft)}</td>
+                  <td>{formatMs(k.latency[a].p50)}</td>
+                  <td>{formatMs(k.latency[a].p95)}</td>
+                  <td>{formatMs(k.latency[a].ttft)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -303,8 +367,183 @@
         </article>
       </section>
 
+      <!-- KPI tiles: euros -->
+      {#if money}
+        <section class="money" aria-label="Cost en euros del període">
+          <div class="money-tiles">
+            <article class="tile">
+              <h3>Cost API</h3>
+              <p class="value">{formatAmount(money.api.total)}</p>
+              {#if money.api.total > 0}
+                {@render agentAmounts(money.api.byAgent)}
+              {/if}
+              <p class="sub">
+                {money.api.total > 0
+                  ? 'Cost real de les crides amb clau d’API.'
+                  : 'Cap crida de pagament en aquest període.'}
+              </p>
+            </article>
+
+            <article class="tile">
+              <h3>Valor equivalent de les subscripcions</h3>
+              <p class="value">{formatAmount(money.equivalent.total)}</p>
+              {#if money.equivalent.total > 0}
+                {@render agentAmounts(money.equivalent.byAgent)}
+              {/if}
+              <p class="sub">
+                {money.equivalent.total > 0
+                  ? 'Ús amb subscripció a preus d’API, sense cost afegit.'
+                  : 'Cap crida amb subscripció en aquest període.'}
+              </p>
+            </article>
+
+            <article class="tile">
+              <h3>Estalviat</h3>
+              <p class="value">{money.saved == null ? '—' : formatAmount(money.saved)}</p>
+              <p class="sub">
+                {#if k.saved.total <= 0}
+                  Encara no hi ha estalvis en aquest període.
+                {:else if money.saved == null}
+                  Sense valor calculat per als {formatTokens(k.saved.total)} tokens estalviats.
+                {:else}
+                  Valor aproximat dels <strong>{formatTokens(k.saved.total)}</strong> tokens estalviats, al preu mitjà de
+                  cada torn.
+                {/if}
+              </p>
+            </article>
+          </div>
+
+          <div class="notes">
+            {#if fxNote(money.fx)}
+              <p class="note">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 7.2v4M8 4.8v.01" />
+                </svg>
+                Imports en euros · {fxNote(money.fx)}
+              </p>
+            {/if}
+            {#if money.unpriced.total > 0}
+              <p class="note unpriced">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5l6 11H2zM8 6.5v3.5M8 12v.01" /></svg>
+                <span>
+                  {unpricedText(money.unpriced.total)}: afegeix-ne el preu a
+                  <button type="button" class="link" onclick={openSettings}>Configuració</button>
+                </span>
+              </p>
+            {/if}
+          </div>
+        </section>
+      {/if}
+
+      <!-- This month: subscription windows, API budgets, subscription value -->
+      <section class="panel" aria-labelledby="month-title">
+        <div class="panel-head">
+          <h3 id="month-title">Aquest mes</h3>
+          <p>
+            Límits de subscripció en temps real, pressupost d’API i valor obtingut{monthName
+              ? ` al ${monthName}`
+              : ''}.
+          </p>
+        </div>
+        {#if providersError}
+          <p class="muted" role="alert">No s’ha pogut consultar l’estat dels agents. {providersError}</p>
+        {/if}
+        {#if month.length === 0}
+          {#if !providersError}
+            <p class="muted">{providers === null ? 'Consultant els agents…' : 'No hi ha cap agent configurat.'}</p>
+          {/if}
+        {:else}
+          <div class="providers">
+            {#each month as c (c.agent)}
+              {@const p = c.provider}
+              {@const limits = p?.limits ?? []}
+              <article class="provider" aria-label={c.name}>
+                <header>
+                  <span class="dot" style:background="var(--{c.agent})"></span>
+                  <h4>{c.name}</h4>
+                  {#if p}
+                    <span class="badge">{p.modeLabel}</span>
+                    <span class="availability" class:ok={p.available}>
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        {#if p.available}<path d="M3.5 8.5l3 3 6-7" />{:else}<path d="M4.5 4.5l7 7m0-7l-7 7" />{/if}
+                      </svg>
+                      {p.available ? 'Disponible' : 'No disponible'}
+                    </span>
+                  {/if}
+                </header>
+                {#if p?.model}<p class="model">{p.model}</p>{/if}
+                {#if p?.detail}<p class="detail">{p.detail}</p>{/if}
+
+                {#if limits.length > 0}
+                  <ul class="limits" aria-label="Finestres d’ús de la subscripció">
+                    {#each limits as l (l.key)}
+                      {@const reset = resetLabel(l.resetsAt, now)}
+                      <li>
+                        <div class="limit-head">
+                          <span>{l.window}</span>
+                          <span class="pct">{l.usedPercent == null ? 'Ús desconegut' : `${Math.round(l.usedPercent)} %`}</span>
+                        </div>
+                        {#if l.usedPercent != null}
+                          <Meter value={l.usedPercent} tone={l.tone} label="{c.name}, {l.window.toLowerCase()}" />
+                        {/if}
+                        <div class="limit-foot">
+                          <span class="tone {l.tone}">{@render statusIcon(l.tone)}{l.statusLabel}</span>
+                          {#if reset}<span class="aside">{reset}</span>{/if}
+                        </div>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else if p?.mode === 'cli'}
+                  <p class="muted">Encara no hi ha informació de límits. Apareixerà després de la primera resposta.</p>
+                {/if}
+
+                {#if c.budget || c.plan}
+                  <ul class="limits money-rows" aria-label="Despesa del mes">
+                    {#if c.budget}{@render moneyRow(c.budget)}{/if}
+                    {#if c.plan}{@render moneyRow(c.plan)}{/if}
+                  </ul>
+                {:else if p && limits.length === 0 && p.mode !== 'cli'}
+                  <p class="muted">
+                    {p.mode === 'api'
+                      ? 'Amb clau d’API no hi ha límits de subscripció: es paga per token.'
+                      : 'Mode simulat: sense límits ni cost real.'}
+                  </p>
+                {/if}
+                {#if c.unpriced > 0}
+                  <p class="muted small">Aquest mes, {unpricedText(c.unpriced)} no hi compten.</p>
+                {/if}
+              </article>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
       <!-- Charts -->
       <section class="charts" aria-label="Gràfics">
+        {#if money}
+          <div class="wide">
+            <ChartCard
+              title="Cost per dia"
+              subtitle="Cost d’API i valor de l’ús amb subscripció, a preus d’API"
+              legend={AGENT_SERIES}
+              table={costTable}
+              empty={isEmpty(costDays)}
+              emptyText={money.unpriced.total > 0
+                ? 'Encara no hi ha cost en aquest període: les crides fetes no tenen preu conegut.'
+                : 'Encara no hi ha cost en aquest període.'}
+            >
+              <StackedColumns
+                data={costDays}
+                series={AGENT_SERIES}
+                label="Cost per dia i agent, en euros"
+                format={formatCost}
+                tickFormat={formatEurTick}
+                integer={false}
+              />
+            </ChartCard>
+          </div>
+        {/if}
+
         <ChartCard
           title="Tokens per dia"
           subtitle="Entrada i sortida de cada agent"
@@ -347,7 +586,7 @@
           empty={isEmpty(latency)}
           emptyText="Encara no hi ha respostes per mesurar la latència."
         >
-          <HBars data={latency} series={AGENT_SERIES} label="Latència per agent" format={formatDuration} />
+          <HBars data={latency} series={AGENT_SERIES} label="Latència per agent" format={formatMs} />
         </ChartCard>
 
         <ChartCard
@@ -359,80 +598,6 @@
         >
           <HBars data={turns} series={COUNT_SERIES} label="Torns per mode" format={formatInt} />
         </ChartCard>
-      </section>
-
-      <!-- Subscription limits -->
-      <section class="panel" aria-labelledby="limits-title">
-        <div class="panel-head">
-          <h3 id="limits-title">Límits de subscripció</h3>
-          <p>Ús de les finestres de cada agent i quan es restableixen.</p>
-        </div>
-        {#if providersError && cards.length === 0}
-          <p class="muted" role="alert">No s’ha pogut consultar l’estat dels agents. {providersError}</p>
-        {:else if providers === null}
-          <p class="muted">Consultant els agents…</p>
-        {:else if cards.length === 0}
-          <p class="muted">No hi ha cap agent configurat.</p>
-        {:else}
-          <div class="providers">
-            {#each cards as c (c.agent)}
-              <article class="provider">
-                <header>
-                  <span class="dot" style:background="var(--{c.agent})"></span>
-                  <h4>{c.name}</h4>
-                  <span class="badge">{c.modeLabel}</span>
-                  <span class="availability" class:ok={c.available}>
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      {#if c.available}<path d="M3.5 8.5l3 3 6-7" />{:else}<path d="M4.5 4.5l7 7m0-7l-7 7" />{/if}
-                    </svg>
-                    {c.available ? 'Disponible' : 'No disponible'}
-                  </span>
-                </header>
-                {#if c.model}<p class="model">{c.model}</p>{/if}
-                {#if c.detail}<p class="detail">{c.detail}</p>{/if}
-                {#if c.limits.length > 0}
-                  <ul class="limits">
-                    {#each c.limits as l (l.key)}
-                      {@const reset = resetLabel(l.resetsAt, now)}
-                      <li>
-                        <div class="limit-head">
-                          <span>{l.window}</span>
-                          <span class="pct">{l.usedPercent == null ? 'Ús desconegut' : `${Math.round(l.usedPercent)} %`}</span>
-                        </div>
-                        {#if l.usedPercent != null}
-                          <Meter value={l.usedPercent} tone={l.tone} label="{c.name}, {l.window.toLowerCase()}" />
-                        {/if}
-                        <div class="limit-foot">
-                          <span class="tone {l.tone}">
-                            <svg viewBox="0 0 16 16" aria-hidden="true">
-                              {#if l.tone === 'ok'}
-                                <path d="M3.5 8.5l3 3 6-7" />
-                              {:else if l.tone === 'warning'}
-                                <path d="M8 2.5l6 11H2zM8 6.5v3.5M8 12v.01" />
-                              {:else if l.tone === 'critical'}
-                                <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM5.5 5.5l5 5m0-5l-5 5" />
-                              {:else}
-                                <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 11.5v.01M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1" />
-                              {/if}
-                            </svg>
-                            {l.statusLabel}
-                          </span>
-                          {#if reset}<span class="reset">{reset}</span>{/if}
-                        </div>
-                      </li>
-                    {/each}
-                  </ul>
-                {:else}
-                  <p class="muted">
-                    {c.mode === 'api'
-                      ? 'Amb clau d’API no hi ha límits de subscripció: es paga per token.'
-                      : 'Encara no hi ha informació de límits. Apareixerà després de la primera resposta.'}
-                  </p>
-                {/if}
-              </article>
-            {/each}
-          </div>
-        {/if}
       </section>
 
       <!-- Saving techniques -->
@@ -679,6 +844,8 @@
     gap: 12px;
   }
 
+  /* Hero + consumption on the first row, turns, consensus and latency below
+     (2 + 2 on medium widths, 2 + 1 / 1 + 1 + 1 on wide ones). */
   @container (min-width: 520px) {
     .kpis {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -689,15 +856,82 @@
     }
   }
 
-  /* Hero spans 2x2; the other five tiles fill the remaining 3x3 grid. */
   @container (min-width: 900px) {
     .kpis {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
+  }
 
-    .hero {
-      grid-row: span 2;
+  /* Euros: three tiles in a row, then the exchange-rate note. */
+  .money {
+    display: grid;
+    gap: 10px;
+  }
+
+  .money-tiles {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  @container (min-width: 640px) {
+    .money-tiles {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
+  }
+
+  .notes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 20px;
+    padding: 0 4px;
+  }
+
+  .note {
+    display: inline-flex;
+    gap: 6px;
+    align-items: flex-start;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+  }
+
+  .note svg {
+    flex: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .note.unpriced {
+    color: var(--text-secondary);
+  }
+
+  .note.unpriced svg {
+    color: var(--warning);
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    border-radius: 2px;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+
+  .link:hover {
+    text-decoration-color: currentColor;
   }
 
   .tile {
@@ -893,6 +1127,15 @@
     .charts {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .wide {
+      grid-column: 1 / -1;
+    }
+  }
+
+  .wide {
+    display: grid;
+    min-width: 0;
   }
 
   /* ------------------------------------------------------------ panels */
@@ -922,6 +1165,10 @@
     margin: 0;
     color: var(--text-muted);
     font-size: var(--text-sm);
+  }
+
+  .muted.small {
+    font-size: var(--text-xs);
   }
 
   .providers {
@@ -1013,6 +1260,12 @@
     list-style: none;
   }
 
+  /* Month money rows, apart from the live windows above them. */
+  :is(.limits, .muted) + .money-rows {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
   .limit-head,
   .limit-foot {
     display: flex;
@@ -1038,6 +1291,11 @@
     color: var(--text-muted);
   }
 
+  .aside {
+    margin-left: auto;
+    text-align: right;
+  }
+
   .tone {
     display: inline-flex;
     gap: 4px;
@@ -1055,6 +1313,10 @@
 
   .tone.critical svg {
     color: var(--critical);
+  }
+
+  .tone.good svg {
+    color: var(--good);
   }
 
   .techniques {

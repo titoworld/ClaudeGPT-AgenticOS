@@ -91,3 +91,17 @@ export const estimateTokens = (text: string): number => Math.ceil(text.length / 
 export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Consell' };
 
 export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = { cli: 'Subscripció', api: 'API', fake: 'Demo' };
+
+/** Fallback texts for WebSocket `error` codes (the server message wins when present). */
+export const WS_ERROR_TEXT: Record<string, string> = {
+  invalid: 'El servidor ha rebutjat la petició perquè no és vàlida.',
+  busy: "Ja hi ha massa torns en curs. Espera que n'acabi algun i torna-ho a provar.",
+  duplicate: "Aquesta petició ja s'havia enviat.",
+  unavailable: 'El proveïdor no està disponible ara mateix.',
+  too_large: 'El missatge és massa llarg.',
+  internal: 'Hi ha hagut un error intern al servidor.',
+};
+
+export function wsErrorText(code: string | undefined, message: string | undefined): string {
+  return message?.trim() || (code ? WS_ERROR_TEXT[code] : undefined) || 'Error del servidor.';
+}

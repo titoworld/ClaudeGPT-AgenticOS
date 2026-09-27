@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { app } from '../lib/app.svelte';
+  import { streamCost } from '../lib/costs';
   import { formatInt, formatMs } from '../lib/format';
   import type { StreamView } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
@@ -9,6 +11,7 @@
 
   let { stream }: Props = $props();
   const usage = $derived(stream.usage);
+  const cost = $derived(streamCost(stream, app.eurPerUsd));
 </script>
 
 <footer class="meta">
@@ -26,6 +29,11 @@
         {formatInt(usage.cache_read_tokens)} en memòria cau
       </span>
     {/if}
+  {/if}
+  {#if cost}
+    <span class="item cost" class:equivalent={stream.costBasis === 'equivalent'} title={cost.title}>
+      {cost.text}<span class="sr-only"> ({cost.title})</span>
+    </span>
   {/if}
   {#if stream.latencyMs != null}
     <span class="item" title="Temps total de resposta"><Icon name="clock" size={12} />{formatMs(stream.latencyMs)}</span>
@@ -58,5 +66,16 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
+  }
+
+  .cost {
+    color: var(--text-secondary);
+    cursor: help;
+  }
+
+  /* Included in the subscription: a value, not money spent. */
+  .cost.equivalent {
+    text-decoration: underline dotted rgb(255 255 255 / 0.3);
+    text-underline-offset: 3px;
   }
 </style>

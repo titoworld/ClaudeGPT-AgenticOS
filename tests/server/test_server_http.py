@@ -2,10 +2,10 @@
 
 import asyncio
 import functools
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +15,20 @@ import pytest
 from fastapi import FastAPI
 
 from agentic_os.config import Settings
-from agentic_os.domain import AgentName, DebateOptions
-from agentic_os.orchestrator.store import NewMessage
-from agentic_os.providers.base import Provider
+from agentic_os.domain import AgentName, DebateOptions, ProviderMode, Usage
+from agentic_os.fx import FxRate
+from agentic_os.orchestrator.store import NewMessage, UsageRecord
+from agentic_os.pricing import DEFAULT_PRICES
+from agentic_os.providers.base import ModelInfo, Provider
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.security.passwords import hash_password
 from agentic_os.security.sessions import hash_token
 from agentic_os.server.app import create_app
+from agentic_os.server.catalog import ModelCatalog
 from agentic_os.server.deps import AppState
+from agentic_os.server.fx_rates import FxFetcher
 from agentic_os.server.middleware import CONTENT_SECURITY_POLICY
-from agentic_os.storage import RuntimeSettings, SqliteStore
+from agentic_os.storage import FxSettings, RuntimeSettings, SqliteStore
 
 ORIGIN = "https://aos.example"
 ORIGIN_HEADERS = {"origin": ORIGIN}
@@ -102,10 +106,13 @@ def fakes() -> dict[AgentName, Provider]:
 
 @asynccontextmanager
 async def running(
-    settings: Settings, providers: Mapping[AgentName, Provider] | None = None
+    settings: Settings,
+    providers: Mapping[AgentName, Provider] | None = None,
+    *,
+    fx_fetcher: FxFetcher | None = None,
 ) -> AsyncIterator[Harness]:
     clock = Clock()
-    app = create_app(settings, providers=providers or fakes(), clock=clock)
+    app = create_app(settings, providers=providers or fakes(), clock=clock, fx_fetcher=fx_fetcher)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
@@ -223,6 +230,9 @@ async def test_public_routes(h: Harness) -> None:
 async def test_routes_require_a_session(h: Harness) -> None:
     cases = [
         ("GET", "/api/providers"),
+        ("GET", "/api/models"),
+        ("GET", "/api/pricing"),
+        ("GET", "/api/spend"),
         ("GET", "/api/settings"),
         ("PUT", "/api/settings"),
         ("GET", "/api/conversations"),
@@ -491,8 +501,13 @@ async def test_stats_shape(h: Harness) -> None:
         "latency",
         "turns",
         "consensus",
+        "costs",
+        "month",
     }
     assert set(stats["totals"]["by_agent"]) == {"claude", "chatgpt"}
+    assert stats["costs"]["fx"] == {"eur_per_usd": 0.86, "as_of": None, "source": "manual"}
+    assert stats["month"]["month"] == "2026-09"
+    assert stats["savings"]["cost_usd"] is None
     assert set(stats["turns"]) == {"solo", "duel", "debate"}
     for days in (0, 366):
         assert (await h.client.get("/api/stats", params={"days": days})).status_code == 422
@@ -588,3 +603,289 @@ async def test_shutdown_closes_the_providers(tmp_path: Path) -> None:
         assert not providers["claude"].closed
     assert providers["claude"].closed
     assert providers["chatgpt"].closed
+
+
+# -- models, prices, exchange rate and spend -------------------------------------------
+
+MONEY_SETTINGS: dict[str, Any] = {
+    "models": {"claude": "claude-opus-5[1m]", "chatgpt": None},
+    "fast_models": {"claude": None, "chatgpt": "gpt-6-luna"},
+    "prices": {"gpt-7-nova": {"input": 3, "output": 12, "cache_read": 0.3, "cache_write": 0}},
+    "fx": {"mode": "manual", "eur_per_usd": 0.9},
+    "budgets_eur": {"claude": 20, "chatgpt": None},
+    "plans_eur": {"claude": None, "chatgpt": 23},
+}
+
+
+async def test_settings_with_models_prices_and_money(h: Harness) -> None:
+    await h.login_session()
+    response = await h.client.put("/api/settings", json=MONEY_SETTINGS, headers=ORIGIN_HEADERS)
+    assert response.status_code == 200
+    saved = response.json()
+    assert saved == {**RuntimeSettings().to_wire(), **saved}
+    assert saved["models"] == MONEY_SETTINGS["models"]
+    assert saved["prices"]["gpt-7-nova"] == {
+        "input": 3.0,
+        "output": 12.0,
+        "cache_read": 0.3,
+        "cache_write": 0.0,
+    }
+    assert saved["budgets_eur"] == {"claude": 20.0, "chatgpt": None}
+    assert (await h.client.get("/api/settings")).json() == saved
+
+    for patch, detail in (
+        (
+            {"models": {"claude": "opus 5"}},
+            "«models.claude» ha de ser un identificador de model vàlid: fins a 100 lletres, "
+            "xifres o els signes . _ : / @ [ ] -, sense espais.",
+        ),
+        ({"fx": {"eur_per_usd": 7}}, "«fx.eur_per_usd» ha de ser un nombre entre 0,2 i 5."),
+        (
+            {"plans_eur": {"chatgpt": -1}},
+            "«plans_eur.chatgpt» ha de ser un nombre entre 0 i 100.000.",
+        ),
+    ):
+        response = await h.client.put(
+            "/api/settings", json={**MONEY_SETTINGS, **patch}, headers=ORIGIN_HEADERS
+        )
+        assert response.status_code == 422
+        assert response.json() == {"detail": detail}
+    # JSON NaN is not a number the settings accept.
+    response = await h.client.put(
+        "/api/settings",
+        content=b'{"budgets_eur": {"claude": NaN}}',
+        headers={**ORIGIN_HEADERS, "content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert (await h.client.get("/api/settings")).json() == saved
+
+
+async def test_models_catalog(h: Harness) -> None:
+    await h.login_session()
+    response = await h.client.get("/api/models")
+    assert response.status_code == 200
+    catalog = response.json()
+    assert set(catalog) == {"claude", "chatgpt"}
+    assert catalog["claude"] == {
+        "mode": "fake",
+        "default_model": "fake-claude",
+        "fast_model": "fake-claude-mini",
+        "models": [m.to_wire() for m in await FakeProvider("claude").list_models()],
+        "live": True,
+    }
+    await h.state.store.put_runtime_settings(RuntimeSettings.from_wire(MONEY_SETTINGS))
+    catalog = (await h.client.get("/api/models")).json()
+    assert catalog["claude"]["default_model"] == "claude-opus-5[1m]"
+    assert catalog["claude"]["fast_model"] == "fake-claude-mini"
+    assert catalog["chatgpt"]["default_model"] == "fake-chatgpt"
+    assert catalog["chatgpt"]["fast_model"] == "gpt-6-luna"
+
+
+class CountingModels(FakeProvider):
+    def __init__(self, agent: AgentName) -> None:
+        super().__init__(agent, chunk_delay=0)
+        self.refreshes: list[bool] = []
+        self.gate: asyncio.Event | None = None
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        self.refreshes.append(refresh)
+        if self.gate is not None:
+            await self.gate.wait()
+        return await super().list_models()
+
+
+async def test_models_are_cached_and_refresh_bypasses_the_caches(tmp_path: Path) -> None:
+    claude = CountingModels("claude")
+    providers: dict[AgentName, Provider] = {"claude": claude, "chatgpt": fakes()["chatgpt"]}
+    async with running(make_settings(tmp_path), providers) as h:
+        await h.login_session()
+        await h.client.get("/api/models")
+        await h.client.get("/api/models")
+        assert claude.refreshes == [False]
+        assert (await h.client.get("/api/models", params={"refresh": 1})).status_code == 200
+        assert claude.refreshes == [False, True]
+
+
+async def test_a_slow_model_list_does_not_block_the_catalog(tmp_path: Path) -> None:
+    claude = CountingModels("claude")
+    claude.gate = asyncio.Event()
+    providers: dict[AgentName, Provider] = {"claude": claude, "chatgpt": fakes()["chatgpt"]}
+    async with running(make_settings(tmp_path), providers) as h:
+        await h.login_session()
+        await h.state.catalog.aclose()
+        h.state.catalog = ModelCatalog(providers, h.state.settings, wait_seconds=0.05)
+        catalog = (await h.client.get("/api/models")).json()
+        assert catalog["claude"]["live"] is False
+        assert catalog["claude"]["models"] == [
+            {
+                "id": "fake-claude",
+                "label": "fake-claude",
+                "description": "",
+                "is_default": True,
+                "context_window": None,
+            }
+        ]
+        assert catalog["chatgpt"]["live"] is True
+        claude.gate.set()
+        await asyncio.sleep(0.01)
+        catalog = (await h.client.get("/api/models")).json()
+        assert catalog["claude"]["live"] is True
+        assert len(catalog["claude"]["models"]) == 2
+        await h.state.catalog.aclose()
+
+
+async def test_pricing(h: Harness) -> None:
+    await h.login_session()
+    pricing = (await h.client.get("/api/pricing")).json()
+    assert pricing["fx"] == {"eur_per_usd": 0.86, "as_of": None, "source": "manual"}
+    assert len(pricing["prices"]) == len(DEFAULT_PRICES)
+    assert {p["source"] for p in pricing["prices"]} == {"default"}
+    models = [p["model"] for p in pricing["prices"]]
+    assert models == sorted(models)
+
+    overrides = {
+        **MONEY_SETTINGS,
+        "prices": {
+            **MONEY_SETTINGS["prices"],
+            "gpt-6-luna": {"input": 0.2, "output": 1, "cache_read": 0.02, "cache_write": 0},
+        },
+    }
+    await h.state.store.put_runtime_settings(RuntimeSettings.from_wire(overrides))
+    pricing = (await h.client.get("/api/pricing")).json()
+    assert pricing["fx"] == {"eur_per_usd": 0.9, "as_of": None, "source": "manual"}
+    by_model = {p["model"]: p for p in pricing["prices"]}
+    assert len(by_model) == len(DEFAULT_PRICES) + 1
+    assert by_model["gpt-6-luna"] == {
+        "model": "gpt-6-luna",
+        "input": 0.2,
+        "output": 1.0,
+        "cache_read": 0.02,
+        "cache_write": 0.0,
+        "source": "custom",
+    }
+    assert by_model["gpt-7-nova"]["source"] == "custom"
+    assert by_model["gpt-6-sol"]["source"] == "default"
+
+
+async def test_spend_of_the_current_month(h: Harness) -> None:
+    await h.login_session()
+    store = h.state.store
+    await store.put_runtime_settings(RuntimeSettings.from_wire(MONEY_SETTINGS))
+    calls: tuple[tuple[AgentName, ProviderMode, float], ...] = (
+        ("claude", "api", 4.0),
+        ("chatgpt", "cli", 10.0),
+    )
+    for agent, mode, cost in calls:
+        await store.record_usage(
+            UsageRecord(
+                conversation_id=None,
+                turn_id=None,
+                agent=agent,
+                provider_mode=mode,
+                model="m",
+                purpose="answer",
+                usage=Usage(100, 50, cost_usd=cost),
+                latency_ms=10,
+                ttft_ms=None,
+                ok=True,
+            )
+        )
+    spend = (await h.client.get("/api/spend")).json()
+    assert spend == {
+        "month": "2026-09",
+        "fx": {"eur_per_usd": 0.9, "as_of": None, "source": "manual"},
+        "by_agent": {
+            "claude": {
+                "api_usd": 4.0,
+                "equivalent_usd": 0.0,
+                "unpriced_calls": 0,
+                "budget_eur": 20.0,
+                "budget_used": 0.18,
+                "plan_eur": None,
+                "plan_value": None,
+            },
+            "chatgpt": {
+                "api_usd": 0.0,
+                "equivalent_usd": 10.0,
+                "unpriced_calls": 0,
+                "budget_eur": None,
+                "budget_used": None,
+                "plan_eur": 23.0,
+                "plan_value": 0.391304,
+            },
+        },
+    }
+    assert (await h.client.get("/api/stats")).json()["month"] == spend
+
+
+async def wait_for(condition: Any, timeout: float = 2.0) -> None:
+    for _ in range(int(timeout / 0.01)):
+        if await condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met in time")
+
+
+async def test_startup_refreshes_the_ecb_rate(tmp_path: Path) -> None:
+    ecb = FxRate(eur_per_usd=0.8547, as_of=date(2026, 9, 25), source="ecb")
+    calls: list[int] = []
+
+    async def fetch() -> FxRate:
+        calls.append(1)
+        return ecb
+
+    async with running(make_settings(tmp_path), fx_fetcher=fetch) as h:
+        await h.login_session()
+
+        async def stored() -> bool:
+            return await h.state.store.get_ecb_rate() is not None
+
+        await wait_for(stored)
+        pricing = (await h.client.get("/api/pricing")).json()
+        assert pricing["fx"] == {"eur_per_usd": 0.8547, "as_of": "2026-09-25", "source": "ecb"}
+    # A restart within 12 hours reuses the stored rate.
+    async with running(make_settings(tmp_path), fx_fetcher=fetch) as h:
+        await asyncio.sleep(0.05)
+        assert (await h.state.store.current_fx(h.clock())).source == "ecb"
+    assert calls == [1]
+
+
+async def test_a_failed_download_keeps_the_manual_rate(h: Harness, blocked_ecb: Any) -> None:
+    # Without fx_fetcher the app uses agentic_os.fx.fetch_ecb_rate (blocked in tests).
+    async def tried() -> bool:
+        return bool(blocked_ecb.calls)
+
+    await wait_for(tried)
+    await h.login_session()
+    pricing = (await h.client.get("/api/pricing")).json()
+    assert pricing["fx"] == {"eur_per_usd": 0.86, "as_of": None, "source": "manual"}
+
+
+async def test_switching_to_auto_fetches_the_rate_now(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    async with await SqliteStore.open(settings.db_path) as store:
+        await store.put_runtime_settings(RuntimeSettings(fx=FxSettings(mode="manual")))
+    calls: list[int] = []
+
+    async def fetch() -> FxRate:
+        calls.append(1)
+        return FxRate(eur_per_usd=0.85, as_of=date(2026, 9, 26), source="ecb")
+
+    async with running(settings, fx_fetcher=fetch) as h:
+        await h.login_session()
+        await asyncio.sleep(0.05)
+        assert calls == []  # manual mode: never downloaded
+        response = await h.client.put(
+            "/api/settings", json={"fx": {"mode": "auto"}}, headers=ORIGIN_HEADERS
+        )
+        assert response.status_code == 200
+
+        async def fetched() -> bool:
+            return bool(calls)
+
+        await wait_for(fetched)
+
+        async def stored() -> bool:
+            return (await h.state.store.current_fx(h.clock())).source == "ecb"
+
+        await wait_for(stored)

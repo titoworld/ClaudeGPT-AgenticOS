@@ -118,6 +118,8 @@ CONTROL_TIMEOUT = 30.0
 CLEANUP_TIMEOUT = 10.0
 """turn/interrupt and thread/unsubscribe: no answer means the process is wedged."""
 STATUS_REQUEST_TIMEOUT = 10.0
+MODELS_TTL = 600.0
+MAX_MODEL_PAGES = 5
 STATUS_TTL = 60.0
 STATUS_TTL_UNAVAILABLE = 10.0
 """Short, so a ``codex login`` done meanwhile shows up soon on the dashboard."""
@@ -141,6 +143,13 @@ _PLAN_LABELS: dict[str, str] = {
     "enterprise": "Enterprise",
     "edu": "Edu",
 }
+
+MODEL_DESCRIPTIONS: dict[str, str] = {
+    "gpt-6-astra": "El més capaç, per a la feina més exigent.",
+    "gpt-6-sol": "Equilibrat, per a la feina de cada dia.",
+    "gpt-6-luna": "Ràpid i econòmic, per a tasques senzilles.",
+}
+"""Catalan descriptions of known models (other models keep Codex's own description)."""
 
 _DENIED_REVIEW: JsonObject = {"denied": {"rejection": "Not available in this environment."}}
 _DECLINED_REQUESTS: dict[str, JsonObject] = {
@@ -620,6 +629,9 @@ class CodexAppServerProvider:
         """When the usage windows were last updated (monotonic)."""
         self._status_cache: tuple[float, ProviderStatus] | None = None
         self._status_lock = asyncio.Lock()
+        self._models_cache: tuple[float, tuple[ModelInfo, ...], bool] | None = None
+        """(expiry on the monotonic clock, models, live)."""
+        self._models_lock = asyncio.Lock()
 
     @property
     def agent(self) -> AgentName:
@@ -628,6 +640,11 @@ class CodexAppServerProvider:
     @property
     def mode(self) -> ProviderMode:
         return "cli"
+
+    @property
+    def fast_model(self) -> str:
+        """Model of the cheap internal calls (summaries) when none is requested."""
+        return self._settings.chatgpt_fast_model or DEFAULT_FAST_MODEL
 
     # -- generation ----------------------------------------------------------------------
 
@@ -758,7 +775,7 @@ class CodexAppServerProvider:
         if request.model:
             return request.model
         if request.fast:
-            return self._settings.chatgpt_fast_model or DEFAULT_FAST_MODEL
+            return self.fast_model
         return self._settings.chatgpt_model
 
     def _thread_params(self, request: GenerationRequest, model: str | None) -> JsonObject:
@@ -1084,10 +1101,69 @@ class CodexAppServerProvider:
                 return model
         return None
 
-    async def list_models(self) -> Sequence[ModelInfo]:
-        # Placeholder until live listing is implemented: the configured default only.
-        status = await self.status()
-        return (ModelInfo(id=status.model, label=status.model, is_default=True),)
+    @property
+    def models_live(self) -> bool:
+        """Whether the latest :meth:`list_models` came from the app-server catalog."""
+        return self._models_cache is not None and self._models_cache[2]
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        """Visible models of the app-server catalog (``model/list``, cached ~10 min), or
+        only the configured default when Codex cannot be queried."""
+        async with self._models_lock:
+            cached = self._models_cache
+            if refresh or cached is None or time.monotonic() >= cached[0]:
+                models, live = await self._fetch_models()
+                ttl = MODELS_TTL if live else STATUS_TTL_UNAVAILABLE
+                cached = self._models_cache = (time.monotonic() + ttl, models, live)
+        return cached[1]
+
+    async def _fetch_models(self) -> tuple[tuple[ModelInfo, ...], bool]:
+        entries: list[JsonObject] = []
+        try:
+            conn = await self._connection(wait_backoff=False)
+            if not self._settings.chatgpt_model and self._default_model is None:
+                await self._read_default_model(conn)
+            cursor: str | None = None
+            for _ in range(MAX_MODEL_PAGES):
+                params: JsonObject = {"limit": 100, "includeHidden": False}
+                if cursor:
+                    params["cursor"] = cursor
+                page = _as_dict(await conn.request("model/list", params, STATUS_REQUEST_TIMEOUT))
+                entries += [_as_dict(entry) for entry in page.get("data") or []]
+                next_cursor = page.get("nextCursor")
+                if not isinstance(next_cursor, str) or not next_cursor:
+                    break
+                cursor = next_cursor
+        except Exception as exc:  # never raise: the owner can still type any model id
+            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            logger.warning("Could not list the Codex models (%s); using the default", reason)
+        models: list[ModelInfo] = []
+        catalog_default: str | None = None
+        for entry in entries:
+            slug = entry.get("model") or entry.get("id")
+            if entry.get("hidden") is True or not isinstance(slug, str) or not slug:
+                continue
+            if entry.get("isDefault") is True:
+                catalog_default = catalog_default or slug
+            label, description = entry.get("displayName"), entry.get("description")
+            models.append(
+                ModelInfo(
+                    id=slug,
+                    label=label if isinstance(label, str) and label else slug,
+                    description=MODEL_DESCRIPTIONS.get(slug)
+                    or (description if isinstance(description, str) else ""),
+                )
+            )
+        default = (
+            self._settings.chatgpt_model
+            or self._default_model
+            or catalog_default
+            or FALLBACK_MODEL_LABEL
+        )
+        if not any(model.id == default for model in models):
+            models.insert(0, ModelInfo(default, default, MODEL_DESCRIPTIONS.get(default, "")))
+        marked = tuple(replace(model, is_default=model.id == default) for model in models)
+        return marked, bool(entries)
 
     async def aclose(self) -> None:
         """Stop the app-server (process group SIGTERM, then SIGKILL) and background work."""

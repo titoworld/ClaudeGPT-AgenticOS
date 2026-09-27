@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize } from './text';
+import { dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize, wsErrorText } from './text';
 import { DEFAULT_SETTINGS, validateSettings } from './settings';
 import type { ConversationSummary } from './protocol';
 
@@ -77,5 +77,15 @@ describe('validateSettings', () => {
       compaction_threshold_tokens: 1.5,
     });
     expect(Object.keys(errors).sort()).toEqual(['compaction_threshold_tokens', 'consensus_threshold', 'rounds']);
+  });
+});
+
+describe('wsErrorText', () => {
+  it('prefers the server message and falls back per code', () => {
+    expect(wsErrorText('busy', 'Massa torns alhora.')).toBe('Massa torns alhora.');
+    expect(wsErrorText('busy', '')).toMatch(/^Ja hi ha massa torns en curs/);
+    expect(wsErrorText('too_large', '  ')).toBe('El missatge és massa llarg.');
+    expect(wsErrorText('nou-codi', '')).toBe('Error del servidor.');
+    expect(wsErrorText(undefined, undefined)).toBe('Error del servidor.');
   });
 });

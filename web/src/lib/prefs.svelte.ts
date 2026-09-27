@@ -1,9 +1,12 @@
 // Per-browser preferences (localStorage) and system media preferences.
 
 import type { SceneQuality } from '../scene/types';
+import { parseOverrides, type ModelOverrides } from './models';
+import type { Agent } from './protocol';
 
 const KEY_EFFECTS = 'aos.effects';
 const KEY_SIDEBAR = 'aos.sidebar-collapsed';
+const KEY_MODELS = 'aos.models';
 
 function read(key: string): string | null {
   try {
@@ -35,6 +38,8 @@ class Prefs {
   sidebarCollapsed: boolean = $state(read(KEY_SIDEBAR) === '1');
   reducedMotion: boolean = $state(false);
   narrow: boolean = $state(false);
+  /** Models picked in the composer for the next turns (absent agent = default). */
+  models: ModelOverrides = $state(parseOverrides(read(KEY_MODELS)));
 
   constructor() {
     const motion = media('(prefers-reduced-motion: reduce)');
@@ -57,6 +62,20 @@ class Prefs {
   setSidebarCollapsed(collapsed: boolean): void {
     this.sidebarCollapsed = collapsed;
     write(KEY_SIDEBAR, collapsed ? '1' : '0');
+  }
+
+  /** `null` goes back to the default model. Callers pass validated ids. */
+  setModel(agent: Agent, id: string | null): void {
+    const next: ModelOverrides = { ...this.models };
+    if (id) next[agent] = id;
+    else delete next[agent];
+    this.models = next;
+    write(KEY_MODELS, JSON.stringify(next));
+  }
+
+  resetModels(): void {
+    this.models = {};
+    write(KEY_MODELS, '{}');
   }
 }
 

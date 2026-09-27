@@ -23,6 +23,8 @@ import type {
 export type StreamKind = Exclude<MessageKind, 'question'>;
 export type StreamStatus = 'streaming' | 'done' | 'failed' | 'interrupted';
 export type TurnStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+/** "api": real API cost; "equivalent": subscription call valued at API prices. */
+export type CostBasis = 'api' | 'equivalent';
 
 export interface StreamView {
   id: string;
@@ -43,6 +45,8 @@ export interface StreamView {
   agreement: number | null;
   unchanged: boolean;
   cached: boolean;
+  /** Meaning of `usage.cost_usd` (null when unknown). */
+  costBasis: CostBasis | null;
 }
 
 export interface TurnView {
@@ -150,6 +154,7 @@ function newStream(id: string, agent: Agent, kind: StreamKind, round: number, mo
     agreement: null,
     unchanged: false,
     cached: false,
+    costBasis: null,
   };
 }
 
@@ -314,7 +319,14 @@ function asSavings(v: unknown): Savings | null {
   const compaction = asNumber(v.compaction) ?? 0;
   const early_stop = asNumber(v.early_stop) ?? 0;
   const unchanged = asNumber(v.unchanged) ?? 0;
-  return { cache, compaction, early_stop, unchanged, total: asNumber(v.total) ?? cache + compaction + early_stop + unchanged };
+  return {
+    cache,
+    compaction,
+    early_stop,
+    unchanged,
+    total: asNumber(v.total) ?? cache + compaction + early_stop + unchanged,
+    cost_usd: asNumber(v.cost_usd),
+  };
 }
 
 function asConsensus(v: unknown): Consensus | null {
@@ -398,6 +410,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       s.agreement = asNumber(meta.agreement);
       s.unchanged = meta.unchanged === true;
       s.cached = meta.cached === true;
+      s.costBasis = meta.cost_basis === 'api' || meta.cost_basis === 'equivalent' ? meta.cost_basis : null;
       streams.push(s);
       savings = asSavings(meta.savings) ?? savings;
       consensus = asConsensus(meta.consensus) ?? consensus;

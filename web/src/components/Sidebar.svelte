@@ -92,7 +92,7 @@
   {#if app.providers.length}
     <section class="providers" aria-label="Proveïdors">
       {#each app.providers as provider (provider.agent)}
-        <ProviderBadge {provider} />
+        <ProviderBadge {provider} spend={app.spend} />
       {/each}
     </section>
   {/if}

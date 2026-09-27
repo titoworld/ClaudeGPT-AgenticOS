@@ -23,9 +23,11 @@
     tickFormat?: (v: number) => string;
     /** Plot height in px (the x-axis band is added on top of it). */
     height?: number;
+    /** Integer data (tokens) never gets fractional ticks; money does. */
+    integer?: boolean;
   }
 
-  let { data, series, label, format, tickFormat, height = 188 }: Props = $props();
+  let { data, series, label, format, tickFormat, height = 188, integer = true }: Props = $props();
 
   const GAP = 2;
   const TOP = 22;
@@ -39,7 +41,7 @@
 
   const fmtTick = $derived(tickFormat ?? format);
   const stacks = $derived(stackData(data, series));
-  const ticks = $derived(niceTicks(maxTotal(stacks), 4));
+  const ticks = $derived(niceTicks(maxTotal(stacks), 4, integer));
   const yMax = $derived(ticks.at(-1) ?? 1);
   const left = $derived(Math.max(30, Math.max(...ticks.map((t) => fmtTick(t).length)) * 6.8 + 12));
   const plotW = $derived(Math.max(0, width - left - RIGHT));

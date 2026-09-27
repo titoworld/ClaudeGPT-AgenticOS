@@ -2,11 +2,14 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from agentic_os.domain import DebateOptions, TurnOptions, Usage
 from agentic_os.orchestrator.accounting import TurnAccounting
 from agentic_os.orchestrator.cache import (
     context_fingerprint,
     normalize_question,
+    replay_cost_usd,
     replayed_message,
     turn_cache_key,
 )
@@ -18,12 +21,13 @@ from agentic_os.orchestrator.prompts import (
     synthesis_prompt,
     system_prompt,
 )
-from agentic_os.orchestrator.store import NewMessage, StoredMessage
+from agentic_os.orchestrator.store import JsonValue, NewMessage, StoredMessage
 from agentic_os.orchestrator.tokens import (
     estimate_context_tokens,
     estimate_tokens,
     estimate_turns_tokens,
 )
+from agentic_os.pricing import ModelPrice
 from agentic_os.providers.base import ChatTurn
 
 NOW = datetime(2026, 9, 27, tzinfo=UTC)
@@ -177,14 +181,38 @@ def test_cache_key_normalization_and_sensitivity() -> None:
     assert key() != key(context_fingerprint=context_fingerprint(other_context))
 
 
-def test_replayed_message_is_flagged_as_cached() -> None:
+def test_replayed_message_is_flagged_as_cached_and_costs_nothing() -> None:
+    meta: dict[str, JsonValue] = {
+        "x": 1,
+        "usage": dict(Usage(input_tokens=5, cost_usd=0.1).to_dict()),
+        "cost_basis": "api",
+        "savings": {"cache": 0},
+    }
     original = NewMessage(
-        conversation_id=1, kind="answer", content="A", turn_id=1, agent="claude", meta={"x": 1}
+        conversation_id=1, kind="answer", content="A", turn_id=1, agent="claude", meta=meta
     )
     replayed = replayed_message(original, conversation_id=7, turn_id=9)
     assert (replayed.conversation_id, replayed.turn_id) == (7, 9)
-    assert replayed.meta == {"x": 1, "cached": True}
-    assert original.meta == {"x": 1}
+    assert replayed.meta == {"x": 1, "cached": True, "usage": Usage().to_dict()}
+    assert original.meta == meta
+
+
+def test_replay_cost_is_recomputed_at_current_prices() -> None:
+    def answer(model: JsonValue, usage: JsonValue) -> NewMessage:
+        meta: dict[str, JsonValue] = {"model": model, "usage": usage}
+        return NewMessage(1, "answer", "A", turn_id=1, agent="claude", meta=meta)
+
+    tokens: JsonValue = {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "cost_usd": 99.0}
+    messages = [
+        answer("claude-opus-5", tokens),  # 5 + 25 at the default prices
+        answer("mystery-model", tokens),  # no price: ignored
+        answer(None, tokens),
+        answer("claude-opus-5", "corrupt"),
+    ]
+    assert replay_cost_usd(messages) == pytest.approx(30.0)
+    overrides = {"mystery-model": ModelPrice(1, 1, 0, 0)}
+    assert replay_cost_usd(messages, overrides) == pytest.approx(32.0)
+    assert replay_cost_usd(messages[1:]) is None
 
 
 # -- accounting -----------------------------------------------------------------------
@@ -208,6 +236,25 @@ def test_accounting_savings() -> None:
     records = accounting.saving_records(1, 2)
     assert {r.kind for r in records} == {"early_stop", "unchanged", "compaction"}
     assert all(r.turn_id == 2 and r.tokens_saved > 0 for r in records)
+
+
+def test_savings_value_uses_the_average_price_of_priced_calls() -> None:
+    accounting = TurnAccounting()
+    assert accounting.savings().cost_usd is None
+    accounting.add_call(Usage(input_tokens=100, output_tokens=0), "answer")  # no price
+    assert accounting.savings().cost_usd is None
+    accounting.add_call(Usage(input_tokens=300, output_tokens=100, cost_usd=0.002), "answer")
+    assert accounting.savings().cost_usd == 0.0  # known price, nothing saved yet
+    accounting.add_unchanged("x" * 400)  # 100 tokens at 0.002 / 400 per token
+    accounting.compaction_per_request = 50
+    accounting.add_context_request()
+    assert accounting.savings().cost_usd == pytest.approx(150 * 0.002 / 400)
+
+    cached = TurnAccounting()
+    cached.cache, cached.cache_cost = 1234, 0.25
+    assert cached.savings().cost_usd == 0.25
+    cached.cache_cost = None
+    assert cached.savings().cost_usd is None
 
 
 def test_early_stop_without_revisions_is_zero() -> None:

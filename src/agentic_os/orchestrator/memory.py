@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agentic_os.domain import AgentName, Usage
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
 from agentic_os.orchestrator.store import History, Store, StoredMessage, UsageRecord
 from agentic_os.orchestrator.tokens import estimate_context_tokens
+from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import (
     ChatTurn,
     GenerationRequest,
@@ -51,7 +52,7 @@ class CompactionResult:
     tokens_removed: int
     """Estimated tokens removed from every request that carries the context."""
     usage: Usage
-    """Usage of the summary call."""
+    """Usage of the summary call (priced)."""
     agent: AgentName
     """Agent that wrote the summary."""
 
@@ -127,11 +128,15 @@ async def compact(
     providers: Mapping[AgentName, Provider],
     store: Store,
     max_output_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
+    models: Mapping[AgentName, str] | None = None,
+    price_overrides: Mapping[str, ModelPrice] | None = None,
 ) -> CompactionResult | None:
     """Summarize ``context.messages[:cut]`` (plus the previous summary) with a fast model.
 
-    Claude is preferred, ChatGPT is the fallback. Every attempt is recorded as usage.
-    Returns None (context left untouched) when no provider could write the summary.
+    Claude is preferred, ChatGPT is the fallback. ``models`` picks the fast model per
+    agent (the provider's own when missing). Every attempt is recorded as usage, priced
+    with ``price_overrides`` over the default prices. Returns None (context left
+    untouched) when no provider could write the summary.
     """
     upto_message_id = context.messages[cut - 1].id
     for agent in (a for a in SUMMARY_PREFERENCE if a in providers):
@@ -143,6 +148,7 @@ async def compact(
             context_summary=context.summary,
             purpose="summary",
             fast=True,
+            model=(models or {}).get(agent),
             max_output_tokens=min(max_output_tokens, SUMMARY_MAX_OUTPUT_TOKENS),
         )
         started = time.monotonic()
@@ -164,7 +170,7 @@ async def compact(
                     turn_id=None,
                     agent=agent,
                     provider_mode=provider.mode,
-                    model="",
+                    model=request.model or "",
                     purpose="summary",
                     usage=Usage(),
                     latency_ms=int((time.monotonic() - started) * 1000),
@@ -174,6 +180,9 @@ async def compact(
                 )
             )
             continue
+        usage = replace(
+            result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, price_overrides)
+        )
         await store.record_usage(
             UsageRecord(
                 conversation_id=conversation_id,
@@ -182,7 +191,7 @@ async def compact(
                 provider_mode=provider.mode,
                 model=result.model,
                 purpose="summary",
-                usage=result.usage,
+                usage=usage,
                 latency_ms=result.latency_ms,
                 ttft_ms=result.ttft_ms,
                 ok=True,
@@ -193,7 +202,7 @@ async def compact(
         return CompactionResult(
             context=compacted,
             tokens_removed=max(0, context.tokens - compacted.tokens),
-            usage=result.usage,
+            usage=usage,
             agent=agent,
         )
     return None

@@ -2,12 +2,14 @@
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { AGENT_LABEL } from '../lib/format';
+  import { placeAbove } from '../lib/popover';
   import { prefs } from '../lib/prefs.svelte';
   import { AGENTS, type TurnMode } from '../lib/protocol';
   import { LIMITS } from '../lib/settings';
   import { estimateTokens, formatK, MODE_LABEL } from '../lib/text';
   import AgentIcon from './AgentIcon.svelte';
   import Icon from './Icon.svelte';
+  import ModelMenu from './ModelMenu.svelte';
 
   const uid = $props.id();
   const popoverId = `${uid}-debate-options`;
@@ -68,21 +70,6 @@
       app.cancel();
     }
   }
-
-  // Place the options popover above its button (it lives in the top layer).
-  const placePopover = (el: HTMLElement) => {
-    const onBeforeToggle = (e: Event) => {
-      if ((e as ToggleEvent).newState !== 'open' || !optionsButton) return;
-      const r = optionsButton.getBoundingClientRect();
-      const width = Math.min(300, window.innerWidth - 24);
-      const left = Math.max(12, Math.min(r.left, window.innerWidth - width - 12));
-      el.style.setProperty('left', `${left}px`);
-      el.style.setProperty('bottom', `${window.innerHeight - r.top + 8}px`);
-      el.style.setProperty('width', `${width}px`);
-    };
-    el.addEventListener('beforetoggle', onBeforeToggle);
-    return () => el.removeEventListener('beforetoggle', onBeforeToggle);
-  };
 </script>
 
 <form
@@ -142,6 +129,8 @@
         </button>
       {/if}
 
+      <ModelMenu />
+
       <label class="cache" title="Reutilitza respostes idèntiques anteriors sense cridar cap model">
         <input type="checkbox" class="switch" bind:checked={c.useCache} />
         <Icon name="cache" size={15} />
@@ -150,7 +139,7 @@
     </div>
 
     <div class="actions">
-      <span class="kbd-hint" id="{uid}-hint">
+      <span class="kbd-hint" class:idle={connected && !c.draft.trim()} id="{uid}-hint">
         {#if !connected}
           Sense connexió
         {:else if c.draft.trim()}
@@ -173,7 +162,7 @@
   </div>
 </form>
 
-<div class="popover glass" id={popoverId} popover="auto" {@attach placePopover}>
+<div class="popover glass" id={popoverId} popover="auto" {@attach placeAbove(() => optionsButton, 300)}>
   <h3>Opcions del consell</h3>
   <label class="field">
     <span>Rondes de revisió <b>{c.rounds}</b></span>
@@ -388,6 +377,13 @@
   .popover fieldset {
     border: none;
     padding: 0;
+  }
+
+  /* The idle "Enter per enviar" hint gives way to the controls first. */
+  @container (max-width: 60rem) {
+    .kbd-hint.idle {
+      display: none;
+    }
   }
 
   @container (max-width: 44rem) {

@@ -3,10 +3,10 @@ import type { ProviderStatus, Stats, Usage } from '../protocol';
 import {
   AGENT_SERIES,
   consumed,
+  dailyCost,
   dailySavings,
   dailyTokens,
   formatCompact,
-  formatDuration,
   isEmpty,
   kpis,
   latencyData,
@@ -29,16 +29,19 @@ const usage = (input: number, output: number, cost: number | null = null, cacheR
   calls: 3,
 });
 
+const FX = { eur_per_usd: 0.8, as_of: '2026-09-25', source: 'ecb' as const };
+const noSpend = { api_usd: 0, equivalent_usd: 0, unpriced_calls: 0, budget_eur: null, budget_used: null, plan_eur: null, plan_value: null };
+
 function stats(overrides: Partial<Stats> = {}): Stats {
   return {
     days: 7,
     totals: { calls: 6, errors: 1, cost_usd: 0, by_agent: { claude: usage(1000, 500, null, 200), chatgpt: usage(700, 300, null, 50) } },
-    savings: { cache: 400, compaction: 100, early_stop: 300, unchanged: 200, total: 1000 },
+    savings: { cache: 400, compaction: 100, early_stop: 300, unchanged: 200, total: 1000, cost_usd: 0.5 },
     daily: [
-      { date: '2026-09-27', agent: 'claude', input_tokens: 600, output_tokens: 200, cache_read_tokens: 100 },
-      { date: '2026-09-27', agent: 'chatgpt', input_tokens: 700, output_tokens: 300, cache_read_tokens: 50 },
-      { date: '2026-09-25', agent: 'claude', input_tokens: 400, output_tokens: 300, cache_read_tokens: 100 },
-      { date: '2026-08-01', agent: 'claude', input_tokens: 9, output_tokens: 9, cache_read_tokens: 0 }, // outside range
+      { date: '2026-09-27', agent: 'claude', input_tokens: 600, output_tokens: 200, cache_read_tokens: 100, cost_usd: 0.25 },
+      { date: '2026-09-27', agent: 'chatgpt', input_tokens: 700, output_tokens: 300, cache_read_tokens: 50, cost_usd: 0.1 },
+      { date: '2026-09-25', agent: 'claude', input_tokens: 400, output_tokens: 300, cache_read_tokens: 100, cost_usd: 0.05 },
+      { date: '2026-08-01', agent: 'claude', input_tokens: 9, output_tokens: 9, cache_read_tokens: 0, cost_usd: 9 }, // outside range
     ],
     savings_daily: [
       { date: '2026-09-27', kind: 'cache', tokens: 400 },
@@ -51,6 +54,14 @@ function stats(overrides: Partial<Stats> = {}): Stats {
     },
     turns: { solo: 2, duel: 1, debate: 4 },
     consensus: { debates: 4, reached: 3, avg_rounds: 1.5 },
+    costs: {
+      fx: FX,
+      by_agent: {
+        claude: { api_usd: 0, equivalent_usd: 0.3, unpriced_calls: 0 },
+        chatgpt: { api_usd: 0.1, equivalent_usd: 0, unpriced_calls: 2 },
+      },
+    },
+    month: { month: '2026-09', fx: FX, by_agent: { claude: noSpend, chatgpt: noSpend } },
     ...overrides,
   };
 }
@@ -74,9 +85,32 @@ describe('daily series', () => {
     expect(d.at(-1)!.values.cache).toBe(400);
   });
 
+  it('converts the daily cost of each agent to euros', () => {
+    const d = dailyCost(stats(), 0.8, '2026-09-27');
+    expect(d).toHaveLength(7);
+    expect(d.at(-1)!.values.claude).toBeCloseTo(0.2);
+    expect(d.at(-1)!.values.chatgpt).toBeCloseTo(0.08);
+    expect(d.find((x) => x.key === '2026-09-25')!.values.claude).toBeCloseTo(0.04);
+    expect(d.find((x) => x.key === '2026-09-25')!.values.chatgpt).toBe(0);
+    expect(d.some((x) => x.key === '2026-08-01')).toBe(false);
+  });
+
+  it('draws no cost without a valid rate or with missing / negative costs', () => {
+    expect(isEmpty(dailyCost(stats(), Number.NaN, '2026-09-27'))).toBe(true);
+    expect(isEmpty(dailyCost(stats(), 0, '2026-09-27'))).toBe(true);
+    const garbage = stats({
+      daily: [
+        { date: '2026-09-27', agent: 'claude', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: -3 },
+        { date: '2026-09-27', agent: 'chatgpt', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 } as Stats['daily'][number],
+      ],
+    });
+    expect(isEmpty(dailyCost(garbage, 0.9, '2026-09-27'))).toBe(true);
+  });
+
   it('survives missing arrays and unknown agents or kinds', () => {
     const s = stats({ daily: undefined as unknown as Stats['daily'], savings_daily: [{ date: '2026-09-27', kind: 'magic' as never, tokens: 5 }] });
     expect(isEmpty(dailyTokens(s, '2026-09-27'))).toBe(true);
+    expect(isEmpty(dailyCost(s, 0.9, '2026-09-27'))).toBe(true);
     expect(isEmpty(dailySavings(s, '2026-09-27'))).toBe(true);
   });
 });
@@ -119,18 +153,10 @@ describe('kpis', () => {
     expect(k.latency.chatgpt).toEqual({ p50: null, p95: null, ttft: null });
   });
 
-  it('reports no cost outside API mode, and the cost when present', () => {
-    expect(kpis(stats()).cost.total).toBeNull();
-    const api = stats({
-      totals: { calls: 2, errors: 0, cost_usd: 0.25, by_agent: { claude: usage(1, 1, 0.2), chatgpt: usage(1, 1, 0.05) } },
-    });
-    expect(kpis(api).cost).toEqual({ total: 0.25, byAgent: { claude: 0.2, chatgpt: 0.05 } });
-  });
-
   it('handles an empty period without dividing by zero', () => {
     const empty = stats({
       totals: { calls: 0, errors: 0, cost_usd: 0, by_agent: {} as Stats['totals']['by_agent'] },
-      savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0 },
+      savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null },
       consensus: { debates: 0, reached: 0, avg_rounds: null },
     });
     const k = kpis(empty);
@@ -140,7 +166,7 @@ describe('kpis', () => {
   });
 
   it('falls back to the sum of kinds when the total is missing', () => {
-    const s = stats({ savings: { cache: 1, compaction: 2, early_stop: 3, unchanged: 4, total: 0 } });
+    const s = stats({ savings: { cache: 1, compaction: 2, early_stop: 3, unchanged: 4, total: 0, cost_usd: null } });
     expect(kpis(s).saved.total).toBe(10);
   });
 
@@ -203,14 +229,6 @@ describe('subscription limits', () => {
 });
 
 describe('formatters', () => {
-  it('formats durations with Catalan decimals', () => {
-    expect(formatDuration(850.4)).toBe('850 ms');
-    expect(formatDuration(6200)).toBe('6,2 s');
-    expect(formatDuration(17300)).toBe('17 s');
-    expect(formatDuration(null)).toBe('—');
-    expect(formatDuration(Number.NaN)).toBe('—');
-  });
-
   it('formats axis ticks compactly', () => {
     // Intl separates number and unit with a no-break space.
     const plain = (v: number) => formatCompact(v).replace(/\u00a0/g, ' ');

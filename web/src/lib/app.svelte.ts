@@ -4,19 +4,28 @@
 
 import { api, ApiError, setUnauthorizedHandler } from './api';
 import { Conversations, errorMessage } from './conversations.svelte';
-import type {
-  Agent,
-  ClientMessage,
-  ProviderStatus,
-  RuntimeSettings,
-  ServerMessage,
-  TurnEvent,
-  TurnMode,
-  TurnOptions,
+import { inferCostBasis } from './costs';
+import { modelOverridesPayload } from './models';
+import { prefs } from './prefs.svelte';
+import {
+  AGENTS,
+  type Agent,
+  type ClientMessage,
+  type FxRate,
+  type ModelCatalog,
+  type MonthSpend,
+  type Pricing,
+  type ProviderStatus,
+  type RuntimeSettings,
+  type ServerMessage,
+  type TurnEvent,
+  type TurnMode,
+  type TurnOptions,
 } from './protocol';
 import { router, type Route } from './router.svelte';
 import { sceneHost } from './scene-host.svelte';
-import { DEFAULT_SETTINGS } from './settings';
+import { DEFAULT_SETTINGS, normalizeSettings } from './settings';
+import { wsErrorText } from './text';
 import { toasts } from './toasts.svelte';
 import { createLiveTurn, isTerminal, mergeTurns, TurnRegistry, type TurnView } from './turns.svelte';
 import { uuid } from './uuid';
@@ -34,16 +43,23 @@ export interface ComposerState {
   draft: string;
 }
 
-function cloneSettings(s: RuntimeSettings): RuntimeSettings {
-  return { ...s, debate: { ...s.debate } };
-}
-
 class App {
   auth: AuthPhase = $state('checking');
   /** Unrecoverable problem (WebSocket origin rejected). */
   fatal: string | null = $state(null);
   providers: ProviderStatus[] = $state([]);
-  settings: RuntimeSettings = $state(cloneSettings(DEFAULT_SETTINGS));
+  settings: RuntimeSettings = $state(normalizeSettings(DEFAULT_SETTINGS));
+  /** Models each agent can use (live from the vendor when possible), cached per session. */
+  catalog: ModelCatalog | null = $state(null);
+  catalogLoading = $state(false);
+  catalogError: string | null = $state(null);
+  /** Price table and exchange rate (loaded by the settings drawer). */
+  pricing: Pricing | null = $state(null);
+  pricingError: string | null = $state(null);
+  /** USD -> EUR rate announced by the server (hello, /api/pricing, /api/spend). */
+  fx: FxRate | null = $state(null);
+  /** Month-to-date spend for the sidebar bars. */
+  spend: MonthSpend | null = $state(null);
   composer: ComposerState = $state({
     mode: DEFAULT_SETTINGS.default_mode,
     target: DEFAULT_SETTINGS.default_target,
@@ -82,7 +98,13 @@ class App {
   /** Turn that drives the 3D scene: the visible running one, else any running one. */
   focusTurn: TurnView | null = $derived(this.runningTurn ?? this.turns.unfinished().at(-1) ?? null);
 
+  /** Euros per dollar for every € shown in the UI. */
+  eurPerUsd: number = $derived(this.fx?.eur_per_usd ?? this.settings.fx.eur_per_usd);
+
   #providersTimer: ReturnType<typeof setTimeout> | undefined;
+  #catalogRequest: Promise<void> | null = null;
+  #catalogTicket = 0;
+  #spendRequest: Promise<void> | null = null;
 
   // ------------------------------------------------------------ auth
 
@@ -123,6 +145,13 @@ class App {
     this.turns.clear();
     this.convs.clear();
     this.providers = [];
+    this.catalog = null;
+    this.#catalogTicket++;
+    this.#catalogRequest = null;
+    this.catalogLoading = false;
+    this.pricing = null;
+    this.spend = null;
+    this.fx = null;
     this.paletteOpen = false;
     this.settingsOpen = false;
     this.auth = 'login';
@@ -133,13 +162,19 @@ class App {
     this.fatal = null;
     this.conn.connect();
     // The open conversation follows the route (App.svelte effect on auth + route).
-    await Promise.allSettled([this.#loadSettings(), this.refreshProviders(), this.convs.refresh()]);
+    void this.loadModels();
+    await Promise.allSettled([
+      this.#loadSettings(),
+      this.refreshProviders(),
+      this.refreshSpend(),
+      this.convs.refresh(),
+    ]);
   }
 
   async #loadSettings(): Promise<void> {
     try {
-      const s = await api.settings();
-      this.settings = cloneSettings(s);
+      const s = normalizeSettings(await api.settings());
+      this.settings = s;
       this.applyDefaults(s);
     } catch {
       // keep defaults; the settings drawer reports errors when saving
@@ -156,9 +191,77 @@ class App {
   }
 
   async saveSettings(s: RuntimeSettings): Promise<void> {
-    const saved = await api.saveSettings(s);
-    this.settings = cloneSettings(saved);
+    const saved = normalizeSettings(await api.saveSettings(s));
+    this.settings = saved;
     this.applyDefaults(saved);
+    // Prices, the exchange rate mode and budgets change what these report.
+    void this.loadPricing();
+    void this.refreshSpend();
+  }
+
+  /** Loads the model catalog once per session; `refresh` asks the server to query the vendors again. */
+  loadModels(refresh = false): Promise<void> {
+    if (this.#catalogRequest && !refresh) return this.#catalogRequest;
+    if (this.catalog && !refresh) return Promise.resolve();
+    this.catalogLoading = true;
+    const ticket = ++this.#catalogTicket;
+    const request = api.models(refresh).then(
+      (catalog) => {
+        if (ticket !== this.#catalogTicket) return;
+        this.catalog = catalog;
+        this.catalogError = null;
+      },
+      (err: unknown) => {
+        if (ticket !== this.#catalogTicket) return;
+        this.catalogError = errorMessage(err, "No s'ha pogut obtenir la llista de models.");
+      },
+    );
+    this.#catalogRequest = request.finally(() => {
+      if (ticket !== this.#catalogTicket) return;
+      this.#catalogRequest = null;
+      this.catalogLoading = false;
+    });
+    return this.#catalogRequest;
+  }
+
+  async loadPricing(): Promise<void> {
+    try {
+      const pricing = await api.pricing();
+      this.pricing = pricing;
+      this.fx = pricing.fx;
+      this.pricingError = null;
+    } catch (err) {
+      this.pricingError = errorMessage(err, "No s'han pogut carregar els preus.");
+    }
+  }
+
+  /** Concurrent calls (login and the first hello) share one request. */
+  refreshSpend(): Promise<void> {
+    this.#spendRequest ??= api
+      .spend()
+      .then(
+        (spend) => {
+          if (this.auth !== 'ready') return;
+          this.spend = spend;
+          this.fx = spend.fx;
+        },
+        () => {
+          // the bars keep the last known values
+        },
+      )
+      .finally(() => (this.#spendRequest = null));
+    return this.#spendRequest;
+  }
+
+  /** Model an agent will use in the next turn of this tab. */
+  modelFor(agent: Agent): string | null {
+    return (
+      prefs.models[agent] ??
+      this.settings.models[agent] ??
+      this.catalog?.[agent].default_model ??
+      this.providers.find((p) => p.agent === agent)?.model ??
+      null
+    );
   }
 
   async refreshProviders(): Promise<void> {
@@ -169,9 +272,13 @@ class App {
     }
   }
 
-  #refreshProvidersSoon(): void {
+  /** Usage windows and month spend move after a turn; the server needs a moment to account it. */
+  #refreshUsageSoon(): void {
     clearTimeout(this.#providersTimer);
-    this.#providersTimer = setTimeout(() => void this.refreshProviders(), 1500);
+    this.#providersTimer = setTimeout(() => {
+      void this.refreshProviders();
+      void this.refreshSpend();
+    }, 1500);
   }
 
   // ------------------------------------------------------------ navigation
@@ -258,6 +365,7 @@ class App {
       use_cache: c.useCache,
     };
     const conversationId = this.convs.currentId;
+    const models = modelOverridesPayload(prefs.models, c.mode === 'solo' ? [c.target] : AGENTS);
     this.turns.add(
       createLiveTurn({
         requestId,
@@ -276,6 +384,7 @@ class App {
       target: c.target,
       conversation_id: conversationId,
       options,
+      ...(models ? { models } : {}),
     };
     if (!this.conn.send(msg)) {
       this.turns.remove(requestId);
@@ -299,18 +408,23 @@ class App {
     switch (msg.type) {
       case 'hello':
         this.providers = msg.providers;
+        if (msg.fx) this.fx = msg.fx;
         this.#resubscribe(msg.active_turns);
+        void this.refreshSpend();
         return;
       case 'turn.unknown':
         void this.#onUnknown(msg.request_id);
         return;
       case 'error': {
+        const text = wsErrorText(msg.code, msg.message);
         const turn = msg.request_id ? this.turns.get(msg.request_id) : undefined;
         if (turn && turn.status === 'pending') {
+          // A rejected turn.start (busy, invalid model...): never saved, so offer the text back.
           turn.status = 'failed';
-          turn.error = { kind: 'server', message: msg.message };
+          turn.error = { kind: msg.code ?? 'server', message: text };
+          if (turn.turnId == null && !this.composer.draft.trim()) this.composer.draft = turn.question;
         } else {
-          toasts.push(msg.message, 'error');
+          toasts.push(text, 'error');
         }
         return;
       }
@@ -342,9 +456,18 @@ class App {
         if (stream) sceneHost.pulse(stream.agent, ev.text.length);
         break;
       }
+      case 'stream.completed': {
+        // Live events do not say how the cost was obtained: the provider mode does.
+        const stream = turn.streams.find((s) => s.id === ev.stream_id);
+        if (stream && !stream.costBasis) {
+          const mode = this.providers.find((p) => p.agent === stream.agent)?.mode;
+          stream.costBasis = inferCostBasis(mode, ev.usage);
+        }
+        break;
+      }
       case 'turn.completed':
         void this.convs.refresh();
-        this.#refreshProvidersSoon();
+        this.#refreshUsageSoon();
         if (ev.consensus?.reached) sceneHost.flash('consensus');
         break;
       case 'turn.failed':
@@ -358,7 +481,7 @@ class App {
     }
   }
 
-  #resubscribe(active: { request_id: string; conversation_id: number; last_seq: number }[]): void {
+  #resubscribe(active: { request_id: string; conversation_id: number | null; last_seq: number }[]): void {
     for (const t of this.turns.unfinished()) {
       if (t.requestId) this.conn.send({ type: 'turn.subscribe', request_id: t.requestId, after_seq: t.lastSeq });
     }

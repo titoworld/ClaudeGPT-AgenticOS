@@ -9,10 +9,10 @@ uses httpx2 (never httpx) for its client, timeouts and transports.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
-from dataclasses import replace
 from typing import Literal
 
 import httpx2
@@ -33,6 +33,8 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.prompt_format import to_chat_messages
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_FAST_MODEL = "gpt-6-luna"
 TIMEOUT = httpx2.Timeout(connect=5.0, read=120.0, write=30.0, pool=30.0)
@@ -50,55 +52,59 @@ EFFORT_BY_PURPOSE: dict[Purpose, Effort] = {
 }
 """Never "none": gpt-6-astra rejects it. No temperature/top_p either (unsupported)."""
 
-PRICES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
-    # model: (input, cached input, cache write, output) in USD per million tokens
-    "gpt-6-astra": (10.0, 1.0, 12.5, 50.0),
-    "gpt-6-sol": (2.0, 0.2, 2.5, 10.0),
-    "gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
-}
+MODELS_TTL_SECONDS = 600.0
+FALLBACK_TTL_SECONDS = 60.0
+"""A failed listing is retried sooner than a live one is refreshed."""
+LIST_TIMEOUT_SECONDS = 15.0
 
-_SNAPSHOT = r"(-\d{4}-\d{2}-\d{2})?"
+MODEL_DESCRIPTIONS: dict[str, str] = {
+    "gpt-6-astra": "El més capaç, per a la feina més exigent.",
+    "gpt-6-sol": "Equilibrat, per a la feina de cada dia.",
+    "gpt-6-luna": "Ràpid i econòmic, per a tasques senzilles.",
+}
+"""Catalan descriptions of known models; also the fallback list (in this order)."""
+
+_CHAT_MODEL = re.compile(r"^(gpt-|chatgpt-|o\d)")
+_NOT_CHAT = re.compile(
+    r"embedding|audio|realtime|tts|transcribe|image|dall-e|whisper|moderation|search|instruct"
+)
+_SNAPSHOT = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 _SECRET_RE = re.compile(r"(sk-)[A-Za-z0-9_\-*]{8,}|(Bearer\s+)\S+")
 _SERVER_CODES = frozenset({"server_error", "vector_store_timeout"})
 
 
-def estimate_cost(model: str, usage: Usage) -> float | None:
-    """Cost in USD of ``usage`` (uncached input semantics), None for an unknown model.
-    Dated snapshots (``gpt-6-sol-2026-09-22``) use the price of their model."""
-    for name, (price_in, price_cached, price_write, price_out) in PRICES_PER_MTOK.items():
-        if re.fullmatch(re.escape(name) + _SNAPSHOT, model):
-            total = (
-                usage.input_tokens * price_in
-                + usage.cache_read_tokens * price_cached
-                + usage.cache_write_tokens * price_write
-                + usage.output_tokens * price_out
-            )
-            return round(total / 1_000_000, 6)
-    return None
+def is_chat_model(model_id: str) -> bool:
+    """Text chat/reasoning models usable with the Responses API (dated snapshots are
+    left out: their alias is listed and any id can still be typed)."""
+    return bool(
+        _CHAT_MODEL.match(model_id)
+        and not _NOT_CHAT.search(model_id)
+        and not _SNAPSHOT.search(model_id)
+    )
 
 
 def _int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def usage_from_response(usage: object, model: str) -> Usage:
+def usage_from_response(usage: object) -> Usage:
     """Usage from a ``ResponseUsage``, reading every field defensively (the SDK returns
     None for fields the server omits). ``input_tokens`` is the uncached remainder, as
-    for Anthropic: OpenAI's input_tokens include cache reads and cache writes."""
+    for Anthropic: OpenAI's input_tokens include cache reads and cache writes. No cost:
+    the engine prices every call (owner price overrides included)."""
     if usage is None:
         return Usage()
     input_details = getattr(usage, "input_tokens_details", None)
     output_details = getattr(usage, "output_tokens_details", None)
     cached = _int(getattr(input_details, "cached_tokens", None))
     written = _int(getattr(input_details, "cache_write_tokens", None))
-    result = Usage(
+    return Usage(
         input_tokens=max(0, _int(getattr(usage, "input_tokens", None)) - cached - written),
         output_tokens=_int(getattr(usage, "output_tokens", None)),
         cache_read_tokens=cached,
         cache_write_tokens=written,
         reasoning_tokens=_int(getattr(output_details, "reasoning_tokens", None)),
     )
-    return replace(result, cost_usd=estimate_cost(model, result))
 
 
 def _detail(message: object) -> str:
@@ -172,6 +178,9 @@ class OpenAIApiProvider:
         self._settings = settings
         self._client = client
         self._owns_client = client is None
+        self._models_cache: tuple[float, tuple[ModelInfo, ...], bool] | None = None
+        """(expiry on the monotonic clock, models, live)."""
+        self._models_lock = asyncio.Lock()
 
     @property
     def agent(self) -> AgentName:
@@ -184,6 +193,11 @@ class OpenAIApiProvider:
     @property
     def default_model(self) -> str:
         return self._settings.chatgpt_model or DEFAULT_MODEL
+
+    @property
+    def fast_model(self) -> str:
+        """Model of the cheap internal calls (summaries) when none is requested."""
+        return self._settings.chatgpt_fast_model or DEFAULT_FAST_MODEL
 
     def _configured(self) -> bool:
         key = self._settings.openai_api_key
@@ -205,7 +219,7 @@ class OpenAIApiProvider:
         if request.model:
             return request.model
         if request.fast:
-            return self._settings.chatgpt_fast_model or DEFAULT_FAST_MODEL
+            return self.fast_model
         return self.default_model
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
@@ -253,7 +267,7 @@ class OpenAIApiProvider:
                         final_model = response.model or model
                         yield GenerationResult(
                             text="".join(parts),
-                            usage=usage_from_response(response.usage, final_model),
+                            usage=usage_from_response(response.usage),
                             model=final_model,
                             latency_ms=int((time.monotonic() - started) * 1000),
                             ttft_ms=ttft_ms,
@@ -300,10 +314,48 @@ class OpenAIApiProvider:
             ),
         )
 
-    async def list_models(self) -> Sequence[ModelInfo]:
-        # Placeholder until live listing is implemented: the configured default only.
-        status = await self.status()
-        return (ModelInfo(id=status.model, label=status.model, is_default=True),)
+    @property
+    def models_live(self) -> bool:
+        """Whether the latest :meth:`list_models` came from the Models API."""
+        return self._models_cache is not None and self._models_cache[2]
+
+    async def list_models(self, *, refresh: bool = False) -> Sequence[ModelInfo]:
+        """Chat models of the account (cached ~10 min), or a static list if it fails."""
+        async with self._models_lock:
+            cached = self._models_cache
+            if refresh or cached is None or time.monotonic() >= cached[0]:
+                models, live = await self._fetch_models()
+                ttl = MODELS_TTL_SECONDS if live else FALLBACK_TTL_SECONDS
+                cached = self._models_cache = (time.monotonic() + ttl, models, live)
+        return cached[1]
+
+    async def _fetch_models(self) -> tuple[tuple[ModelInfo, ...], bool]:
+        live = True
+        try:
+            client = self._get_client()
+            async with asyncio.timeout(LIST_TIMEOUT_SECONDS):
+                listed = [model async for model in client.models.list()]
+            # Newest first, so new models show up at the top.
+            ids = [m.id for m in sorted(listed, key=lambda m: -m.created) if is_chat_model(m.id)]
+            if not ids:
+                raise ProviderError("Cap model de xat a la llista d'OpenAI.", kind="internal")
+        except Exception as exc:
+            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            logger.warning("Could not list the OpenAI models (%s); using the fallback", reason)
+            ids, live = list(MODEL_DESCRIPTIONS), False
+        default = self.default_model
+        if default not in ids:
+            ids.insert(0, default)
+        models = tuple(
+            ModelInfo(
+                id=model_id,
+                label=model_id,
+                description=MODEL_DESCRIPTIONS.get(model_id, ""),
+                is_default=model_id == default,
+            )
+            for model_id in ids
+        )
+        return models, live
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:

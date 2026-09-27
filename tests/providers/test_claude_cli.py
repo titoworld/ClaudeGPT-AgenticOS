@@ -233,6 +233,37 @@ async def test_model_overrides(tmp_path: Path, fake: FakeCli) -> None:
         await provider.aclose()
 
 
+async def test_list_models_offers_the_aliases_and_what_they_resolved_to(
+    provider: ClaudeCliProvider,
+) -> None:
+    models = await provider.list_models()
+    assert provider.models_live and provider.fast_model == "haiku"
+    assert [(m.id, m.label, m.is_default) for m in models] == [
+        ("opus", "Claude Opus", True),
+        ("sonnet", "Claude Sonnet", False),
+        ("haiku", "Claude Haiku", False),
+        ("fable", "Claude Fable", False),
+    ]
+    assert all(m.description.startswith("Sempre la versió més nova.") for m in models)
+    assert not any("Ara:" in m.description for m in models)
+
+    # The recorded system/init resolves "haiku" to a concrete model.
+    await collect(provider, request(fast=True))
+    haiku = next(m for m in await provider.list_models() if m.id == "haiku")
+    assert haiku.description.endswith("Ara: claude-haiku-4-5-20251001")
+
+
+async def test_list_models_with_a_configured_full_id(tmp_path: Path, fake: FakeCli) -> None:
+    provider = ClaudeCliProvider(make_settings(tmp_path, fake, claude_model="claude-opus-5-5"))
+    models = await provider.list_models()
+    await provider.aclose()
+    assert [(m.id, m.is_default) for m in models][:2] == [
+        ("claude-opus-5-5", True),
+        ("opus", False),
+    ]
+    assert models[0].description == "Raonament profund i tasques llargues."
+
+
 async def test_environment_is_allow_listed(
     monkeypatch: pytest.MonkeyPatch, fake: FakeCli, provider: ClaudeCliProvider
 ) -> None:

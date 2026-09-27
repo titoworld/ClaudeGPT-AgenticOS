@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from agentic_os import __version__
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Usage
+from agentic_os.pricing import ModelPrice
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
@@ -27,6 +28,7 @@ from agentic_os.providers.base import (
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.server.app import create_app
 from agentic_os.server.deps import AppState
+from agentic_os.server.ws import ProtocolError, parse_turn_start
 from agentic_os.storage import RuntimeSettings
 
 pytestmark = pytest.mark.filterwarnings("ignore:Using `httpx` with:DeprecationWarning")
@@ -183,6 +185,7 @@ def test_hello_and_ping(tmp_path: Path) -> None:
         assert hello["version"] == __version__
         assert [p["agent"] for p in hello["providers"]] == ["claude", "chatgpt"]
         assert hello["providers"][0]["available"] is True
+        assert hello["fx"] == {"eur_per_usd": 0.86, "as_of": None, "source": "manual"}
         assert hello["active_turns"] == []
         ws.send_json({"type": "ping", "t": 1727450000000})
         assert ws.receive_json() == {"type": "pong", "t": 1727450000000}
@@ -424,3 +427,131 @@ def test_invalid_messages_never_close_the_socket(tmp_path: Path) -> None:
 
         ws.send_json({"type": "ping", "t": 2.5})
         assert ws.receive_json() == {"type": "pong", "t": 2.5}
+
+
+# -- models and prices -------------------------------------------------------------------
+
+
+def answers_meta(client: TestClient, state: AppState, conversation_id: int) -> list[Message]:
+    detail = call(client, functools.partial(state.store.get_conversation, conversation_id))
+    assert detail is not None
+    return [dict(m.meta) for m in detail.messages if m.kind != "question"]
+
+
+def test_turn_start_models_reach_the_engine(tmp_path: Path) -> None:
+    with app_client(tmp_path) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        runtime = RuntimeSettings(models={"claude": "claude-demo-1", "chatgpt": "gpt-demo-1"})
+        call(client, functools.partial(state.store.put_runtime_settings, runtime))
+
+        # The owner's default models apply when the turn does not choose.
+        ws.send_json(start("r1", mode="duel"))
+        events = receive_until(ws, is_type("turn.completed"))
+        started = {e["agent"]: e["model"] for e in events if e["type"] == "stream.started"}
+        assert started == {"claude": "claude-demo-1", "chatgpt": "gpt-demo-1"}
+        metas = answers_meta(client, state, events[0]["conversation_id"])
+        assert sorted(m["model"] for m in metas) == ["claude-demo-1", "gpt-demo-1"]
+
+        # A model chosen for the turn wins; null keeps the default.
+        ws.send_json(start("r2", mode="duel", models={"claude": "opus-nou", "chatgpt": None}))
+        events = receive_until(ws, is_type("turn.completed"))
+        started = {e["agent"]: e["model"] for e in events if e["type"] == "stream.started"}
+        assert started == {"claude": "opus-nou", "chatgpt": "gpt-demo-1"}
+        conversation_id = events[0]["conversation_id"]
+        metas = answers_meta(client, state, conversation_id)
+        assert sorted(m["model"] for m in metas) == ["gpt-demo-1", "opus-nou"]
+        detail = call(client, functools.partial(state.store.get_conversation, conversation_id))
+        assert detail is not None
+        assert detail.messages[0].meta["models"] == {
+            "claude": "opus-nou",
+            "chatgpt": "gpt-demo-1",
+        }
+
+
+def test_owner_prices_reach_the_engine(tmp_path: Path) -> None:
+    with app_client(tmp_path) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        price = ModelPrice(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+        runtime = RuntimeSettings(prices={"fake-claude": price})
+        call(client, functools.partial(state.store.put_runtime_settings, runtime))
+        ws.send_json(start("r1"))
+        events = receive_until(ws, is_type("turn.completed"))
+        [completed] = [e for e in events if e["type"] == "stream.completed"]
+        usage = completed["usage"]
+        expected = (usage["input_tokens"] * 2.0 + usage["output_tokens"] * 10.0) / 1_000_000
+        assert usage["cost_usd"] == pytest.approx(expected)
+        [meta] = answers_meta(client, state, events[0]["conversation_id"])
+        assert meta["cost_basis"] == "equivalent"
+
+
+def test_invalid_models_are_rejected_with_the_request_id(tmp_path: Path) -> None:
+    with app_client(tmp_path) as (client, _state, token), connect(client, token) as ws:
+        ws.receive_json()
+        cases: list[tuple[object, str]] = [
+            (["opus"], "«models» ha de ser un objecte (agent → model)."),
+            ({"gemini": "x"}, "«models» només admet «claude» i «chatgpt»."),
+            (
+                {"claude": "opus 5"},
+                "«models.claude» ha de ser un identificador de model vàlid: fins a 100 "
+                "lletres, xifres o els signes . _ : / @ [ ] -, sense espais.",
+            ),
+            ({"chatgpt": 5}, "«models.chatgpt» ha de ser un identificador de model vàlid"),
+        ]
+        for index, (models, message) in enumerate(cases):
+            request_id = f"bad-{index}"
+            ws.send_json(start(request_id, models=models))
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == "invalid"
+            assert error["request_id"] == request_id
+            assert error["message"].startswith(message)
+        # Nothing was started.
+        ws.send_json({"type": "turn.subscribe", "request_id": "bad-0"})
+        assert ws.receive_json() == {"type": "turn.unknown", "request_id": "bad-0"}
+
+
+def test_parse_turn_start_merges_the_models_over_the_settings() -> None:
+    runtime = RuntimeSettings(
+        models={"claude": "opus", "chatgpt": None},
+        fast_models={"claude": None, "chatgpt": "gpt-6-luna"},
+    )
+    data: dict[str, object] = {"request_id": "r", "text": "Hola"}
+    request = parse_turn_start(data, runtime)
+    assert request.models == {"claude": "opus"}
+    assert request.fast_models == {"chatgpt": "gpt-6-luna"}
+    request = parse_turn_start({**data, "models": {"chatgpt": " gpt-6-sol", "claude": ""}}, runtime)
+    assert request.models == {"claude": "opus", "chatgpt": "gpt-6-sol"}
+    request = parse_turn_start({**data, "models": None}, RuntimeSettings())
+    assert request.models == {}
+    assert request.fast_models == {}
+    with pytest.raises(ProtocolError) as exc:
+        parse_turn_start({**data, "models": {"claude": "x y"}}, runtime)
+    assert exc.value.request_id == "r"
+
+
+def test_rejected_turns_always_name_the_request(tmp_path: Path) -> None:
+    gates: dict[AgentName, Provider] = {
+        "claude": GateProvider("claude"),
+        "chatgpt": GateProvider("chatgpt"),
+    }
+    with app_client(tmp_path, gates) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        ws.send_json(start("a"))
+        receive_until(ws, is_type("turn.started", "a"))
+        ws.send_json(start("a"))
+        duplicate = receive_until(ws, is_type("error"))[-1]
+        assert duplicate == {
+            "type": "error",
+            "message": "Aquest identificador de petició ja s'ha fet servir.",
+            "code": "duplicate",
+            "request_id": "a",
+        }
+        call(client, state.turns.aclose)  # shutting down
+        ws.send_json(start("b"))
+        unavailable = receive_until(ws, is_type("error"))[-1]
+        assert unavailable == {
+            "type": "error",
+            "message": "El servidor s'està aturant.",
+            "code": "unavailable",
+            "request_id": "b",
+        }

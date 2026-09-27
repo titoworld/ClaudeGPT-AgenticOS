@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections.abc import (
@@ -24,13 +25,27 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from agentic_os.domain import AGENTS, AgentName, MessageKind, Purpose, Usage, other_agent
+from agentic_os.domain import (
+    AGENTS,
+    AgentName,
+    MessageKind,
+    ProviderMode,
+    Purpose,
+    Usage,
+    other_agent,
+)
 from agentic_os.orchestrator.accounting import TurnAccounting
-from agentic_os.orchestrator.cache import context_fingerprint, replayed_message, turn_cache_key
+from agentic_os.orchestrator.cache import (
+    context_fingerprint,
+    replay_cost_usd,
+    replayed_message,
+    turn_cache_key,
+)
 from agentic_os.orchestrator.events import (
     Consensus,
     ErrorInfo,
     PhaseChanged,
+    Savings,
     ServerEvent,
     StreamCompleted,
     StreamDelta,
@@ -56,7 +71,9 @@ from agentic_os.orchestrator.prompts import (
 from agentic_os.orchestrator.sections import RevisionStreamParser
 from agentic_os.orchestrator.store import CachedTurn, JsonValue, NewMessage, Store, UsageRecord
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
+from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import (
+    MODEL_ID_PATTERN,
     GenerationRequest,
     GenerationResult,
     Provider,
@@ -74,6 +91,7 @@ STATUS_TIMEOUT_SECONDS = 2.0
 PREWARM_TIMEOUT_SECONDS = 5.0
 
 _DEFAULT_CONFIG = EngineConfig()
+_MODEL_ID = re.compile(MODEL_ID_PATTERN)
 _PHASE_OF: dict[MessageKind, Literal["answer", "revision", "synthesis"]] = {
     "answer": "answer",
     "revision": "revision",
@@ -130,6 +148,8 @@ class _Turn:
     question: str
     conversation_id: int = 0
     turn_id: int = 0
+    prices: Mapping[str, ModelPrice] | None = None
+    """Owner price overrides (over the default prices) for this turn's costs."""
     context: TurnContext = field(default_factory=lambda: build_context(None, ()))
     accounting: TurnAccounting = field(default_factory=TurnAccounting)
     stored: list[NewMessage] = field(default_factory=list)
@@ -154,6 +174,28 @@ async def _cancel_and_wait(tasks: Iterable[asyncio.Task[Any]]) -> None:
 
 def _usage_json(usage: Usage) -> dict[str, JsonValue]:
     return {key: value for key, value in usage.to_dict().items()}
+
+
+def _savings_json(savings: Savings) -> dict[str, JsonValue]:
+    """``Savings.to_wire()`` as JSON for the meta of a turn's final messages."""
+    return {
+        "cache": savings.cache,
+        "compaction": savings.compaction,
+        "early_stop": savings.early_stop,
+        "unchanged": savings.unchanged,
+        "total": savings.total,
+        "cost_usd": savings.cost_usd,
+    }
+
+
+def _cost_basis(mode: ProviderMode, usage: Usage) -> str | None:
+    """Meta ``cost_basis`` of a call: ``api`` for a real cost, ``equivalent`` for
+    subscription (or priced demo) usage valued at API prices; None without either."""
+    if mode == "api":
+        return "api"
+    if mode == "cli" or usage.cost_usd is not None:
+        return "equivalent"
+    return None
 
 
 def _consensus_json(consensus: Consensus) -> dict[str, JsonValue]:
@@ -200,18 +242,29 @@ class Engine:
     # -- public API --------------------------------------------------------------
 
     async def run(
-        self, request: TurnRequest, *, compaction_threshold_tokens: int | None = None
+        self,
+        request: TurnRequest,
+        *,
+        compaction_threshold_tokens: int | None = None,
+        price_overrides: Mapping[str, ModelPrice] | None = None,
     ) -> AsyncIterator[ServerEvent]:
         """Run one turn, yielding its events (see docs/PROTOCOL.md).
 
-        ``compaction_threshold_tokens`` overrides ``EngineConfig`` for this turn (the
-        owner's runtime setting). The last event is always ``TurnCompleted`` or
-        ``TurnFailed``. Closing the iterator or cancelling its consumer cancels the
-        turn and all its model calls.
+        ``compaction_threshold_tokens`` overrides ``EngineConfig`` for this turn and
+        ``price_overrides`` (the owner's prices, over ``pricing.DEFAULT_PRICES``) price
+        its calls. The last event is always ``TurnCompleted`` or ``TurnFailed``.
+        Closing the iterator or cancelling its consumer cancels the turn and all its
+        model calls.
         """
         queue: asyncio.Queue[ServerEvent | _End] = asyncio.Queue()
+        turn = _Turn(
+            request=request,
+            emit=queue.put_nowait,
+            question=request.text.strip(),
+            prices=price_overrides,
+        )
         task = asyncio.create_task(
-            self._execute(request, queue.put_nowait, compaction_threshold_tokens),
+            self._execute(turn, compaction_threshold_tokens),
             name=f"turn-{request.request_id}",
         )
         task.add_done_callback(lambda _task: queue.put_nowait(_END))
@@ -236,8 +289,7 @@ class Engine:
 
     # -- turn ----------------------------------------------------------------------
 
-    async def _execute(self, request: TurnRequest, emit: Emit, threshold: int | None) -> None:
-        turn = _Turn(request=request, emit=emit, question=request.text.strip())
+    async def _execute(self, turn: _Turn, threshold: int | None) -> None:
         try:
             await self._run_turn(turn, threshold)
         finally:
@@ -267,6 +319,9 @@ class Engine:
         identities = dict(
             zip(agents, await asyncio.gather(*(self._identity(a) for a in agents)), strict=True)
         )
+        for agent in agents:
+            if model := request.models.get(agent):
+                identities[agent] = f"{self._providers[agent].mode}:{model}"
         cache_key = turn_cache_key(
             mode=request.mode,
             target=request.target,
@@ -290,7 +345,7 @@ class Engine:
                 kind="question",
                 content=turn.question,
                 final=True,
-                meta=self._question_meta(request),
+                meta=self._question_meta(request, agents),
             )
         )
         turn.emit(
@@ -341,6 +396,9 @@ class Engine:
                 return ErrorInfo("invalid", "El llindar de consens ha de ser entre 0 i 100.")
             if debate.synthesizer not in AGENTS:
                 return ErrorInfo("invalid", "Agent sintetitzador desconegut.")
+        for model in (*request.models.values(), *request.fast_models.values()):
+            if not isinstance(model, str) or not _MODEL_ID.match(model):
+                return ErrorInfo("invalid", "Identificador de model invàlid.")
         for agent in self._agents(request):
             if agent not in self._providers:
                 return ErrorInfo("unavailable", f"{AGENT_LABELS[agent]} no està configurat.")
@@ -350,10 +408,14 @@ class Engine:
     def _agents(request: TurnRequest) -> tuple[AgentName, ...]:
         return (request.target,) if request.mode == "solo" else AGENTS
 
+    def _model_name(self, turn: _Turn, agent: AgentName) -> str:
+        """Model shown before a call: the one requested for the turn, else the default."""
+        return turn.request.models.get(agent) or self._models.get(agent, "")
+
     @staticmethod
-    def _question_meta(request: TurnRequest) -> dict[str, JsonValue]:
+    def _question_meta(request: TurnRequest, agents: tuple[AgentName, ...]) -> dict[str, JsonValue]:
         debate = request.options.debate
-        return {
+        meta: dict[str, JsonValue] = {
             "mode": request.mode,
             "target": request.target,
             "options": {
@@ -365,6 +427,12 @@ class Engine:
                 "use_cache": request.options.use_cache,
             },
         }
+        models: dict[str, JsonValue] = {
+            agent: request.models[agent] for agent in agents if request.models.get(agent)
+        }
+        if models:
+            meta["models"] = models
+        return meta
 
     async def _identity(self, agent: AgentName) -> str:
         """``"<mode>:<model>"`` of an agent's provider (part of the cache key).
@@ -404,6 +472,8 @@ class Engine:
             providers=self._providers,
             store=self._store,
             max_output_tokens=self._config.max_output_tokens,
+            models=turn.request.fast_models,
+            price_overrides=turn.prices,
         )
         if result is None:
             return context
@@ -619,7 +689,7 @@ class Engine:
         """Store an existing answer as the final one, without calling any model."""
         turn.degraded = True
         stream_id = uuid.uuid4().hex
-        model = self._models.get(agent, "")
+        model = self._model_name(turn, agent)
         turn.emit(StreamStarted(turn.request_id, stream_id, agent, "synthesis", round_, model))
         turn.emit(StreamDelta(turn.request_id, stream_id, "text", content))
         message_id = await self._store.add_message(
@@ -639,6 +709,7 @@ class Engine:
                     "cached": False,
                     "degraded": True,
                     "consensus": _consensus_json(consensus),
+                    "savings": _savings_json(turn.accounting.savings()),
                 },
             )
         )
@@ -650,6 +721,9 @@ class Engine:
     async def _replay(self, turn: _Turn, cached: CachedTurn) -> None:
         phase: tuple[str, int] | None = None
         consensus: Consensus | None = None
+        turn.accounting.cache = cached.tokens
+        turn.accounting.cache_cost = replay_cost_usd(cached.messages, turn.prices)
+        savings = turn.accounting.savings()
         for original in cached.messages:
             message = replayed_message(
                 original, conversation_id=turn.conversation_id, turn_id=turn.turn_id
@@ -679,7 +753,10 @@ class Engine:
                 turn.emit(StreamDelta(turn.request_id, stream_id, "answer", message.content))
             else:
                 turn.emit(StreamDelta(turn.request_id, stream_id, "text", message.content))
-            message_id = await self._store.add_message(message)
+            if message.final:
+                # The replay's own savings (the copied turn's were dropped).
+                meta = {**meta, "savings": _savings_json(savings)}
+            message_id = await self._store.add_message(replace(message, meta=meta))
             if message.final:
                 turn.final_ids.append(message_id)
             if message.kind == "synthesis":
@@ -703,7 +780,6 @@ class Engine:
             )
         if turn.request.mode == "debate" and consensus is None:
             consensus = Consensus(reached=False, round=phase[1] if phase else 0, scores={})
-        turn.accounting.cache = cached.tokens
         await self._record_savings(turn)
         turn.emit(
             TurnCompleted(
@@ -712,7 +788,7 @@ class Engine:
                 turn.turn_id,
                 tuple(sorted(turn.final_ids)),
                 turn.accounting.usage,
-                turn.accounting.savings(),
+                savings,
                 consensus,
                 cached=True,
             )
@@ -730,6 +806,7 @@ class Engine:
             history=turn.context.history,
             context_summary=turn.context.summary,
             purpose=purpose,
+            model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
         )
 
@@ -743,6 +820,7 @@ class Engine:
                 agent, turn.question, answers[agent], answers[other_agent(agent)]
             ),
             purpose="revision",
+            model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
         )
 
@@ -754,6 +832,7 @@ class Engine:
                     system=system_prompt(agent),
                     prompt="",
                     purpose="revision",
+                    model=turn.request.models.get(agent),
                     max_output_tokens=self._config.max_output_tokens,
                 )
                 self._prewarm(turn, agent, request)
@@ -810,7 +889,7 @@ class Engine:
         stream_id = uuid.uuid4().hex
         turn.emit(
             StreamStarted(
-                turn.request_id, stream_id, agent, kind, round_, self._models.get(agent, "")
+                turn.request_id, stream_id, agent, kind, round_, self._model_name(turn, agent)
             )
         )
         carries_context = bool(request.history or request.context_summary)
@@ -834,7 +913,7 @@ class Engine:
                 turn,
                 agent,
                 request.purpose,
-                model=self._models.get(agent, ""),
+                model=request.model or self._models.get(agent, ""),
                 usage=Usage(),
                 latency_ms=int((time.monotonic() - started) * 1000),
                 ttft_ms=None,
@@ -865,6 +944,9 @@ class Engine:
         else:
             content = result.text.strip()
 
+        usage = replace(
+            result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, turn.prices)
+        )
         if not content:
             error = ProviderError("El model ha retornat una resposta buida.", kind="invalid")
             await self._record_usage(
@@ -872,7 +954,7 @@ class Engine:
                 agent,
                 request.purpose,
                 model=result.model,
-                usage=result.usage,
+                usage=usage,
                 latency_ms=result.latency_ms,
                 ttft_ms=result.ttft_ms,
                 error=error,
@@ -884,28 +966,34 @@ class Engine:
             agent,
             request.purpose,
             model=result.model,
-            usage=result.usage,
+            usage=usage,
             latency_ms=result.latency_ms,
             ttft_ms=result.ttft_ms,
             error=None,
         )
-        turn.accounting.add_call(result.usage, request.purpose)
+        turn.accounting.add_call(usage, request.purpose)
         if unchanged:
             turn.accounting.add_unchanged(content)
-        if not request.fast:
+        if not request.fast and request.model is None:
             self._models.setdefault(agent, result.model)
 
         meta: dict[str, JsonValue] = {
             "model": result.model,
-            "usage": _usage_json(result.usage),
+            "usage": _usage_json(usage),
             "latency_ms": result.latency_ms,
             "ttft_ms": result.ttft_ms,
             "cached": False,
         }
+        if basis := _cost_basis(provider.mode, usage):
+            meta["cost_basis"] = basis
         if kind == "revision":
             meta.update(critique=critique or "", agreement=agreement, unchanged=unchanged)
         if extra_meta:
             meta.update(extra_meta)
+        if final:
+            # Final messages are stored by the turn's last call, so these savings are the
+            # turn's own; only the first answer of a duel can miss the other one's cost.
+            meta["savings"] = _savings_json(turn.accounting.savings())
         message = NewMessage(
             conversation_id=turn.conversation_id,
             kind=kind,
@@ -925,7 +1013,7 @@ class Engine:
                 turn.request_id,
                 stream_id,
                 message_id,
-                result.usage,
+                usage,
                 result.latency_ms,
                 result.ttft_ms,
                 agreement=agreement,

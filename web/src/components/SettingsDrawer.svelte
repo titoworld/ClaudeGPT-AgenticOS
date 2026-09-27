@@ -2,15 +2,19 @@
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { errorMessage } from '../lib/conversations.svelte';
+  import { fxText } from '../lib/costs';
   import { lightDismiss, syncDialog } from '../lib/dialog';
   import { AGENT_LABEL } from '../lib/format';
   import { EFFECTS_LABEL, prefs } from '../lib/prefs.svelte';
-  import { AGENTS, type RuntimeSettings, type TurnMode } from '../lib/protocol';
-  import { LIMITS, validateSettings } from '../lib/settings';
-  import { MODE_LABEL } from '../lib/text';
+  import { AGENTS, type Agent, type RuntimeSettings, type TurnMode } from '../lib/protocol';
+  import { cleanSettings, LIMITS, normalizeSettings, validateSettings } from '../lib/settings';
+  import { MODE_LABEL, PROVIDER_MODE_LABEL } from '../lib/text';
   import type { SceneQuality } from '../scene/types';
   import AgentIcon from './AgentIcon.svelte';
+  import AgentLabel from './AgentLabel.svelte';
   import Icon from './Icon.svelte';
+  import ModelPicker from './ModelPicker.svelte';
+  import PriceTable from './PriceTable.svelte';
 
   const uid = $props.id();
   const MODES: TurnMode[] = ['solo', 'duel', 'debate'];
@@ -21,14 +25,32 @@
   let submitted = $state(false);
   let saving = $state(false);
   let result: { ok: boolean; text: string } | null = $state(null);
+  /** Model pickers with a custom id that is not valid yet. */
+  let pickerInvalid: Record<string, boolean> = $state(noInvalidPickers());
 
   const errors = $derived(validateSettings(form));
   const shownErrors = $derived(submitted ? errors : {});
-  const hasErrors = $derived(Object.keys(errors).length > 0);
+  const hasErrors = $derived(Object.keys(errors).length > 0 || Object.values(pickerInvalid).some(Boolean));
+  const currentFx = $derived(app.pricing?.fx ?? app.fx);
 
   function copy(s: RuntimeSettings): RuntimeSettings {
-    return { ...s, debate: { ...s.debate } };
+    return normalizeSettings($state.snapshot(s));
   }
+
+  function noInvalidPickers(): Record<string, boolean> {
+    return Object.fromEntries(AGENTS.flatMap((a) => [`models.${a}`, `fast_models.${a}`]).map((k) => [k, false]));
+  }
+
+  const modeOf = (agent: Agent) =>
+    app.catalog?.[agent].mode ?? app.providers.find((p) => p.agent === agent)?.mode ?? null;
+
+  // "Per defecte" here means the provider's own model. The catalog's defaults already
+  // include the saved choice, so they only name it while nothing is saved.
+  const providerDefault = (agent: Agent): string | null =>
+    app.providers.find((p) => p.agent === agent)?.model ||
+    (app.settings.models[agent] == null ? (app.catalog?.[agent].default_model ?? null) : null);
+  const providerFastDefault = (agent: Agent): string | null =>
+    app.settings.fast_models[agent] == null ? (app.catalog?.[agent].fast_model ?? null) : null;
 
   $effect(() => syncDialog(dialog, app.settingsOpen));
 
@@ -38,6 +60,12 @@
     form = copy(untrack(() => app.settings));
     submitted = false;
     result = null;
+    pickerInvalid = noInvalidPickers();
+    // Untracked: a catalog refresh from inside the drawer must not reset the form.
+    untrack(() => {
+      void app.loadModels();
+      void app.loadPricing();
+    });
   });
 
   async function save(e: SubmitEvent): Promise<void> {
@@ -47,7 +75,7 @@
     if (hasErrors) return;
     saving = true;
     try {
-      await app.saveSettings($state.snapshot(form));
+      await app.saveSettings(cleanSettings($state.snapshot(form)));
       result = { ok: true, text: 'Configuració desada.' };
     } catch (err) {
       result = { ok: false, text: errorMessage(err, "No s'ha pogut desar la configuració.") };
@@ -173,6 +201,158 @@
           </label>
         </section>
 
+        <section>
+          <div class="section-head">
+            <h3>Models</h3>
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => void app.loadModels(true)}
+              disabled={app.catalogLoading}>
+              <Icon name="refresh" size={13} />{app.catalogLoading ? 'Actualitzant…' : 'Actualitza la llista'}
+            </button>
+          </div>
+          <p class="hint">
+            La llista es consulta al proveïdor. Un model nou que encara no hi surti es pot escriure a
+            «Personalitzat…». El principal respon les preguntes; el ràpid fa les tasques internes, com resumir l'historial.
+          </p>
+          {#each AGENTS as agent (agent)}
+            {@const models = app.catalog?.[agent] ?? null}
+            {@const mode = modeOf(agent)}
+            <div class="agent-block">
+              <div class="agent-head">
+                <AgentLabel {agent} size={15} />
+                {#if mode}<span class="chip">{PROVIDER_MODE_LABEL[mode]}</span>{/if}
+                {#if models && !models.live}
+                  <span class="chip warn" title="No s'ha pogut consultar el proveïdor.">llista de reserva</span>
+                {/if}
+              </div>
+              <div class="pair">
+                <ModelPicker
+                  inline
+                  label="Principal"
+                  value={form.models[agent]}
+                  onchange={(v) => (form.models[agent] = v)}
+                  {models}
+                  defaultModel={providerDefault(agent)}
+                  bind:invalid={pickerInvalid[`models.${agent}`]}
+                  showErrors={submitted} />
+                <ModelPicker
+                  inline
+                  label="Ràpid"
+                  value={form.fast_models[agent]}
+                  onchange={(v) => (form.fast_models[agent] = v)}
+                  {models}
+                  defaultModel={providerFastDefault(agent)}
+                  bind:invalid={pickerInvalid[`fast_models.${agent}`]}
+                  showErrors={submitted} />
+              </div>
+            </div>
+          {/each}
+          {#if app.catalogError}
+            <p class="error-text" role="status">{app.catalogError}</p>
+          {/if}
+        </section>
+
+        <section>
+          <h3>Costos i moneda</h3>
+          <fieldset class="field">
+            <legend class="field-label">Tipus de canvi de dòlars a euros</legend>
+            <div class="segmented">
+              <label>
+                <input type="radio" name="{uid}-fxmode" value="auto" bind:group={form.fx.mode} />Automàtic (BCE)
+              </label>
+              <label>
+                <input type="radio" name="{uid}-fxmode" value="manual" bind:group={form.fx.mode} />Manual
+              </label>
+            </div>
+          </fieldset>
+          <label class="field">
+            <span>{form.fx.mode === 'auto' ? 'Tipus de reserva' : 'Tipus de canvi'} (€ per 1 $)</span>
+            <input
+              class="input narrow"
+              type="number"
+              inputmode="decimal"
+              min={LIMITS.eur_per_usd.min}
+              max={LIMITS.eur_per_usd.max}
+              step="0.0001"
+              bind:value={form.fx.eur_per_usd}
+              aria-invalid={!!shownErrors.eur_per_usd}
+              aria-describedby="{uid}-fx-hint {uid}-fx-err" />
+            <small class="hint" id="{uid}-fx-hint">
+              {form.fx.mode === 'auto'
+                ? "Cada dia es fa servir el tipus de referència del Banc Central Europeu; aquest només s'aplica si no es pot obtenir."
+                : 'Tots els imports en euros es calculen amb aquest tipus.'}
+            </small>
+            <small class="error-text" id="{uid}-fx-err">{shownErrors.eur_per_usd ?? ''}</small>
+          </label>
+          {#if currentFx}
+            <p class="note"><Icon name="info" size={15} /><span>Ara: {fxText(currentFx)}</span></p>
+          {/if}
+        </section>
+
+        <section>
+          <h3>Preus</h3>
+          <p class="hint">
+            Dòlars per milió de tokens, com els publiquen els proveïdors. En mode subscripció serveixen per
+            calcular el valor equivalent. Edita un preu per crear-ne un de propi.
+          </p>
+          <PriceTable
+            bind:prices={form.prices}
+            pricing={app.pricing}
+            errors={shownErrors}
+            loadError={app.pricing ? null : app.pricingError} />
+        </section>
+
+        <section>
+          <h3>Pressupostos i plans</h3>
+          <p class="hint">Imports mensuals en euros. Deixa-ho en blanc si no en tens.</p>
+          <div class="money-grid">
+            <span></span>
+            <span class="col-head" id="{uid}-budget-head">Pressupost d'API</span>
+            <span class="col-head" id="{uid}-plan-head">Preu de la subscripció</span>
+            {#each AGENTS as agent (agent)}
+              {@const budgetErr = shownErrors[`budgets_eur.${agent}`]}
+              {@const planErr = shownErrors[`plans_eur.${agent}`]}
+              <AgentLabel {agent} size={15} />
+              <div class="money">
+                <input
+                  class="input"
+                  type="number"
+                  inputmode="decimal"
+                  min={LIMITS.eur.min}
+                  max={LIMITS.eur.max}
+                  step="0.01"
+                  placeholder="—"
+                  bind:value={form.budgets_eur[agent]}
+                  aria-label="Pressupost mensual d'API de {AGENT_LABEL[agent]}, en euros"
+                  aria-invalid={!!budgetErr} />
+                <span class="unit" aria-hidden="true">€</span>
+                {#if budgetErr}<small class="error-text">{budgetErr}</small>{/if}
+              </div>
+              <div class="money">
+                <input
+                  class="input"
+                  type="number"
+                  inputmode="decimal"
+                  min={LIMITS.eur.min}
+                  max={LIMITS.eur.max}
+                  step="0.01"
+                  placeholder="—"
+                  bind:value={form.plans_eur[agent]}
+                  aria-label="Preu mensual de la subscripció de {AGENT_LABEL[agent]}, en euros"
+                  aria-invalid={!!planErr} />
+                <span class="unit" aria-hidden="true">€</span>
+                {#if planErr}<small class="error-text">{planErr}</small>{/if}
+              </div>
+            {/each}
+          </div>
+          <p class="hint">
+            El pressupost és per a l'ús per API; l'indicador de la barra lateral avisa a partir del 80&nbsp;%.
+            El preu del pla serveix per comparar-lo amb el valor aprofitat en mode subscripció.
+          </p>
+        </section>
+
         <section class="local">
           <h3>Efectes visuals</h3>
           <p class="hint">Només en aquest navegador. S'apliquen a l'instant.</p>
@@ -222,7 +402,7 @@
 <style>
   .drawer {
     margin: 0 0 0 auto;
-    width: min(28rem, 100vw);
+    width: min(32rem, 100vw);
     height: 100dvh;
     max-height: 100dvh;
   }
@@ -331,6 +511,105 @@
 
   .result.ok {
     color: #9ff0c9;
+  }
+
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.35rem;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    font-size: var(--text-xs);
+    color: var(--accent);
+  }
+
+  .link-btn:hover:not(:disabled) {
+    background: rgb(139 156 255 / 0.1);
+  }
+
+  .agent-block {
+    display: grid;
+    gap: 0.55rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgb(255 255 255 / 0.02);
+  }
+
+  .agent-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+  }
+
+  .agent-head .chip {
+    font-size: 0.68rem;
+    font-weight: 550;
+  }
+
+  .pair {
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  .narrow {
+    max-width: 10rem;
+  }
+
+  .money-grid {
+    display: grid;
+    grid-template-columns: auto repeat(2, minmax(0, 1fr));
+    align-items: center;
+    gap: 0.5rem 0.7rem;
+    font-size: var(--text-sm);
+  }
+
+  .col-head {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .money {
+    position: relative;
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .money .input {
+    min-height: 2.25rem;
+    padding: 0.4rem 1.7rem 0.4rem 0.65rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    appearance: textfield;
+  }
+
+  .money .input::-webkit-inner-spin-button,
+  .money .input::-webkit-outer-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
+  .unit {
+    position: absolute;
+    top: 0;
+    right: 0.65rem;
+    height: 2.25rem;
+    display: grid;
+    place-items: center;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    pointer-events: none;
   }
 
   .local {

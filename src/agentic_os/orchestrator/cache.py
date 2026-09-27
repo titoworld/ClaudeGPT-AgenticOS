@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-from agentic_os.domain import AgentName, TurnMode, TurnOptions
+from agentic_os.domain import AgentName, TurnMode, TurnOptions, Usage
 from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
+from agentic_os.pricing import ModelPrice, estimate_cost_usd
 
 CACHE_KEY_VERSION = 1
 """Bump when prompts or the replay format change, to invalidate old entries."""
@@ -48,8 +49,9 @@ def turn_cache_key(
     """Cache key of a turn.
 
     ``identities`` maps each agent taking part to its provider identity
-    (``"<mode>:<model>"``). The solo target and the debate options only count in
-    the modes that use them, so irrelevant differences do not cause misses.
+    (``"<mode>:<model>"``, with the model requested for this turn). The solo target
+    and the debate options only count in the modes that use them, so irrelevant
+    differences do not cause misses.
     """
     debate = options.debate
     return _digest(
@@ -74,7 +76,36 @@ def turn_cache_key(
 
 
 def replayed_message(message: NewMessage, *, conversation_id: int, turn_id: int) -> NewMessage:
-    """A cached message moved to a new turn and flagged as ``cached``."""
+    """A cached message moved to a new turn and flagged as ``cached``: a replay spends
+    nothing, so its usage is zero (no cost basis) and the original turn's savings go."""
     meta: dict[str, JsonValue] = dict(message.meta)
     meta["cached"] = True
+    meta["usage"] = dict(Usage().to_dict())
+    meta.pop("cost_basis", None)
+    meta.pop("savings", None)
     return replace(message, conversation_id=conversation_id, turn_id=turn_id, meta=meta)
+
+
+def _int(value: JsonValue) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def replay_cost_usd(
+    messages: Sequence[NewMessage], price_overrides: Mapping[str, ModelPrice] | None = None
+) -> float | None:
+    """What the cached turn's calls cost, at current prices (None if none is priced)."""
+    total: float | None = None
+    for message in messages:
+        model, usage = message.meta.get("model"), message.meta.get("usage")
+        if not isinstance(model, str) or not isinstance(usage, dict):
+            continue
+        tokens = Usage(
+            input_tokens=_int(usage.get("input_tokens")),
+            output_tokens=_int(usage.get("output_tokens")),
+            cache_read_tokens=_int(usage.get("cache_read_tokens")),
+            cache_write_tokens=_int(usage.get("cache_write_tokens")),
+        )
+        cost = estimate_cost_usd(model, tokens, price_overrides)
+        if cost is not None:
+            total = (total or 0.0) + cost
+    return total

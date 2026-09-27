@@ -19,6 +19,8 @@ from starlette.requests import HTTPConnection
 from agentic_os.config import Settings
 from agentic_os.security.sessions import SessionManager
 from agentic_os.security.throttle import LoginThrottle
+from agentic_os.server.catalog import ModelCatalog
+from agentic_os.server.fx_rates import FxRefresher
 from agentic_os.server.middleware import normalize_origins
 from agentic_os.server.status import ProviderMonitor
 from agentic_os.server.turns import TurnManager
@@ -44,6 +46,8 @@ class AppState:
     throttle: LoginThrottle
     turns: TurnManager
     monitor: ProviderMonitor
+    catalog: ModelCatalog
+    fx: FxRefresher
     clock: Callable[[], datetime]
     login_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serializes login attempts so the throttle check and the failure count are

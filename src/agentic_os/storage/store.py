@@ -13,6 +13,7 @@ from types import TracebackType
 from typing import Final, Self, cast
 
 from agentic_os.domain import AGENTS, MessageKind
+from agentic_os.fx import FxRate
 from agentic_os.orchestrator.store import (
     CachedTurn,
     History,
@@ -22,7 +23,7 @@ from agentic_os.orchestrator.store import (
     StoredMessage,
     UsageRecord,
 )
-from agentic_os.storage.db import Database
+from agentic_os.storage.db import Database, Tx
 from agentic_os.storage.models import (
     TURN_MODES,
     ConversationDetail,
@@ -30,13 +31,15 @@ from agentic_os.storage.models import (
     OwnerRecord,
     RuntimeSettings,
     SessionRecord,
+    StoredFxRate,
     ThrottleState,
     as_utc,
+    effective_fx,
     format_ts,
     parse_ts,
     utc_now,
 )
-from agentic_os.storage.stats import Stats, compute_stats
+from agentic_os.storage.stats import MonthSpend, Stats, compute_month_spend, compute_stats
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,7 @@ MAX_LIST_LIMIT: Final = 200
 _MAX_IP_LENGTH: Final = 64
 _MAX_USER_AGENT_LENGTH: Final = 256
 _RUNTIME_SETTINGS_KEY: Final = "runtime"
+_ECB_RATE_KEY: Final = "fx_ecb"
 _CACHE_FORMAT: Final = 1
 _MESSAGE_KINDS: Final[tuple[MessageKind, ...]] = ("question", "answer", "revision", "synthesis")
 
@@ -512,26 +516,33 @@ class SqliteStore:
     # ------------------------------------------------------------------
 
     async def get_runtime_settings(self) -> RuntimeSettings:
-        """Stored settings, or the defaults if never saved (or no longer valid)."""
+        """Stored settings, or the defaults if never saved (or no longer valid).
+        Keys added by newer versions take their defaults on older stored values."""
         async with self._db.transaction(write=False) as tx:
-            row = await tx.fetchone(
-                "SELECT value FROM settings WHERE key = ?", (_RUNTIME_SETTINGS_KEY,)
-            )
-        if row is None:
-            return RuntimeSettings()
-        try:
-            return RuntimeSettings.from_wire(json.loads(str(row["value"])))
-        except ValueError:
-            logger.warning("Stored runtime settings are invalid; using the defaults")
-            return RuntimeSettings()
+            return await _read_runtime_settings(tx)
 
     async def put_runtime_settings(self, settings: RuntimeSettings) -> None:
         async with self._db.transaction() as tx:
-            await tx.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                (_RUNTIME_SETTINGS_KEY, _dump_json(settings.to_wire())),
-            )
+            await _put_setting(tx, _RUNTIME_SETTINGS_KEY, settings.to_wire())
+
+    # ------------------------------------------------------------------
+    # Exchange rate
+    # ------------------------------------------------------------------
+
+    async def get_ecb_rate(self) -> StoredFxRate | None:
+        """The last ECB rate stored by :meth:`put_ecb_rate`, if any."""
+        async with self._db.transaction(write=False) as tx:
+            return await _read_ecb_rate(tx)
+
+    async def put_ecb_rate(self, rate: FxRate, fetched_at: datetime) -> None:
+        stored = StoredFxRate(rate=rate, fetched_at=as_utc(fetched_at))
+        async with self._db.transaction() as tx:
+            await _put_setting(tx, _ECB_RATE_KEY, stored.to_json())
+
+    async def current_fx(self, now: datetime) -> FxRate:
+        """The rate costs are shown with (see :func:`~agentic_os.storage.models.effective_fx`)."""
+        async with self._db.transaction(write=False) as tx:
+            return effective_fx(await _read_runtime_settings(tx), await _read_ecb_rate(tx), now)
 
     # ------------------------------------------------------------------
     # Owner account
@@ -726,7 +737,64 @@ class SqliteStore:
         ``now``'s date; raises :class:`ValueError` (Catalan) for other values.
         See :mod:`agentic_os.storage.stats` for the exact definitions."""
         async with self._db.transaction(write=False) as tx:
-            return await compute_stats(tx, days, now)
+            settings = await _read_runtime_settings(tx)
+            fx = effective_fx(settings, await _read_ecb_rate(tx), now)
+            return await compute_stats(
+                tx,
+                days,
+                now,
+                fx=fx,
+                budgets_eur=settings.budgets_eur,
+                plans_eur=settings.plans_eur,
+            )
+
+    async def month_spend(self, now: datetime) -> MonthSpend:
+        """``MonthSpend`` of PROTOCOL.md for ``now``'s UTC calendar month."""
+        async with self._db.transaction(write=False) as tx:
+            settings = await _read_runtime_settings(tx)
+            fx = effective_fx(settings, await _read_ecb_rate(tx), now)
+            return await compute_month_spend(tx, now, fx, settings.budgets_eur, settings.plans_eur)
+
+
+async def _get_setting(tx: Tx, key: str) -> object | None:
+    row = await tx.fetchone("SELECT value FROM settings WHERE key = ?", (key,))
+    if row is None:
+        return None
+    try:
+        value: object = json.loads(str(row["value"]))
+    except ValueError:
+        return None
+    return value
+
+
+async def _put_setting(tx: Tx, key: str, value: JsonValue) -> None:
+    await tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (key, _dump_json(value)),
+    )
+
+
+async def _read_runtime_settings(tx: Tx) -> RuntimeSettings:
+    stored = await _get_setting(tx, _RUNTIME_SETTINGS_KEY)
+    if stored is None:
+        return RuntimeSettings()
+    try:
+        return RuntimeSettings.from_wire(stored)
+    except ValueError:
+        logger.warning("Stored runtime settings are invalid; using the defaults")
+        return RuntimeSettings()
+
+
+async def _read_ecb_rate(tx: Tx) -> StoredFxRate | None:
+    stored = await _get_setting(tx, _ECB_RATE_KEY)
+    if stored is None:
+        return None
+    try:
+        return StoredFxRate.from_json(stored)
+    except ValueError:
+        logger.warning("The stored ECB exchange rate is invalid; ignoring it")
+        return None
 
 
 __all__ = ["DEFAULT_TITLE", "MAX_LIST_LIMIT", "ConversationNotFoundError", "SqliteStore"]

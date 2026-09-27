@@ -1,10 +1,12 @@
 """REST routes of docs/PROTOCOL.md (except ``/api/auth``, see ``routes_auth``)."""
 
+import asyncio
 from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from agentic_os.server.catalog import pricing_to_wire
 from agentic_os.server.deps import StateDep, read_json, require_session
 from agentic_os.server.status import status_to_wire
 from agentic_os.storage import MAX_LIST_LIMIT, RuntimeSettings
@@ -28,6 +30,28 @@ async def providers(state: StateDep) -> JSONResponse:
     return JSONResponse([status_to_wire(s) for s in await state.monitor.statuses()])
 
 
+@router.get("/models")
+async def models(state: StateDep, refresh: bool = False) -> JSONResponse:
+    runtime, statuses, listings = await asyncio.gather(
+        state.store.get_runtime_settings(),
+        state.monitor.statuses(),
+        state.catalog.listings(refresh=refresh),
+    )
+    return JSONResponse(state.catalog.to_wire(runtime, statuses, listings))
+
+
+@router.get("/pricing")
+async def pricing(state: StateDep) -> JSONResponse:
+    runtime = await state.store.get_runtime_settings()
+    fx = await state.store.current_fx(state.clock())
+    return JSONResponse(pricing_to_wire(fx, runtime.prices))
+
+
+@router.get("/spend")
+async def spend(state: StateDep) -> JSONResponse:
+    return JSONResponse(await state.store.month_spend(state.clock()))
+
+
 @router.get("/settings")
 async def get_settings(state: StateDep) -> JSONResponse:
     settings = await state.store.get_runtime_settings()
@@ -41,6 +65,8 @@ async def put_settings(request: Request, state: StateDep) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     await state.store.put_runtime_settings(settings)
+    if settings.fx.mode == "auto":
+        state.fx.poke()  # fetch the ECB rate now if there is no recent one
     return JSONResponse(settings.to_wire())
 
 

@@ -1,17 +1,36 @@
 import re
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
 from agentic_os.domain import DebateOptions, TurnOptions
-from agentic_os.storage.models import RuntimeSettings, format_ts, parse_ts
+from agentic_os.fx import FxRate
+from agentic_os.pricing import ModelPrice
+from agentic_os.storage.models import (
+    FxSettings,
+    RuntimeSettings,
+    StoredFxRate,
+    effective_fx,
+    format_ts,
+    parse_ts,
+)
 
-VALID = {
+VALID: dict[str, Any] = {
     "default_mode": "duel",
     "default_target": "chatgpt",
     "debate": {"rounds": 0, "consensus_threshold": 100, "synthesizer": "chatgpt"},
     "use_cache": False,
     "compaction_threshold_tokens": 100_000,
+    "models": {"claude": "opus", "chatgpt": None},
+    "fast_models": {"claude": None, "chatgpt": "gpt-6-luna"},
+    "prices": {
+        "my-new-model": {"input": 1.5, "output": 6.0, "cache_read": 0.15, "cache_write": 0.0},
+        "claude-opus-5": {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0},
+    },
+    "fx": {"mode": "manual", "eur_per_usd": 0.91},
+    "budgets_eur": {"claude": 25.0, "chatgpt": None},
+    "plans_eur": {"claude": 100.0, "chatgpt": 0.0},
 }
 
 
@@ -23,8 +42,16 @@ def test_defaults_match_the_protocol() -> None:
         "debate": {"rounds": 2, "consensus_threshold": 85, "synthesizer": "claude"},
         "use_cache": True,
         "compaction_threshold_tokens": 6000,
+        "models": {"claude": None, "chatgpt": None},
+        "fast_models": {"claude": None, "chatgpt": None},
+        "prices": {},
+        "fx": {"mode": "auto", "eur_per_usd": 0.86},
+        "budgets_eur": {"claude": None, "chatgpt": None},
+        "plans_eur": {"claude": None, "chatgpt": None},
     }
     assert settings.to_turn_options() == TurnOptions()
+    assert settings.chosen_models() == {}
+    assert settings.chosen_fast_models() == {}
 
 
 def test_wire_roundtrip_and_turn_options() -> None:
@@ -35,6 +62,13 @@ def test_wire_roundtrip_and_turn_options() -> None:
         debate=DebateOptions(rounds=0, consensus_threshold=100, synthesizer="chatgpt"),
         use_cache=False,
     )
+    assert settings.chosen_models() == {"claude": "opus"}
+    assert settings.chosen_fast_models() == {"chatgpt": "gpt-6-luna"}
+    assert settings.prices["my-new-model"] == ModelPrice(1.5, 6.0, 0.15, 0.0)
+    assert settings.fx == FxSettings(mode="manual", eur_per_usd=0.91)
+    prices = settings.to_wire()["prices"]
+    assert isinstance(prices, dict)
+    assert list(prices) == ["claude-opus-5", "my-new-model"]
 
 
 def test_missing_keys_take_defaults_and_unknown_keys_are_ignored() -> None:
@@ -42,6 +76,30 @@ def test_missing_keys_take_defaults_and_unknown_keys_are_ignored() -> None:
     assert settings.debate == DebateOptions(rounds=3)
     assert settings.default_mode == "debate"
     assert RuntimeSettings.from_wire({}) == RuntimeSettings()
+
+
+def test_settings_saved_by_an_older_version_still_load() -> None:
+    old = {k: VALID[k] for k in ("default_mode", "debate", "compaction_threshold_tokens")}
+    settings = RuntimeSettings.from_wire(old)
+    assert settings.models == {"claude": None, "chatgpt": None}
+    assert settings.prices == {}
+    assert settings.fx == FxSettings()
+    # Partial objects: missing agents and keys take their defaults too.
+    partial = RuntimeSettings.from_wire(
+        {"models": {"chatgpt": "gpt-6-sol"}, "fx": {"mode": "manual"}, "plans_eur": {}}
+    )
+    assert partial.models == {"claude": None, "chatgpt": "gpt-6-sol"}
+    assert partial.fx == FxSettings(mode="manual", eur_per_usd=0.86)
+    assert partial.plans_eur == {"claude": None, "chatgpt": None}
+
+
+def test_model_ids_are_trimmed_and_empty_means_the_default() -> None:
+    settings = RuntimeSettings.from_wire(
+        {"models": {"claude": "  claude-opus-5[1m] ", "chatgpt": ""}, "fast_models": {}}
+    )
+    assert settings.models == {"claude": "claude-opus-5[1m]", "chatgpt": None}
+    for model in ("anthropic/claude-sonnet-5@20260101", "gpt-6-sol:latest", "A" * 100):
+        assert RuntimeSettings.from_wire({"models": {"claude": model}}).models["claude"] == model
 
 
 @pytest.mark.parametrize(
@@ -61,12 +119,56 @@ def test_missing_keys_take_defaults_and_unknown_keys_are_ignored() -> None:
         ({"compaction_threshold_tokens": 999}, "compaction_threshold_tokens"),
         ({"compaction_threshold_tokens": 100_001}, "compaction_threshold_tokens"),
         ({"compaction_threshold_tokens": "6000"}, "compaction_threshold_tokens"),
+        ({"models": {"claude": "opus 5"}}, "models.claude"),
+        ({"models": {"claude": "-opus"}}, "models.claude"),
+        ({"models": {"claude": "x" * 101}}, "models.claude"),
+        ({"models": {"claude": "op\nus"}}, "models.claude"),
+        ({"models": {"claude": 5}}, "models.claude"),
+        ({"fast_models": {"chatgpt": "gpt 6"}}, "fast_models.chatgpt"),
+        ({"models": ["opus"]}, "models"),
+        ({"prices": []}, "prices"),
+        ({"prices": {"m": 3}}, "prices.m"),
+        ({"prices": {"m": {**VALID["prices"]["my-new-model"], "input": 1e9}}}, "prices.m.input"),
+        ({"fx": {"mode": "ecb"}}, "fx.mode"),
+        ({"fx": {"eur_per_usd": 0.1}}, "fx.eur_per_usd"),
+        ({"fx": {"eur_per_usd": 5.5}}, "fx.eur_per_usd"),
+        ({"fx": {"eur_per_usd": "0.9"}}, "fx.eur_per_usd"),
+        ({"fx": 0.9}, "fx"),
+        ({"budgets_eur": {"claude": -1}}, "budgets_eur.claude"),
+        ({"budgets_eur": {"claude": 100_001}}, "budgets_eur.claude"),
+        ({"plans_eur": {"chatgpt": True}}, "plans_eur.chatgpt"),
+        ({"plans_eur": {"chatgpt": float("inf")}}, "plans_eur.chatgpt"),
+        ({"plans_eur": None}, "plans_eur"),
     ],
 )
 def test_invalid_values_raise_catalan_errors(patch: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(f"«{message}» ha de ser")) as exc_info:
         RuntimeSettings.from_wire({**VALID, **patch})
     assert "ha de ser" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        ({"models": {"gemini": "x"}}, "«models» només admet les claus «claude» i «chatgpt»."),
+        ({"prices": {"bad id": {}}}, "«prices»: «bad id» no és un identificador de model vàlid."),
+        (
+            {"prices": {"m": {"input": -1, "output": 1, "cache_read": 0, "cache_write": 0}}},
+            "«prices.m»: Preu invàlid per a «input»: ha de ser un nombre ≥ 0.",
+        ),
+        ({"prices": {f"m{i}": VALID["prices"]["my-new-model"] for i in range(201)}}, "màxim 200"),
+    ],
+)
+def test_other_invalid_values(patch: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        RuntimeSettings.from_wire({**VALID, **patch})
+
+
+def test_limits_are_formatted_the_catalan_way() -> None:
+    with pytest.raises(ValueError, match=re.escape("entre 0,2 i 5.")):
+        RuntimeSettings.from_wire({"fx": {"eur_per_usd": 9}})
+    with pytest.raises(ValueError, match=re.escape("entre 0 i 100.000.")):
+        RuntimeSettings.from_wire({"budgets_eur": {"claude": -5}})
 
 
 def test_non_object_is_rejected() -> None:
@@ -77,6 +179,54 @@ def test_non_object_is_rejected() -> None:
 def test_direct_construction_is_validated() -> None:
     with pytest.raises(ValueError, match=r"debate\.consensus_threshold"):
         RuntimeSettings(debate=DebateOptions(consensus_threshold=10))
+    with pytest.raises(ValueError, match=r"models\.claude"):
+        RuntimeSettings(models={"claude": "no vàlid"})
+    with pytest.raises(ValueError, match=r"fx\.eur_per_usd"):
+        FxSettings(eur_per_usd=0)
+    with pytest.raises(ValueError, match=r"prices\.m\.output"):
+        RuntimeSettings(prices={"m": ModelPrice(1, float("nan"), 0, 0)})
+    with pytest.raises(ValueError, match=r"budgets_eur\.chatgpt"):
+        RuntimeSettings(budgets_eur={"chatgpt": -1.0})
+
+
+NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+ECB = StoredFxRate(
+    rate=FxRate(eur_per_usd=0.8547, as_of=date(2026, 9, 25), source="ecb"),
+    fetched_at=datetime(2026, 9, 25, 16, 0, tzinfo=UTC),
+)
+
+
+def test_effective_fx_prefers_a_recent_ecb_rate_in_auto_mode() -> None:
+    auto = RuntimeSettings(fx=FxSettings(mode="auto", eur_per_usd=0.9))
+    assert effective_fx(auto, ECB, NOW) == ECB.rate
+    manual = FxRate(eur_per_usd=0.9, as_of=None, source="manual")
+    assert effective_fx(auto, None, NOW) == manual
+    # Fetched more than 10 days ago: too old.
+    assert effective_fx(auto, ECB, ECB.fetched_at + timedelta(days=10)) == ECB.rate
+    assert effective_fx(auto, ECB, ECB.fetched_at + timedelta(days=10, seconds=1)) == manual
+    # Manual mode always uses the owner's rate.
+    assert effective_fx(RuntimeSettings(fx=FxSettings(mode="manual")), ECB, NOW) == FxRate(
+        eur_per_usd=0.86, as_of=None, source="manual"
+    )
+
+
+def test_stored_fx_rate_json_roundtrip() -> None:
+    data = ECB.to_json()
+    assert data == {
+        "eur_per_usd": 0.8547,
+        "as_of": "2026-09-25",
+        "fetched_at": "2026-09-25T16:00:00.000Z",
+    }
+    assert StoredFxRate.from_json(data) == ECB
+    bad_values: list[object] = [
+        [],
+        {**data, "eur_per_usd": 9},
+        {**data, "fetched_at": None},
+        {**data, "as_of": 1},
+    ]
+    for bad in bad_values:
+        with pytest.raises(ValueError):
+            StoredFxRate.from_json(bad)
 
 
 def test_timestamps_are_fixed_width_utc() -> None:

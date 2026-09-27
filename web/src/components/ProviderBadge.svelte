@@ -1,15 +1,22 @@
 <script lang="ts">
+  import { spendLine } from '../lib/costs';
   import { formatDay, formatRelative, formatTime } from '../lib/format';
   import Icon from './Icon.svelte';
-  import type { ProviderStatus } from '../lib/protocol';
+  import type { MonthSpend, ProviderStatus } from '../lib/protocol';
   import { PROVIDER_MODE_LABEL } from '../lib/text';
   import AgentLabel from './AgentLabel.svelte';
 
   interface Props {
     provider: ProviderStatus;
+    /** Month-to-date spend of all agents (null until loaded). */
+    spend?: MonthSpend | null;
   }
 
-  let { provider }: Props = $props();
+  let { provider, spend = null }: Props = $props();
+  const month = $derived.by(() => {
+    const own = spend?.by_agent[provider.agent];
+    return spend && own ? spendLine(provider.mode, own, spend.fx, spend.month) : null;
+  });
   const uid = $props.id();
   let open = $state(false);
 
@@ -80,6 +87,33 @@
       {/if}
     </div>
   {/each}
+
+  {#if month}
+    {@const ratio = month.ratio}
+    <div class="month {month.kind} {month.level}" title={month.title}>
+      {#if ratio != null}
+        <div class="limit">
+          <span class="window">mes</span>
+          <span
+            class="bar"
+            role="meter"
+            aria-label={month.kind === 'budget' ? 'Pressupost mensual utilitzat' : 'Valor aprofitat del pla'}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.min(100, Math.round(ratio * 100))}
+            aria-valuetext={month.title}>
+            <span class="fill" style:width="{Math.min(100, ratio * 100)}%"></span>
+          </span>
+          <span class="pct">{month.percent}</span>
+          <span></span>
+        </div>
+      {/if}
+      <div class="caption" aria-hidden={ratio != null}>
+        {#if ratio == null}<span class="window">mes</span>{/if}
+        <span>{month.label} <b>{month.amount}</b></span>
+      </div>
+    </div>
+  {/if}
 
   <div class="tip" class:open role="tooltip" id="{uid}-detail">{provider.detail || 'Sense detalls.'}</div>
 </div>
@@ -184,6 +218,43 @@
   }
 
   .bad .pct {
+    color: #ffb3ba;
+  }
+
+  .month {
+    display: grid;
+    gap: 0.15rem;
+    cursor: help;
+  }
+
+  /* Amounts under the bar, aligned with it (or next to "mes" when there is no bar). */
+  .caption {
+    display: grid;
+    grid-template-columns: 1.6rem minmax(0, 1fr);
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .caption > span:last-child {
+    grid-column: 2;
+  }
+
+  .caption b {
+    font-weight: 550;
+    color: var(--text-secondary);
+  }
+
+  .month.plan .fill {
+    background: var(--accent);
+  }
+
+  .month.warn :is(.pct, b) {
+    color: #ffd99a;
+  }
+
+  .month.bad :is(.pct, b) {
     color: #ffb3ba;
   }
 

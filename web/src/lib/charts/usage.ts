@@ -30,23 +30,10 @@ export const SAVING_SERIES: SeriesDef[] = SAVING_KINDS.map((k) => ({
 export const COUNT_SERIES: SeriesDef[] = [{ key: 'count', label: 'Torns', color: 'var(--text-muted)' }];
 
 const compactFmt = new Intl.NumberFormat('ca-ES', { notation: 'compact', maximumFractionDigits: 1 });
-const secondsFmt = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 1 });
-const secondsWhole = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 0 });
 
 /** Axis ticks: always compact ('0', '500', '5 k', '10 k', '1,2 M'). */
 export function formatCompact(n: number): string {
   return compactFmt.format(n);
-}
-
-/**
- * Durations with Catalan decimals ('850 ms', '6,2 s', '17 s'); '—' when unknown.
- * (lib/format.ts formatMs uses toFixed, which prints a decimal point.)
- */
-export function formatDuration(ms: number | null | undefined): string {
-  if (ms == null || !Number.isFinite(ms)) return '—';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  const s = ms / 1000;
-  return `${(s < 10 ? secondsFmt : secondsWhole).format(s)} s`;
 }
 
 /** '1 crida' / '3 crides' (the number formatted by the caller). */
@@ -110,6 +97,27 @@ export function dailySavings(stats: Stats, today: string = utcDay()): Datum[] {
   return days.map((d) => byDay.get(d)!);
 }
 
+/**
+ * Cost in euros per day and agent (real API cost or subscription value at API
+ * prices, whichever each call was), with every day of the range present.
+ */
+export function dailyCost(stats: Stats, eurPerUsd: number, today: string = utcDay()): Datum[] {
+  const rows = Array.isArray(stats.daily) ? stats.daily : [];
+  const rate = Number.isFinite(eurPerUsd) && eurPerUsd > 0 ? eurPerUsd : 0;
+  const days = daysOf(
+    stats,
+    today,
+    rows.map((r) => r.date),
+  );
+  const byDay = new Map(days.map((d) => [d, emptyDay(d, AGENTS)]));
+  for (const r of rows) {
+    const d = byDay.get(r.date);
+    if (!d || !(AGENTS as readonly string[]).includes(r.agent)) continue;
+    d.values[r.agent] = (d.values[r.agent] ?? 0) + positive(r.cost_usd) * rate;
+  }
+  return days.map((d) => byDay.get(d)!);
+}
+
 // ------------------------------------------------------------------ categorical series
 
 /** Latency percentiles (rows) per agent (series); null when unknown. */
@@ -144,7 +152,6 @@ export function isEmpty(data: Datum[]): boolean {
 export interface Kpis {
   consumed: { total: number; byAgent: Record<Agent, number>; calls: number; errors: number; cacheRead: number };
   saved: { total: number; byKind: Record<SavingKind, number>; ratio: number | null };
-  cost: { total: number | null; byAgent: Record<Agent, number | null> };
   turns: { total: number; byMode: Record<TurnMode, number> };
   consensus: { debates: number; reached: number; rate: number | null; avgRounds: number | null };
   latency: Record<Agent, { p50: number | null; p95: number | null; ttft: number | null }>;
@@ -163,12 +170,6 @@ export function kpis(stats: Stats): Kpis {
   const savedTotal = positive(stats.savings?.total) || kindsSum;
   const wouldHaveSpent = total + savedTotal;
 
-  const costByAgent = Object.fromEntries(AGENTS.map((a) => [a, finiteOrNull(byAgentUsage?.[a]?.cost_usd)])) as Record<
-    Agent,
-    number | null
-  >;
-  const anyCost = AGENTS.some((a) => costByAgent[a] != null) || positive(stats.totals?.cost_usd) > 0;
-
   const byMode = Object.fromEntries(TURN_MODES.map((m) => [m, num(stats.turns?.[m])])) as Record<TurnMode, number>;
   const debates = num(stats.consensus?.debates);
   const reached = num(stats.consensus?.reached);
@@ -176,7 +177,6 @@ export function kpis(stats: Stats): Kpis {
   return {
     consumed: { total, byAgent, calls: num(stats.totals?.calls), errors: num(stats.totals?.errors), cacheRead },
     saved: { total: savedTotal, byKind, ratio: wouldHaveSpent > 0 ? savedTotal / wouldHaveSpent : null },
-    cost: { total: anyCost ? num(stats.totals?.cost_usd) : null, byAgent: costByAgent },
     turns: { total: TURN_MODES.reduce((acc, m) => acc + byMode[m], 0), byMode },
     consensus: {
       debates,

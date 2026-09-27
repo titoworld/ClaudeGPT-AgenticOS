@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
@@ -26,6 +26,7 @@ from agentic_os.orchestrator.events import (
     Wire,
 )
 from agentic_os.orchestrator.types import TurnRequest
+from agentic_os.pricing import ModelPrice
 from agentic_os.server.tasks import cancel_and_wait
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,11 @@ class TurnRunner(Protocol):
     """What the manager needs from :class:`~agentic_os.orchestrator.engine.Engine`."""
 
     def run(
-        self, request: TurnRequest, *, compaction_threshold_tokens: int | None = None
+        self,
+        request: TurnRequest,
+        *,
+        compaction_threshold_tokens: int | None = None,
+        price_overrides: Mapping[str, ModelPrice] | None = None,
     ) -> AsyncIterator[ServerEvent]: ...
 
 
@@ -71,6 +76,8 @@ class TurnRejectedError(Exception):
 class _Turn:
     request: TurnRequest
     conversation_id: int | None
+    compaction_threshold_tokens: int | None = None
+    price_overrides: Mapping[str, ModelPrice] | None = None
     events: list[str] = field(default_factory=list)
     """Serialized events; ``events[i]`` has ``seq == i + 1``."""
     subscribers: set[Subscriber] = field(default_factory=set)
@@ -133,8 +140,11 @@ class TurnManager:
         subscriber: Subscriber | None = None,
         *,
         compaction_threshold_tokens: int | None = None,
+        price_overrides: Mapping[str, ModelPrice] | None = None,
     ) -> None:
         """Start ``request`` in a new task, with ``subscriber`` receiving its events.
+        ``compaction_threshold_tokens`` and ``price_overrides`` (the owner's runtime
+        settings) are passed on to the engine.
 
         Raises :class:`TurnRejectedError` if the request id is already known, if
         :data:`MAX_CONCURRENT_TURNS` turns are running or if the conversation
@@ -156,13 +166,16 @@ class TurnManager:
         ):
             raise TurnRejectedError("Aquesta conversa ja té un torn en curs.", code="busy")
 
-        turn = _Turn(request=request, conversation_id=request.conversation_id)
+        turn = _Turn(
+            request=request,
+            conversation_id=request.conversation_id,
+            compaction_threshold_tokens=compaction_threshold_tokens,
+            price_overrides=price_overrides,
+        )
         if subscriber is not None:
             turn.subscribers.add(subscriber)
         self._turns[request.request_id] = turn
-        turn.task = asyncio.create_task(
-            self._run(turn, compaction_threshold_tokens), name=f"turn-{request.request_id}"
-        )
+        turn.task = asyncio.create_task(self._run(turn), name=f"turn-{request.request_id}")
         turn.task.add_done_callback(lambda task: self._on_done(turn, task))
 
     def subscribe(self, request_id: str, subscriber: Subscriber, after_seq: int = 0) -> bool:
@@ -213,9 +226,11 @@ class TurnManager:
 
     # -- internals -------------------------------------------------------------------
 
-    async def _run(self, turn: _Turn, compaction_threshold_tokens: int | None) -> None:
+    async def _run(self, turn: _Turn) -> None:
         events = self._runner.run(
-            turn.request, compaction_threshold_tokens=compaction_threshold_tokens
+            turn.request,
+            compaction_threshold_tokens=turn.compaction_threshold_tokens,
+            price_overrides=turn.price_overrides,
         )
         # Cancelling this task cancels the engine at its current await; the engine
         # then stops every model call of the turn before the error propagates.

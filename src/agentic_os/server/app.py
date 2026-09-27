@@ -23,7 +23,9 @@ from agentic_os.providers.factory import build_providers
 from agentic_os.security.sessions import SessionManager
 from agentic_os.security.throttle import LoginThrottle
 from agentic_os.server import routes_api, routes_auth, ws
+from agentic_os.server.catalog import ModelCatalog
 from agentic_os.server.deps import AppState
+from agentic_os.server.fx_rates import FxFetcher, FxRefresher
 from agentic_os.server.middleware import (
     BodyLimitMiddleware,
     OriginCheckMiddleware,
@@ -111,13 +113,15 @@ def create_app(
     *,
     providers: Mapping[AgentName, Provider] | None = None,
     clock: Callable[[], datetime] = utc_now,
+    fx_fetcher: FxFetcher | None = None,
 ) -> FastAPI:
     """Build the application.
 
     ``settings`` defaults to the process settings (``AOS_*``). ``providers``
     replaces the ones built from the settings (tests, demos); either way the app
     closes them on shutdown. ``clock`` (aware UTC) drives sessions, throttling,
-    stats and the timestamps of stored rows.
+    stats and the timestamps of stored rows. ``fx_fetcher`` replaces the download
+    of the ECB exchange rate (tests).
     """
     settings = settings if settings is not None else get_settings()
 
@@ -135,6 +139,9 @@ def create_app(
             stack.push_async_callback(turns.aclose)
             monitor = ProviderMonitor(active)
             stack.push_async_callback(monitor.aclose)
+            catalog = ModelCatalog(active, settings)
+            stack.push_async_callback(catalog.aclose)
+            fx = FxRefresher(store, clock, fetcher=fx_fetcher)
 
             state = AppState(
                 settings=settings,
@@ -143,11 +150,14 @@ def create_app(
                 throttle=LoginThrottle.from_settings(store, settings),
                 turns=turns,
                 monitor=monitor,
+                catalog=catalog,
+                fx=fx,
                 clock=clock,
             )
             maintenance = asyncio.create_task(_maintenance(state), name="maintenance")
+            fx_refresh = asyncio.create_task(fx.run(), name="fx-refresh")
 
-            stack.push_async_callback(cancel_and_wait, (maintenance,))
+            stack.push_async_callback(cancel_and_wait, (maintenance, fx_refresh))
             monitor.refresh()
             app.state.aos = state
             logger.info(

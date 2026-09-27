@@ -1,13 +1,14 @@
 from collections.abc import AsyncIterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from agentic_os.domain import AgentName, SavingKind, Usage
+from agentic_os.domain import AgentName, ProviderMode, SavingKind, Usage
+from agentic_os.fx import FxRate
 from agentic_os.orchestrator.store import JsonValue, NewMessage, SavingRecord, UsageRecord
-from agentic_os.storage import SqliteStore
-from agentic_os.storage.stats import percentile, window
+from agentic_os.storage import FxSettings, RuntimeSettings, SqliteStore
+from agentic_os.storage.stats import month_bounds, percentile, window
 
 NOW = datetime(2026, 9, 27, 12, 0, 0, tzinfo=UTC)
 
@@ -43,13 +44,14 @@ async def usage(
     latency_ms: int,
     ttft_ms: int | None = None,
     ok: bool = True,
+    mode: ProviderMode = "api",
 ) -> None:
     await store.record_usage(
         UsageRecord(
             conversation_id=None,
             turn_id=None,
             agent=agent,
-            provider_mode="api",
+            provider_mode=mode,
             model="m",
             purpose="answer",
             usage=tokens,
@@ -208,6 +210,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
         "early_stop": 300,
         "unchanged": 50,
         "total": 1350,
+        "cost_usd": None,
     }
     assert stats["daily"] == [
         {
@@ -216,6 +219,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 100,
             "output_tokens": 50,
             "cache_read_tokens": 10,
+            "cost_usd": 0.01,
         },
         {
             "date": "2026-09-25",
@@ -223,6 +227,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cost_usd": 0.0,
         },
         {
             "date": "2026-09-26",
@@ -230,6 +235,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cost_usd": 0.0,
         },
         {
             "date": "2026-09-26",
@@ -237,6 +243,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 200,
             "output_tokens": 100,
             "cache_read_tokens": 0,
+            "cost_usd": 0.0,
         },
         {
             "date": "2026-09-27",
@@ -244,6 +251,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 300,
             "output_tokens": 150,
             "cache_read_tokens": 0,
+            "cost_usd": 0.02,
         },
         {
             "date": "2026-09-27",
@@ -251,6 +259,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cost_usd": 0.0,
         },
     ]
     assert len(stats["savings_daily"]) == 3 * 4
@@ -275,6 +284,13 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
     }
     assert stats["turns"] == {"solo": 1, "duel": 1, "debate": 5}
     assert stats["consensus"] == {"debates": 4, "reached": 1, "avg_rounds": 1.25}
+    assert stats["costs"] == {
+        "fx": {"eur_per_usd": 0.86, "as_of": None, "source": "manual"},
+        "by_agent": {
+            "claude": {"api_usd": 0.03, "equivalent_usd": 0.0, "unpriced_calls": 0},
+            "chatgpt": {"api_usd": 0.0, "equivalent_usd": 0.0, "unpriced_calls": 1},
+        },
+    }
 
 
 async def test_consensus_stored_by_the_engine_takes_precedence(store: SqliteStore) -> None:
@@ -302,6 +318,132 @@ async def test_consensus_stored_by_the_engine_takes_precedence(store: SqliteStor
     assert stats["consensus"] == {"debates": 3, "reached": 2, "avg_rounds": 1.33}
 
 
+async def test_costs_by_mode_and_month_spend(store: SqliteStore, clock: FakeClock) -> None:
+    async def call(
+        agent: AgentName, mode: ProviderMode, cost: float | None, *, ok: bool = True
+    ) -> None:
+        await usage(
+            store, agent, tokens=Usage(10, 5, cost_usd=cost), latency_ms=10, ok=ok, mode=mode
+        )
+
+    clock.now = datetime(2026, 8, 31, 23, 59, tzinfo=UTC)  # last month, inside 30 days
+    await call("claude", "api", 1.0)
+    clock.now = at(2)
+    await call("claude", "api", 2.0)
+    await call("claude", "fake", 0.5)  # a priced demo model counts as equivalent
+    await call("claude", "fake", None)  # demo calls without a price are not "unpriced"
+    await call("chatgpt", "cli", 3.0)
+    await call("chatgpt", "cli", None)  # a model without a known price
+    await call("chatgpt", "cli", None, ok=False)  # failed calls are not counted
+    await store.put_runtime_settings(
+        RuntimeSettings(
+            budgets_eur={"claude": 10.0, "chatgpt": None},
+            plans_eur={"claude": 0.0, "chatgpt": 20.0},
+        )
+    )
+    await store.put_ecb_rate(FxRate(0.85, date(2026, 9, 25), "ecb"), NOW - timedelta(days=1))
+
+    stats = await store.stats(30, NOW)
+    ecb = {"eur_per_usd": 0.85, "as_of": "2026-09-25", "source": "ecb"}
+    assert stats["costs"] == {
+        "fx": ecb,
+        "by_agent": {
+            "claude": {"api_usd": 3.0, "equivalent_usd": 0.5, "unpriced_calls": 0},
+            "chatgpt": {"api_usd": 0.0, "equivalent_usd": 3.0, "unpriced_calls": 1},
+        },
+    }
+    assert [(d["date"], d["cost_usd"]) for d in stats["daily"] if d["cost_usd"]] == [
+        ("2026-08-31", 1.0),
+        ("2026-09-02", 2.5),
+        ("2026-09-02", 3.0),
+    ]
+    month = {
+        "month": "2026-09",
+        "fx": ecb,
+        "by_agent": {
+            "claude": {
+                "api_usd": 2.0,
+                "equivalent_usd": 0.5,
+                "unpriced_calls": 0,
+                "budget_eur": 10.0,
+                "budget_used": 0.17,  # 2 $ x 0.85 = 1.70 € of 10 €
+                "plan_eur": 0.0,
+                "plan_value": None,  # no meaningful ratio for a 0 € plan
+            },
+            "chatgpt": {
+                "api_usd": 0.0,
+                "equivalent_usd": 3.0,
+                "unpriced_calls": 1,
+                "budget_eur": None,
+                "budget_used": None,
+                "plan_eur": 20.0,
+                "plan_value": 0.1275,  # 3 $ x 0.85 = 2.55 € of a 20 € plan
+            },
+        },
+    }
+    assert stats["month"] == month
+    assert await store.month_spend(NOW) == month
+    # The month does not depend on the selected range.
+    week = await store.stats(7, NOW)
+    assert week["costs"]["by_agent"]["claude"]["api_usd"] == 0.0
+    assert week["month"] == month
+
+    # Manual mode: the owner's rate.
+    await store.put_runtime_settings(
+        RuntimeSettings(
+            fx=FxSettings(mode="manual", eur_per_usd=1.0),
+            budgets_eur={"claude": 10.0, "chatgpt": None},
+        )
+    )
+    spend = await store.month_spend(NOW)
+    assert spend["fx"] == {"eur_per_usd": 1.0, "as_of": None, "source": "manual"}
+    assert spend["by_agent"]["claude"]["budget_used"] == 0.2
+    assert spend["by_agent"]["chatgpt"]["plan_value"] is None
+
+
+async def test_savings_value_comes_from_the_turns_final_messages(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    conversation_id = await store.create_conversation("Estalvi")
+
+    async def final_answers(*costs: float | None) -> None:
+        question = await store.add_message(
+            NewMessage(conversation_id, "question", "Q", final=True, meta={"mode": "duel"})
+        )
+        for index, cost in enumerate(costs):
+            savings: dict[str, JsonValue] = {"cache": 0, "total": 10, "cost_usd": cost}
+            await store.add_message(
+                NewMessage(
+                    conversation_id,
+                    "answer",
+                    "A",
+                    turn_id=question,
+                    agent="claude" if index == 0 else "chatgpt",
+                    final=True,
+                    meta={"savings": savings},
+                )
+            )
+
+    clock.now = at(20)
+    await final_answers(5.0)  # outside a 1-day window
+    clock.now = at(27, 9)
+    await final_answers(0.001, 0.003)  # the last final message has the turn's total
+    await final_answers(None)  # no priced call: no value
+    await final_answers(0.002)
+    stats = await store.stats(1, NOW)
+    assert stats["savings"]["cost_usd"] == 0.005
+    assert (await store.stats(30, NOW))["savings"]["cost_usd"] == 5.005
+
+
+def test_month_bounds() -> None:
+    assert month_bounds(datetime(2026, 12, 31, 23, 59, tzinfo=UTC)) == (
+        "2026-12",
+        "2026-12-01T00:00:00.000Z",
+        "2027-01-01T00:00:00.000Z",
+    )
+    assert month_bounds(datetime(2026, 2, 1, tzinfo=UTC))[2] == "2026-03-01T00:00:00.000Z"
+
+
 async def test_empty_stats(store: SqliteStore) -> None:
     stats = await store.stats(30, NOW)
     assert stats["totals"]["calls"] == 0
@@ -313,6 +455,17 @@ async def test_empty_stats(store: SqliteStore) -> None:
     assert stats["latency"]["chatgpt"] == {"p50_ms": None, "p95_ms": None, "ttft_p50_ms": None}
     assert stats["turns"] == {"solo": 0, "duel": 0, "debate": 0}
     assert stats["consensus"] == {"debates": 0, "reached": 0, "avg_rounds": None}
+    assert stats["savings"]["cost_usd"] is None
+    zero = {"api_usd": 0.0, "equivalent_usd": 0.0, "unpriced_calls": 0}
+    assert stats["costs"]["by_agent"] == {"claude": zero, "chatgpt": zero}
+    assert stats["month"]["month"] == "2026-09"
+    assert stats["month"]["by_agent"]["claude"] == {
+        **zero,
+        "budget_eur": None,
+        "budget_used": None,
+        "plan_eur": None,
+        "plan_value": None,
+    }
 
 
 @pytest.mark.parametrize("days", [0, 366])

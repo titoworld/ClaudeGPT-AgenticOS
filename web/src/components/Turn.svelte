@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { AGENT_LABEL, formatInt, formatTime, formatUsd } from '../lib/format';
+  import { app } from '../lib/app.svelte';
+  import { approxEur, turnCost, turnCostTitle } from '../lib/costs';
+  import { AGENT_LABEL, formatInt, formatTime } from '../lib/format';
   import { AGENTS } from '../lib/protocol';
   import { MODE_LABEL } from '../lib/text';
   import {
@@ -33,6 +35,8 @@
   const soloAgent = $derived(answers.claude ? 'claude' : answers.chatgpt ? 'chatgpt' : (turn.target ?? 'claude'));
   const usage = $derived(isTerminal(turn.status) ? turnUsage(turn) : null);
   const usedTokens = $derived(usage ? usage.input_tokens + usage.output_tokens : 0);
+  const cost = $derived(usage ? turnCost(turn) : null);
+  const costText = $derived(cost && cost.totalUsd ? approxEur(cost.totalUsd, app.eurPerUsd) : null);
   const showTotals = $derived(
     usedTokens > 0 || (turn.savings?.total ?? 0) > 0 || (turn.cached && turn.streams.length > 1),
   );
@@ -125,15 +129,17 @@
             : ''}">
           Total <b>{formatInt(usedTokens)}</b> tokens
         </span>
-        {#if usage.cost_usd != null && usage.cost_usd > 0}
-          <span title="Cost estimat de l'API">{formatUsd(usage.cost_usd)}</span>
+        {#if cost && costText}
+          <span class="cost" title={turnCostTitle(cost, app.eurPerUsd)}>
+            {costText}<span class="sr-only"> ({turnCostTitle(cost, app.eurPerUsd)})</span>
+          </span>
         {/if}
       {/if}
       {#if turn.cached && turn.streams.length > 1}
         <span class="chip cache"><Icon name="cache" size={12} />Tot des de la memòria cau</span>
       {/if}
       {#if turn.savings && turn.savings.total > 0}
-        <SavingsChip savings={turn.savings} />
+        <SavingsChip savings={turn.savings} eurPerUsd={app.eurPerUsd} />
       {/if}
     </footer>
   {/if}
@@ -229,8 +235,13 @@
     text-shadow: 0 1px 6px rgb(0 0 0 / 0.9);
   }
 
-  .totals b {
+  .totals b,
+  .totals .cost {
     color: var(--text-primary);
+  }
+
+  .cost {
+    cursor: help;
   }
 
   @media (max-width: 860px) {

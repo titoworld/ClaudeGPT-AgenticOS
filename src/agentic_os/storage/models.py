@@ -7,19 +7,36 @@ width, so they sort lexicographically).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Final
+from datetime import UTC, date, datetime, timedelta
+from typing import Final, Literal
 
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
+from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
+from agentic_os.pricing import ModelPrice
+from agentic_os.providers.base import MODEL_ID_PATTERN
 
 TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate")
 
 ROUNDS_RANGE: Final = (0, 4)
 CONSENSUS_THRESHOLD_RANGE: Final = (50, 100)
 COMPACTION_THRESHOLD_RANGE: Final = (1_000, 100_000)
+EUR_PER_USD_RANGE: Final = (0.2, 5.0)
+AMOUNT_EUR_RANGE: Final = (0.0, 100_000.0)
+"""Monthly budgets and plan prices, in euros."""
+MAX_PRICE_PER_MTOK: Final = 100_000.0
+MAX_CUSTOM_PRICES: Final = 200
+FX_MAX_AGE: Final = timedelta(days=10)
+"""An ECB rate fetched longer ago than this is not used (the manual rate is)."""
+
+FxMode = Literal["auto", "manual"]
+FX_MODES: Final[tuple[FxMode, ...]] = ("auto", "manual")
+
+_MODEL_ID: Final = re.compile(MODEL_ID_PATTERN)
 
 Wire = dict[str, JsonValue]
 
@@ -79,6 +96,138 @@ def _bool(value: object, name: str) -> bool:
     return value
 
 
+def _format_number(value: float) -> str:
+    """Catalan notation for error messages (``0,2``, ``100.000``)."""
+    if value == int(value):
+        return f"{int(value):,}".replace(",", ".")
+    return f"{value:g}".replace(".", ",")
+
+
+def _number_in_range(value: object, name: str, bounds: tuple[float, float]) -> float:
+    low, high = bounds
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or not low <= value <= high
+    ):
+        raise ValueError(
+            f"«{name}» ha de ser un nombre entre {_format_number(low)} i {_format_number(high)}."
+        )
+    return float(value)
+
+
+def model_id(value: object, name: str) -> str:
+    """A model id typed by the owner (any id of :data:`MODEL_ID_PATTERN`)."""
+    if not isinstance(value, str) or not _MODEL_ID.fullmatch(value):
+        raise ValueError(
+            f"«{name}» ha de ser un identificador de model vàlid: fins a 100 lletres, xifres "
+            "o els signes . _ : / @ [ ] -, sense espais."
+        )
+    return value
+
+
+def optional_model_id(value: object, name: str) -> str | None:
+    """``null`` or an empty text mean "the provider's default"; ids are trimmed."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return model_id(value.strip() if isinstance(value, str) else value, name)
+
+
+def _exact_model(value: object, name: str) -> str | None:
+    return None if value is None else model_id(value, name)
+
+
+def _optional_amount(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    return _number_in_range(value, name, AMOUNT_EUR_RANGE)
+
+
+def _agent_map[T](
+    value: object, name: str, item: Callable[[object, str], T | None]
+) -> dict[AgentName, T | None]:
+    """``Record<Agent, T | null>``: missing agents are ``None``; unknown ones are rejected."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"«{name}» ha de ser un objecte amb les claus «claude» i «chatgpt».")
+    for key in value:
+        if key not in AGENTS:
+            raise ValueError(f"«{name}» només admet les claus «claude» i «chatgpt».")
+    return {agent: item(value.get(agent), f"{name}.{agent}") for agent in AGENTS}
+
+
+def _no_models() -> dict[AgentName, str | None]:
+    return dict.fromkeys(AGENTS)
+
+
+def _no_amounts() -> dict[AgentName, float | None]:
+    return dict.fromkeys(AGENTS)
+
+
+def _price(value: object, name: str) -> ModelPrice:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"«{name}» ha de ser un objecte amb «input», «output», «cache_read» i «cache_write»."
+        )
+    try:
+        price = ModelPrice.from_wire(value)
+    except ValueError as exc:
+        raise ValueError(f"«{name}»: {exc}") from None
+    for key, amount in price.to_wire().items():
+        if not math.isfinite(amount) or amount > MAX_PRICE_PER_MTOK:
+            limit = _format_number(MAX_PRICE_PER_MTOK)
+            raise ValueError(f"«{name}.{key}» ha de ser un preu entre 0 i {limit} $.")
+    return price
+
+
+def _prices(value: object) -> dict[str, ModelPrice]:
+    if not isinstance(value, Mapping):
+        raise ValueError("«prices» ha de ser un objecte (model → preus).")
+    if len(value) > MAX_CUSTOM_PRICES:
+        raise ValueError(f"«prices» admet com a màxim {MAX_CUSTOM_PRICES} models.")
+    prices: dict[str, ModelPrice] = {}
+    for model, price in value.items():
+        if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
+            raise ValueError(
+                f"«prices»: «{str(model)[:100]}» no és un identificador de model vàlid."
+            )
+        prices[model] = _price(price, f"prices.{model}")
+    return prices
+
+
+@dataclass(frozen=True, slots=True)
+class FxSettings:
+    """How costs are converted to euros: the ECB daily rate (``auto``, with the
+    manual rate as fallback) or always the manual rate."""
+
+    mode: FxMode = "auto"
+    eur_per_usd: float = DEFAULT_EUR_PER_USD
+    """Manual rate (euros per dollar)."""
+
+    def __post_init__(self) -> None:
+        _fx_mode(self.mode)
+        _number_in_range(self.eur_per_usd, "fx.eur_per_usd", EUR_PER_USD_RANGE)
+
+    @classmethod
+    def from_wire(cls, data: object) -> FxSettings:
+        if not isinstance(data, Mapping):
+            raise ValueError("«fx» ha de ser un objecte.")
+        defaults = cls()
+        return cls(
+            mode=_fx_mode(data.get("mode", defaults.mode)),
+            eur_per_usd=_number_in_range(
+                data.get("eur_per_usd", defaults.eur_per_usd), "fx.eur_per_usd", EUR_PER_USD_RANGE
+            ),
+        )
+
+
+def _fx_mode(value: object) -> FxMode:
+    for mode in FX_MODES:
+        if value == mode:
+            return mode
+    raise ValueError("«fx.mode» ha de ser «auto» o «manual».")
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     """Owner preferences stored in the database (``RuntimeSettings`` in PROTOCOL.md).
@@ -93,6 +242,17 @@ class RuntimeSettings:
     debate: DebateOptions = field(default_factory=DebateOptions)
     use_cache: bool = True
     compaction_threshold_tokens: int = 6000
+    models: Mapping[AgentName, str | None] = field(default_factory=_no_models)
+    """Default model per agent; ``None`` uses the provider's configured one."""
+    fast_models: Mapping[AgentName, str | None] = field(default_factory=_no_models)
+    """Model of the cheap internal calls (summaries); ``None`` uses the provider's."""
+    prices: Mapping[str, ModelPrice] = field(default_factory=dict)
+    """Owner prices (USD per million tokens) over ``pricing.DEFAULT_PRICES``."""
+    fx: FxSettings = field(default_factory=FxSettings)
+    budgets_eur: Mapping[AgentName, float | None] = field(default_factory=_no_amounts)
+    """Monthly budget of the api-mode usage."""
+    plans_eur: Mapping[AgentName, float | None] = field(default_factory=_no_amounts)
+    """Monthly price of the subscription (cli mode)."""
 
     def __post_init__(self) -> None:
         _mode(self.default_mode, "default_mode")
@@ -112,6 +272,20 @@ class RuntimeSettings:
             "compaction_threshold_tokens",
             COMPACTION_THRESHOLD_RANGE,
         )
+        _agent_map(self.models, "models", _exact_model)
+        _agent_map(self.fast_models, "fast_models", _exact_model)
+        if not isinstance(self.prices, Mapping):
+            raise ValueError("«prices» ha de ser un objecte (model → preus).")
+        _prices(
+            {
+                model: price.to_wire() if isinstance(price, ModelPrice) else price
+                for model, price in self.prices.items()
+            }
+        )
+        if not isinstance(self.fx, FxSettings):
+            raise ValueError("«fx» ha de ser un objecte.")
+        _agent_map(self.budgets_eur, "budgets_eur", _optional_amount)
+        _agent_map(self.plans_eur, "plans_eur", _optional_amount)
 
     @classmethod
     def from_wire(cls, data: object) -> RuntimeSettings:
@@ -148,9 +322,18 @@ class RuntimeSettings:
                 "compaction_threshold_tokens",
                 COMPACTION_THRESHOLD_RANGE,
             ),
+            models=_agent_map(data.get("models", {}), "models", optional_model_id),
+            fast_models=_agent_map(data.get("fast_models", {}), "fast_models", optional_model_id),
+            prices=_prices(data.get("prices", {})),
+            fx=FxSettings.from_wire(data.get("fx", {})),
+            budgets_eur=_agent_map(data.get("budgets_eur", {}), "budgets_eur", _optional_amount),
+            plans_eur=_agent_map(data.get("plans_eur", {}), "plans_eur", _optional_amount),
         )
 
     def to_wire(self) -> Wire:
+        prices: dict[str, JsonValue] = {}
+        for model in sorted(self.prices):
+            prices[model] = {key: value for key, value in self.prices[model].to_wire().items()}
         return {
             "default_mode": self.default_mode,
             "default_target": self.default_target,
@@ -161,11 +344,75 @@ class RuntimeSettings:
             },
             "use_cache": self.use_cache,
             "compaction_threshold_tokens": self.compaction_threshold_tokens,
+            "models": {agent: self.models.get(agent) for agent in AGENTS},
+            "fast_models": {agent: self.fast_models.get(agent) for agent in AGENTS},
+            "prices": prices,
+            "fx": {"mode": self.fx.mode, "eur_per_usd": self.fx.eur_per_usd},
+            "budgets_eur": {agent: self.budgets_eur.get(agent) for agent in AGENTS},
+            "plans_eur": {agent: self.plans_eur.get(agent) for agent in AGENTS},
         }
 
     def to_turn_options(self) -> TurnOptions:
         """Default options for a turn that does not specify its own."""
         return TurnOptions(debate=self.debate, use_cache=self.use_cache)
+
+    def chosen_models(self) -> dict[AgentName, str]:
+        """``TurnRequest.models``: the agents with a default model chosen by the owner."""
+        return {agent: model for agent in AGENTS if (model := self.models.get(agent))}
+
+    def chosen_fast_models(self) -> dict[AgentName, str]:
+        """``TurnRequest.fast_models``: the agents with a chosen summary model."""
+        return {agent: model for agent in AGENTS if (model := self.fast_models.get(agent))}
+
+
+# --------------------------------------------------------------------------
+# Exchange rate
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StoredFxRate:
+    """The last ECB rate fetched and when it was fetched."""
+
+    rate: FxRate
+    fetched_at: datetime
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "eur_per_usd": self.rate.eur_per_usd,
+            "as_of": self.rate.as_of.isoformat() if self.rate.as_of else None,
+            "fetched_at": format_ts(self.fetched_at),
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> StoredFxRate:
+        """Raises :class:`ValueError` if ``data`` is not what :meth:`to_json` wrote."""
+        if not isinstance(data, Mapping):
+            raise ValueError("invalid stored exchange rate")
+        as_of, fetched_at = data.get("as_of"), data.get("fetched_at")
+        if not isinstance(fetched_at, str) or not (as_of is None or isinstance(as_of, str)):
+            raise ValueError("invalid stored exchange rate")
+        eur_per_usd = _number_in_range(data.get("eur_per_usd"), "eur_per_usd", EUR_PER_USD_RANGE)
+        return cls(
+            rate=FxRate(
+                eur_per_usd=eur_per_usd,
+                as_of=date.fromisoformat(as_of) if as_of else None,
+                source="ecb",
+            ),
+            fetched_at=parse_ts(fetched_at),
+        )
+
+
+def effective_fx(settings: RuntimeSettings, ecb: StoredFxRate | None, now: datetime) -> FxRate:
+    """The rate costs are converted with: the ECB one in ``auto`` mode when it was
+    fetched in the last :data:`FX_MAX_AGE`, else the owner's manual rate."""
+    if (
+        settings.fx.mode == "auto"
+        and ecb is not None
+        and as_utc(now) - ecb.fetched_at <= FX_MAX_AGE
+    ):
+        return ecb.rate
+    return manual_rate(settings.fx.eur_per_usd)
 
 
 # --------------------------------------------------------------------------

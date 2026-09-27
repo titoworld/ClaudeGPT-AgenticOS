@@ -28,7 +28,7 @@ from agentic_os.server.status import status_to_wire
 from agentic_os.server.tasks import cancel_and_wait
 from agentic_os.server.turns import TurnRejectedError, dumps
 from agentic_os.storage import RuntimeSettings
-from agentic_os.storage.models import TURN_MODES
+from agentic_os.storage.models import TURN_MODES, optional_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +102,30 @@ def turn_options(options: object, runtime: RuntimeSettings) -> TurnOptions:
         raise ProtocolError(str(exc)) from None
 
 
+def turn_models(models: object, runtime: RuntimeSettings) -> dict[AgentName, str]:
+    """Client ``models`` (``{agent: id}``; a missing agent, ``null`` or ``""`` keeps
+    the owner's default) over the runtime settings' models."""
+    chosen = runtime.chosen_models()
+    if models is None:
+        return chosen
+    if not isinstance(models, dict):
+        raise ProtocolError("«models» ha de ser un objecte (agent → model).")
+    for agent, value in models.items():
+        name = _choice(agent, AGENTS, "«models» només admet «claude» i «chatgpt».")
+        try:
+            model = optional_model_id(value, f"models.{name}")
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        if model is not None:
+            chosen[name] = model
+    return chosen
+
+
 def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> TurnRequest:
-    """A ``turn.start`` message as a :class:`TurnRequest`; ``mode``, ``target`` and
-    ``options`` default to the runtime settings. The text itself (empty, too long)
-    is validated by the engine, which answers with ``turn.failed``."""
+    """A ``turn.start`` message as a :class:`TurnRequest`; ``mode``, ``target``,
+    ``options`` and ``models`` default to the runtime settings (summaries use the
+    owner's ``fast_models``). The text itself (empty, too long) is validated by the
+    engine, which answers with ``turn.failed``."""
     request_id = parse_request_id(data)
     try:
         text = data.get("text")
@@ -128,6 +148,7 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         if raw_conversation is not None and (conversation_id is None or conversation_id < 1):
             raise ProtocolError("«conversation_id» ha de ser un enter positiu o null.")
         options = turn_options(data.get("options"), runtime)
+        models = turn_models(data.get("models"), runtime)
     except ProtocolError as exc:
         raise ProtocolError(exc.message, request_id=request_id) from None
     return TurnRequest(
@@ -137,6 +158,8 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         target=target,
         conversation_id=conversation_id,
         options=options,
+        models=models,
+        fast_models=runtime.chosen_fast_models(),
     )
 
 
@@ -195,10 +218,12 @@ class ClientSession:
 
     async def hello(self) -> Wire:
         statuses = await self._state.monitor.statuses()
+        fx = await self._state.store.current_fx(self._state.clock())
         return {
             "type": "hello",
             "version": __version__,
             "providers": [status_to_wire(s) for s in statuses],
+            "fx": fx.to_wire(),
             "active_turns": self._state.turns.active_turns(),
         }
 
@@ -260,6 +285,7 @@ class ClientSession:
                     request,
                     self._connection,
                     compaction_threshold_tokens=runtime.compaction_threshold_tokens,
+                    price_overrides=runtime.prices,
                 )
             except TurnRejectedError as exc:
                 self._connection.error(exc.message, code=exc.code, request_id=request.request_id)

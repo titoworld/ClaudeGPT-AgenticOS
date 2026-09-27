@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,6 +19,7 @@ from agentic_os.orchestrator.events import (
 )
 from agentic_os.orchestrator.events import Savings as TurnSavings
 from agentic_os.orchestrator.types import TurnRequest
+from agentic_os.pricing import ModelPrice
 from agentic_os.providers.base import (
     GenerationRequest,
     ModelInfo,
@@ -60,11 +61,17 @@ class ScriptedRunner:
         self.silent_end = silent_end
         self.cancelled: list[str] = []
         self.thresholds: list[int | None] = []
+        self.prices: list[Mapping[str, ModelPrice] | None] = []
 
     async def run(
-        self, request: TurnRequest, *, compaction_threshold_tokens: int | None = None
+        self,
+        request: TurnRequest,
+        *,
+        compaction_threshold_tokens: int | None = None,
+        price_overrides: Mapping[str, ModelPrice] | None = None,
     ) -> AsyncIterator[ServerEvent]:
         self.thresholds.append(compaction_threshold_tokens)
+        self.prices.append(price_overrides)
         rid = request.request_id
         yield TurnStarted(rid, 40 + len(self.thresholds), 7, request.mode, True)
         yield PhaseChanged(rid, "answer", 0)
@@ -95,11 +102,13 @@ async def test_events_get_seq_and_replay_after_seq() -> None:
     runner = ScriptedRunner()
     turns = TurnManager(runner)
     live = Recorder()
-    turns.start(request("r1"), live, compaction_threshold_tokens=1234)
+    prices = {"my-model": ModelPrice(1, 2, 0.1, 1.25)}
+    turns.start(request("r1"), live, compaction_threshold_tokens=1234, price_overrides=prices)
     await settle()
     assert live.types == ["turn.started", "phase"]
     assert [m["seq"] for m in live.messages] == [1, 2]
     assert runner.thresholds == [1234]
+    assert runner.prices == [prices]
     assert turns.active_turns() == [{"request_id": "r1", "conversation_id": 41, "last_seq": 2}]
 
     late = Recorder()
@@ -178,7 +187,11 @@ async def test_crash_and_missing_terminal_event_become_turn_failed() -> None:
 async def test_engine_turn_failed_is_terminal() -> None:
     class FailingRunner:
         async def run(
-            self, request: TurnRequest, *, compaction_threshold_tokens: int | None = None
+            self,
+            request: TurnRequest,
+            *,
+            compaction_threshold_tokens: int | None = None,
+            price_overrides: Mapping[str, ModelPrice] | None = None,
         ) -> AsyncIterator[ServerEvent]:
             yield TurnFailed(request.request_id, ErrorInfo("invalid", "La pregunta és buida."))
 

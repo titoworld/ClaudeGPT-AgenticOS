@@ -9,6 +9,13 @@ Definitions:
 - ``totals``: every recorded model call; ``errors`` counts calls with ``ok`` false.
   An agent's ``cost_usd`` is ``None`` when none of its calls reported a cost.
 - ``latency``: nearest-rank percentiles over successful calls.
+- ``costs``: per agent, ``api_usd`` sums the cost of api-mode calls (real spend) and
+  ``equivalent_usd`` the cost of the other calls (subscription usage valued at API
+  prices); ``unpriced_calls`` counts successful non-demo calls without a price.
+- ``month``: the same costs for the current UTC calendar month (whatever ``days``),
+  converted to euros and compared with the owner's monthly budgets and plan prices.
+- ``savings.cost_usd``: value of the saved tokens, from ``meta.savings.cost_usd`` of
+  the last final message of each turn (``None`` when no turn reported a value).
 - ``turns``: question messages created in the window, by their ``meta.mode``.
 - ``consensus``: completed debates (a debate question with a synthesis message).
   When the synthesis has ``meta.consensus`` (``{"reached", "round", ...}``, as the
@@ -28,6 +35,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Final, TypedDict
 
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, SavingKind
+from agentic_os.fx import FxRate
 from agentic_os.storage.db import Tx
 from agentic_os.storage.models import TURN_MODES, as_utc, format_ts
 
@@ -58,6 +66,7 @@ class SavingsTotals(TypedDict):
     early_stop: int
     unchanged: int
     total: int
+    cost_usd: float | None
 
 
 class DailyUsage(TypedDict):
@@ -66,6 +75,42 @@ class DailyUsage(TypedDict):
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
+    cost_usd: float
+
+
+class FxWire(TypedDict):
+    eur_per_usd: float
+    as_of: str | None
+    source: str
+
+
+class AgentCosts(TypedDict):
+    api_usd: float
+    equivalent_usd: float
+    unpriced_calls: int
+
+
+class Costs(TypedDict):
+    fx: FxWire
+    by_agent: dict[AgentName, AgentCosts]
+
+
+class AgentSpend(TypedDict):
+    api_usd: float
+    equivalent_usd: float
+    unpriced_calls: int
+    budget_eur: float | None
+    budget_used: float | None
+    plan_eur: float | None
+    plan_value: float | None
+
+
+class MonthSpend(TypedDict):
+    """``MonthSpend`` of PROTOCOL.md."""
+
+    month: str
+    fx: FxWire
+    by_agent: dict[AgentName, AgentSpend]
 
 
 class DailySaving(TypedDict):
@@ -103,6 +148,16 @@ class Stats(TypedDict):
     latency: dict[AgentName, Latency]
     turns: TurnCounts
     consensus: ConsensusStats
+    costs: Costs
+    month: MonthSpend
+
+
+def fx_wire(rate: FxRate) -> FxWire:
+    return FxWire(
+        eur_per_usd=rate.eur_per_usd,
+        as_of=rate.as_of.isoformat() if rate.as_of else None,
+        source=rate.source,
+    )
 
 
 def percentile(values: Sequence[int], pct: float) -> int | None:
@@ -126,6 +181,14 @@ def window(days: int, now: datetime) -> tuple[list[str], str, str]:
 
 def _day_start(day: date) -> str:
     return format_ts(datetime.combine(day, time.min))
+
+
+def month_bounds(now: datetime) -> tuple[str, str, str]:
+    """``YYYY-MM`` of ``now``'s UTC month plus its ``[start, end)`` timestamps."""
+    today = as_utc(now).date()
+    first = today.replace(day=1)
+    following = (first + timedelta(days=32)).replace(day=1)
+    return first.strftime("%Y-%m"), _day_start(first), _day_start(following)
 
 
 def _agent(value: object) -> AgentName | None:
@@ -155,8 +218,92 @@ def _derive_consensus(
     return reached, last_round
 
 
-async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
-    """Aggregate the stats of the ``days``-day window ending on ``now``'s UTC date."""
+async def agent_costs(tx: Tx, start: str, end: str) -> dict[AgentName, AgentCosts]:
+    """Real (api mode) and equivalent (subscription, demo) costs of ``[start, end)``."""
+    rows = await tx.fetchall(
+        """
+        SELECT agent,
+               SUM(CASE WHEN provider_mode = 'api' THEN cost_usd END) AS api_usd,
+               SUM(CASE WHEN provider_mode != 'api' THEN cost_usd END) AS equivalent_usd,
+               SUM(ok = 1 AND cost_usd IS NULL AND provider_mode != 'fake') AS unpriced_calls
+        FROM usage WHERE ts >= ? AND ts < ?
+        GROUP BY agent
+        """,
+        (start, end),
+    )
+    costs = {
+        agent: AgentCosts(api_usd=0.0, equivalent_usd=0.0, unpriced_calls=0) for agent in AGENTS
+    }
+    for row in rows:
+        agent = _agent(row["agent"])
+        if agent is not None:
+            costs[agent] = AgentCosts(
+                api_usd=round(float(row["api_usd"] or 0.0), 6),
+                equivalent_usd=round(float(row["equivalent_usd"] or 0.0), 6),
+                unpriced_calls=int(row["unpriced_calls"] or 0),
+            )
+    return costs
+
+
+def _ratio(amount_eur: float, limit_eur: float | None) -> float | None:
+    if not limit_eur:
+        return None
+    return round(amount_eur / limit_eur, 6)
+
+
+async def compute_month_spend(
+    tx: Tx,
+    now: datetime,
+    fx: FxRate,
+    budgets_eur: Mapping[AgentName, float | None],
+    plans_eur: Mapping[AgentName, float | None],
+) -> MonthSpend:
+    """Spend of ``now``'s UTC calendar month against the owner's monthly budget (api
+    mode) and plan price (subscription), both in euros at ``fx``."""
+    month, start, end = month_bounds(now)
+    by_agent: dict[AgentName, AgentSpend] = {}
+    for agent, costs in (await agent_costs(tx, start, end)).items():
+        budget, plan = budgets_eur.get(agent), plans_eur.get(agent)
+        by_agent[agent] = AgentSpend(
+            api_usd=costs["api_usd"],
+            equivalent_usd=costs["equivalent_usd"],
+            unpriced_calls=costs["unpriced_calls"],
+            budget_eur=budget,
+            budget_used=_ratio(costs["api_usd"] * fx.eur_per_usd, budget),
+            plan_eur=plan,
+            plan_value=_ratio(costs["equivalent_usd"] * fx.eur_per_usd, plan),
+        )
+    return MonthSpend(month=month, fx=fx_wire(fx), by_agent=by_agent)
+
+
+async def _savings_cost(tx: Tx, start: str, end: str) -> float | None:
+    """Sum of ``meta.savings.cost_usd`` of the last final message of each turn."""
+    rows = await tx.fetchall(
+        """
+        SELECT turn_id, json_extract(meta, '$.savings.cost_usd') AS cost_usd
+        FROM messages
+        WHERE final = 1 AND kind != 'question' AND created_at >= ? AND created_at < ?
+          AND json_type(meta, '$.savings') = 'object'
+        ORDER BY id
+        """,
+        (start, end),
+    )
+    by_turn = {int(row["turn_id"]): _number(row["cost_usd"]) for row in rows}
+    values = [value for value in by_turn.values() if value is not None]
+    return round(sum(values), 6) if values else None
+
+
+async def compute_stats(
+    tx: Tx,
+    days: int,
+    now: datetime,
+    *,
+    fx: FxRate,
+    budgets_eur: Mapping[AgentName, float | None],
+    plans_eur: Mapping[AgentName, float | None],
+) -> Stats:
+    """Aggregate the stats of the ``days``-day window ending on ``now``'s UTC date;
+    costs are converted to euros at ``fx`` (budgets and plan prices are monthly)."""
     dates, start, end = window(days, now)
     usage_rows = await tx.fetchall(
         """
@@ -219,7 +366,7 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
         )
         for agent in AGENTS
     }
-    daily_map: dict[tuple[str, AgentName], tuple[int, int, int]] = {}
+    daily_map: dict[tuple[str, AgentName], tuple[int, int, int, float]] = {}
     errors = 0
     for row in usage_rows:
         agent = _agent(row["agent"])
@@ -239,6 +386,7 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
             int(row["input_tokens"]),
             int(row["output_tokens"]),
             int(row["cache_read_tokens"]),
+            round(float(row["cost_usd"] or 0.0), 6),
         )
     for totals in by_agent.values():
         if totals["cost_usd"] is not None:
@@ -246,7 +394,7 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
     daily: list[DailyUsage] = []
     for day in dates:
         for agent in AGENTS:
-            tokens_in, tokens_out, cache_read = daily_map.get((day, agent), (0, 0, 0))
+            tokens_in, tokens_out, cache_read, cost = daily_map.get((day, agent), (0, 0, 0, 0.0))
             daily.append(
                 DailyUsage(
                     date=day,
@@ -254,6 +402,7 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
                     input_tokens=tokens_in,
                     output_tokens=tokens_out,
                     cache_read_tokens=cache_read,
+                    cost_usd=cost,
                 )
             )
 
@@ -289,6 +438,7 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
         early_stop=kind_totals["early_stop"],
         unchanged=kind_totals["unchanged"],
         total=sum(kind_totals.values()),
+        cost_usd=await _savings_cost(tx, start, end),
     )
     savings_daily = [
         DailySaving(date=day, kind=kind, tokens=saving_map.get((day, kind), 0))
@@ -356,4 +506,6 @@ async def compute_stats(tx: Tx, days: int, now: datetime) -> Stats:
             reached=reached,
             avg_rounds=round(rounds_total / len(debates), 2) if debates else None,
         ),
+        costs=Costs(fx=fx_wire(fx), by_agent=await agent_costs(tx, start, end)),
+        month=await compute_month_spend(tx, now, fx, budgets_eur, plans_eur),
     )
