@@ -1,0 +1,45 @@
+[project]
+name = "agentic-os"
+version = "0.1.0"
+description = "ClaudeGPT Agentic OS: un sistema operativo agéntico que orquesta agentes de IA (Claude, GPT...)."
+readme = "README.md"
+authors = [{ name = "titoworld" }]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agentic-os = "agentic_os.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
