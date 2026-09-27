@@ -2,7 +2,7 @@
 
 import asyncio
 import functools
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +18,7 @@ from agentic_os.domain import AgentName, ProviderMode, Usage
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
+    ModelInfo,
     Provider,
     ProviderEvent,
     ProviderStatus,
@@ -69,6 +70,10 @@ class GateProvider:
 
     async def status(self) -> ProviderStatus:
         return ProviderStatus(self._agent, "fake", True, "gate", "Porta")
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = "gate"
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         return None

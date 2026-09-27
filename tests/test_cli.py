@@ -1,6 +1,6 @@
 import asyncio
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ from agentic_os import __version__
 from agentic_os.cli import log_config, main, run_doctor
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
-from agentic_os.providers.base import Provider, ProviderStatus, UsageLimit
+from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus, UsageLimit
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.storage import SqliteStore
 
@@ -147,6 +147,10 @@ class StaticProvider:
 
     async def status(self) -> ProviderStatus:
         return self._status
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = self._status.model
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         return None

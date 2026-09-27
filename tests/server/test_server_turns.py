@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +21,7 @@ from agentic_os.orchestrator.events import Savings as TurnSavings
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.providers.base import (
     GenerationRequest,
+    ModelInfo,
     ProviderEvent,
     ProviderStatus,
     UsageLimit,
@@ -289,6 +290,10 @@ class SlowProvider:
         if self.fail:
             raise RuntimeError("no")
         return ProviderStatus(self._agent, "cli", True, "model-x", "Subscripció activa")
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = "slow"
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         return None

@@ -25,6 +25,7 @@ from agentic_os.orchestrator.tokens import estimate_tokens
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
 from agentic_os.providers.base import (
     GenerationRequest,
+    ModelInfo,
     ProviderError,
     ProviderEvent,
     ProviderStatus,
@@ -102,6 +103,10 @@ class FlakyProvider:
 
     async def status(self) -> ProviderStatus:
         return await self.inner.status()
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = "flaky"
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         await self.inner.aclose()

@@ -147,6 +147,8 @@ class Savings:
     compaction: int = 0
     early_stop: int = 0
     unchanged: int = 0
+    cost_usd: float | None = None
+    """Estimated value of the saved tokens at this turn's average price per token."""
 
     @property
     def total(self) -> int:
@@ -159,6 +161,7 @@ class Savings:
             "early_stop": self.early_stop,
             "unchanged": self.unchanged,
             "total": self.total,
+            "cost_usd": self.cost_usd,
         }
 
 

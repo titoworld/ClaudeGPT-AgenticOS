@@ -18,6 +18,7 @@ from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage, other_age
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
+    ModelInfo,
     ProviderError,
     ProviderEvent,
     ProviderStatus,
@@ -128,6 +129,10 @@ class FakeProvider:
             model=self.model,
             detail="Mode demostració",
         )
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = f"fake-{self.agent}"
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         self.closed = True

@@ -26,6 +26,62 @@ export interface UsageLimit {
   status: 'allowed' | 'warning' | 'rejected' | string;
 }
 
+export interface ModelInfo {
+  id: string; // value sent to the provider (API id, CLI alias...)
+  label: string;
+  description: string;
+  is_default: boolean;
+  context_window: number | null;
+}
+
+export interface AgentModels {
+  mode: ProviderMode;
+  default_model: string;
+  fast_model: string;
+  models: ModelInfo[];
+  live: boolean; // false when the provider could not be queried (fallback list)
+}
+
+export type ModelCatalog = Record<Agent, AgentModels>;
+
+/** Any id matching this pattern is accepted, so new models work before they are listed. */
+export const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,99}$/;
+
+export interface FxRate {
+  eur_per_usd: number;
+  as_of: string | null; // YYYY-MM-DD of the ECB rate
+  source: 'ecb' | 'manual';
+}
+
+/** USD per million tokens, as vendors publish them. */
+export interface ModelPrice {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+export interface Pricing {
+  fx: FxRate;
+  prices: (ModelPrice & { model: string; source: 'default' | 'custom' })[];
+}
+
+export interface AgentSpend {
+  api_usd: number; // real cost of api-mode calls
+  equivalent_usd: number; // value of cli (subscription) calls at API prices
+  unpriced_calls: number;
+  budget_eur: number | null;
+  budget_used: number | null; // ratio 0..1+ of the monthly API budget
+  plan_eur: number | null;
+  plan_value: number | null; // ratio 0..1+ of the subscription price
+}
+
+export interface MonthSpend {
+  month: string; // YYYY-MM (UTC)
+  fx: FxRate;
+  by_agent: Record<Agent, AgentSpend>;
+}
+
 export interface ProviderStatus {
   agent: Agent;
   mode: ProviderMode;
@@ -52,6 +108,12 @@ export interface RuntimeSettings {
   debate: DebateOptions;
   use_cache: boolean;
   compaction_threshold_tokens: number;
+  models: Record<Agent, string | null>; // null = provider default
+  fast_models: Record<Agent, string | null>;
+  prices: Record<string, ModelPrice>; // owner overrides / new models
+  fx: { mode: 'auto' | 'manual'; eur_per_usd: number };
+  budgets_eur: Record<Agent, number | null>; // monthly API budget
+  plans_eur: Record<Agent, number | null>; // monthly subscription price
 }
 
 export interface ConversationSummary {
@@ -79,11 +141,16 @@ export interface MessageMeta {
   mode?: TurnMode;
   target?: Agent;
   options?: TurnOptions;
+  models?: Partial<Record<Agent, string>>;
   model?: string;
   usage?: Usage;
   latency_ms?: number;
   ttft_ms?: number | null;
   cached?: boolean;
+  cost_basis?: 'api' | 'equivalent';
+  savings?: Savings;
+  consensus?: Consensus;
+  degraded?: boolean;
   critique?: string;
   agreement?: number | null;
   unchanged?: boolean;
@@ -101,6 +168,7 @@ export interface Savings {
   early_stop: number;
   unchanged: number;
   total: number;
+  cost_usd: number | null; // approximate value of the saved tokens
 }
 
 export interface Stats {
@@ -112,11 +180,23 @@ export interface Stats {
     by_agent: Record<Agent, Usage & { calls: number }>;
   };
   savings: Savings;
-  daily: { date: string; agent: Agent; input_tokens: number; output_tokens: number; cache_read_tokens: number }[];
+  daily: {
+    date: string; // UTC calendar day
+    agent: Agent;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cost_usd: number;
+  }[];
   savings_daily: { date: string; kind: SavingKind; tokens: number }[];
   latency: Record<Agent, { p50_ms: number | null; p95_ms: number | null; ttft_p50_ms: number | null }>;
   turns: Record<TurnMode, number>;
   consensus: { debates: number; reached: number; avg_rounds: number | null };
+  costs: {
+    fx: FxRate;
+    by_agent: Record<Agent, { api_usd: number; equivalent_usd: number; unpriced_calls: number }>;
+  };
+  month: MonthSpend;
 }
 
 export interface AuthState {
@@ -146,6 +226,7 @@ export type ClientMessage =
       target?: Agent;
       conversation_id: number | null;
       options?: TurnOptions;
+      models?: Partial<Record<Agent, string>>;
     }
   | { type: 'turn.cancel'; request_id: string }
   | { type: 'turn.subscribe'; request_id: string; after_seq: number }
@@ -204,11 +285,12 @@ export type ServerMessage =
       type: 'hello';
       version: string;
       providers: ProviderStatus[];
-      active_turns: { request_id: string; conversation_id: number; last_seq: number }[];
+      fx: FxRate;
+      active_turns: { request_id: string; conversation_id: number | null; last_seq: number }[];
     }
   | { type: 'turn.unknown'; request_id: string }
   | { type: 'pong'; t: number }
-  | { type: 'error'; message: string; request_id?: string };
+  | { type: 'error'; code?: string; message: string; request_id?: string };
 
 /** WebSocket close codes used by the server. */
 export const WS_CLOSE_UNAUTHORIZED = 4401;

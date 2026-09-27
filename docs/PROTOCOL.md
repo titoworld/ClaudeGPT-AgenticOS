@@ -1,13 +1,13 @@
 # Protocol client ↔ servidor
 
-Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/web/`). Tot és JSON en UTF-8. Els noms de camps són en anglès i en `snake_case`.
+Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). Tot és JSON en UTF-8. Els noms de camps són en anglès i en `snake_case`. Els tipus TypeScript equivalents són a `web/src/lib/protocol.ts`.
 
 ## Autenticació i seguretat comuna
 
 - Sessió amb una cookie `__Host-aos_session` (HttpOnly, Secure, SameSite=Strict, Path=/). En desenvolupament sense HTTPS (`AOS_SECURE_COOKIES=false`) la cookie es diu `aos_session` i no és `Secure`.
 - Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
 - Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`; si no, `403`.
-- Errors HTTP: cos `{"detail": "missatge"}`. `401` sense sessió, `403` origen no permès, `404`, `422` validació, `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
+- Errors HTTP: cos `{"detail": "missatge en català"}`. `401` sense sessió, `403` origen no permès, `404`, `413` cos massa gran (1 MiB), `422` validació, `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
 
 ## REST
 
@@ -18,8 +18,11 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/web/`). Tot �
 | `POST /api/auth/login` | `{"password": str, "totp": str}` | `204` + cookie; `401`; `429` |
 | `POST /api/auth/logout` | – | `204` |
 | `GET /api/providers` | – | `[ProviderStatus]` |
+| `GET /api/models` | `?refresh=1` opcional (ignora la memòria cau) | `ModelCatalog` |
+| `GET /api/pricing` | – | `Pricing` |
+| `GET /api/spend` | – | `MonthSpend` (mes en curs, per a les barres de pressupost) |
 | `GET /api/settings` | – | `RuntimeSettings` |
-| `PUT /api/settings` | `RuntimeSettings` | `RuntimeSettings` |
+| `PUT /api/settings` | `RuntimeSettings` (les claus que falten prenen el valor per defecte) | `RuntimeSettings` |
 | `GET /api/conversations` | `?limit=50&before=<id>` | `[ConversationSummary]`, les més recents primer |
 | `GET /api/conversations/{id}` | – | `ConversationDetail` |
 | `PATCH /api/conversations/{id}` | `{"title": str}` | `ConversationSummary` |
@@ -35,18 +38,54 @@ type TurnMode = "solo" | "duel" | "debate";
 type MessageKind = "question" | "answer" | "revision" | "synthesis";
 
 interface Usage {
-  input_tokens: number; output_tokens: number;
+  input_tokens: number;        // entrada no servida des de memòria cau
+  output_tokens: number;       // inclou el raonament
   cache_read_tokens: number; cache_write_tokens: number;
-  reasoning_tokens: number; cost_usd: number | null;
+  reasoning_tokens: number;
+  cost_usd: number | null;     // cost estimat (preus d'API); null si el model no té preu
 }
 
 interface ProviderStatus {
   agent: Agent; mode: "cli" | "api" | "fake";
   available: boolean; model: string; detail: string;   // detail en català
   limits: { window: string;            // "5h", "7d"...
-            used_percent: number | null;
+            used_percent: number | null;   // 0–100 (pot passar de 100)
             resets_at: string | null;  // ISO 8601
             status: string }[];        // "allowed" | "warning" | "rejected"
+}
+
+interface ModelInfo {
+  id: string;                  // valor que s'envia al proveïdor (id d'API, àlies de la CLI...)
+  label: string; description: string;
+  is_default: boolean; context_window: number | null;
+}
+
+interface ModelCatalog {
+  claude: AgentModels; chatgpt: AgentModels;
+}
+interface AgentModels {
+  mode: "cli" | "api" | "fake";
+  default_model: string;       // el que es fa servir si no se'n tria cap
+  fast_model: string;          // el de les crides internes (resums)
+  models: ModelInfo[];         // llista en directe del proveïdor, o una de reserva
+  live: boolean;               // false si la llista és la de reserva
+}
+// Qualsevol id que compleixi ^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$ és vàlid:
+// així es poden fer servir models nous encara que no surtin a la llista.
+
+interface FxRate {
+  eur_per_usd: number;
+  as_of: string | null;        // data (AAAA-MM-DD) del tipus del BCE
+  source: "ecb" | "manual";
+}
+
+interface ModelPrice {         // USD per milió de tokens, com els publiquen els proveïdors
+  input: number; output: number; cache_read: number; cache_write: number;
+}
+
+interface Pricing {
+  fx: FxRate;
+  prices: (ModelPrice & { model: string; source: "default" | "custom" })[];
 }
 
 interface RuntimeSettings {
@@ -57,6 +96,27 @@ interface RuntimeSettings {
             synthesizer: Agent };         // per defecte "claude"
   use_cache: boolean;                     // per defecte true
   compaction_threshold_tokens: number;    // 1000–100000, per defecte 6000
+  models: Record<Agent, string | null>;       // model per defecte; null = el del proveïdor
+  fast_models: Record<Agent, string | null>;  // model per als resums; null = el del proveïdor
+  prices: Record<string, ModelPrice>;         // preus propis (substitueixen o afegeixen models)
+  fx: { mode: "auto" | "manual";              // auto: BCE diari, amb el manual de reserva
+        eur_per_usd: number };                // 0,2–5, per defecte 0,86
+  budgets_eur: Record<Agent, number | null>;  // pressupost mensual de l'ús per API
+  plans_eur: Record<Agent, number | null>;    // preu mensual de la subscripció
+}
+
+interface AgentSpend {
+  api_usd: number;             // cost real de les crides en mode api
+  equivalent_usd: number;      // valor de les crides en mode cli a preus d'API
+  unpriced_calls: number;      // crides de models sense preu conegut
+  budget_eur: number | null;  budget_used: number | null;   // 0–1+ (api_usd en € / pressupost)
+  plan_eur: number | null;    plan_value: number | null;    // 0–1+ (equivalent en € / preu del pla)
+}
+
+interface MonthSpend {
+  month: string;               // "AAAA-MM" (UTC)
+  fx: FxRate;
+  by_agent: Record<Agent, AgentSpend>;
 }
 
 interface ConversationSummary {
@@ -82,27 +142,33 @@ interface Stats {
   totals: { calls: number; errors: number; cost_usd: number;
             by_agent: Record<Agent, Usage & { calls: number }> };
   savings: { cache: number; compaction: number; early_stop: number;
-             unchanged: number; total: number };
+             unchanged: number; total: number; cost_usd: number | null };
   daily: { date: string; agent: Agent; input_tokens: number; output_tokens: number;
-           cache_read_tokens: number }[];
+           cache_read_tokens: number; cost_usd: number }[];   // date: dia natural UTC
   savings_daily: { date: string; kind: "cache" | "compaction" | "early_stop" | "unchanged";
                    tokens: number }[];
   latency: Record<Agent, { p50_ms: number | null; p95_ms: number | null;
                            ttft_p50_ms: number | null }>;
   turns: { solo: number; duel: number; debate: number };
   consensus: { debates: number; reached: number; avg_rounds: number | null };
+  costs: { fx: FxRate;
+           by_agent: Record<Agent, { api_usd: number; equivalent_usd: number;
+                                     unpriced_calls: number }> };
+  month: MonthSpend;
 }
 ```
 
 ### Metadades de missatge (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`.
-- Respostes (`answer`, `revision`, `synthesis`): `model`, `usage`, `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
-- Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`), `unchanged` (bool).
+- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha).
+- Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
+- Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`), `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva.
+- Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
+- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`), perquè una conversa recarregada es vegi igual que en directe.
 
 ## WebSocket `/api/ws`
 
-Una sola connexió persistent per pestanya. El servidor tanca amb el codi `4401` si no hi ha sessió i `4403` si l'origen no és vàlid.
+Una sola connexió persistent per pestanya. El servidor tanca amb el codi `4401` si no hi ha sessió, `4403` si l'origen no és vàlid, `1013` si el client no rep prou ràpid (ha de reconnectar i fer `turn.subscribe`) i `1011` si hi ha un error intern.
 
 ### Client → servidor
 
@@ -110,24 +176,25 @@ Una sola connexió persistent per pestanya. El servidor tanca amb el codi `4401`
 {"type": "turn.start", "request_id": "uuid", "text": "…", "mode": "debate",
  "target": "claude", "conversation_id": null,
  "options": {"debate": {"rounds": 2, "consensus_threshold": 85, "synthesizer": "claude"},
-             "use_cache": true}}
+             "use_cache": true},
+ "models": {"claude": "opus", "chatgpt": "gpt-6-sol"}}
 {"type": "turn.cancel", "request_id": "uuid"}
 {"type": "turn.subscribe", "request_id": "uuid", "after_seq": 12}   // després d'una reconnexió
 {"type": "ping", "t": 1727450000000}
 ```
 
-`options` i `target` són opcionals (s'apliquen els `RuntimeSettings`). Límit: 3 torns simultanis i un de sol per conversa.
+`mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. Límit: 3 torns simultanis i un de sol per conversa.
 
 ### Servidor → client
 
-En connectar: `{"type": "hello", "version": "0.2.0", "providers": [ProviderStatus], "active_turns": [{"request_id", "conversation_id", "last_seq"}]}`.
+En connectar: `{"type": "hello", "version": "0.2.0", "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null fins al turn.started d'una conversa nova), "last_seq"}]}`. `active_turns` només inclou els torns en curs.
 
 Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix respon `{"type": "turn.unknown", "request_id"}`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura.
 
 | `type` | Camps | Significat |
 | --- | --- | --- |
 | `turn.started` | `conversation_id`, `turn_id`, `mode`, `new_conversation` | Pregunta desada |
-| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase |
+| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`) |
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
 | `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
 | `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged` | Resposta acabada i desada |
@@ -136,9 +203,9 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `turn.failed` | `error: {kind, message}` | Torn avortat |
 | `turn.cancelled` | – | Cancel·lat per l'usuari |
 
-Altres: `{"type": "pong", "t"}` i `{"type": "error", "message", "request_id"?}` per a missatges invàlids o límits.
+Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start`).
 
-`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total"}` (tokens estimats estalviats). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
+`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens estimats estalviats i el seu valor aproximat al preu mitjà del torn). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
 
 ### Ordre típic d'un debat
 

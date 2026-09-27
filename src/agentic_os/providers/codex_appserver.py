@@ -24,7 +24,7 @@ import re
 import signal
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +36,7 @@ from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
+    ModelInfo,
     ProviderError,
     ProviderEvent,
     ProviderStatus,
@@ -1082,6 +1083,11 @@ class CodexAppServerProvider:
                 self._default_model = model
                 return model
         return None
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        # Placeholder until live listing is implemented: the configured default only.
+        status = await self.status()
+        return (ModelInfo(id=status.model, label=status.model, is_default=True),)
 
     async def aclose(self) -> None:
         """Stop the app-server (process group SIGTERM, then SIGKILL) and background work."""

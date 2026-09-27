@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from agentic_os.domain import AgentName, TurnMode, TurnOptions
@@ -18,6 +19,11 @@ class TurnRequest:
     conversation_id: int | None = None
     """None starts a new conversation."""
     options: TurnOptions = field(default_factory=TurnOptions)
+    models: Mapping[AgentName, str] = field(default_factory=dict)
+    """Model per agent for answers, revisions and synthesis; a missing agent uses the
+    provider's configured default."""
+    fast_models: Mapping[AgentName, str] = field(default_factory=dict)
+    """Model per agent for cheap internal calls (compaction summaries)."""
 
 
 @dataclass(frozen=True, slots=True)

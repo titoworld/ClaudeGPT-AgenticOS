@@ -21,7 +21,7 @@ import os
 import re
 import signal
 import time
-from collections.abc import AsyncIterator, Awaitable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +32,7 @@ from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
+    ModelInfo,
     ProviderError,
     ProviderEvent,
     ProviderStatus,
@@ -407,6 +408,10 @@ class ClaudeCliProvider:
             detail=cached[2],
             limits=tuple(self._limits.values()),
         )
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        model = self._settings.claude_model or "opus"
+        return (ModelInfo(id=model, label=model, is_default=True),)
 
     async def aclose(self) -> None:
         self._closed = True

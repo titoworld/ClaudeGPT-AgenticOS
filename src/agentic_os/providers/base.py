@@ -97,6 +97,31 @@ class ProviderStatus:
     """Latest subscription usage windows seen (empty when unknown or in api mode)."""
 
 
+@dataclass(frozen=True, slots=True)
+class ModelInfo:
+    """A model the owner can pick for an agent (listed live from the vendor when possible)."""
+
+    id: str
+    """Value passed to the provider (API id, CLI alias such as "opus", Codex slug...)."""
+    label: str
+    description: str = ""
+    is_default: bool = False
+    context_window: int | None = None
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "is_default": self.is_default,
+            "context_window": self.context_window,
+        }
+
+
+MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$"
+"""Accepted shape for model ids typed by the owner (new models work without code changes)."""
+
+
 @runtime_checkable
 class Provider(Protocol):
     @property
@@ -114,5 +139,10 @@ class Provider(Protocol):
         ...
 
     async def status(self) -> ProviderStatus: ...
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        """Models available to this provider, queried live when the vendor allows it
+        (cached by the provider). Never raises: falls back to a static list."""
+        ...
 
     async def aclose(self) -> None: ...

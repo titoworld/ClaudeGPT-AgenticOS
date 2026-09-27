@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import replace
 
 import anthropic
@@ -24,6 +24,7 @@ from agentic_os.domain import AgentName, ProviderMode, Usage
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
+    ModelInfo,
     ProviderError,
     ProviderEvent,
     ProviderStatus,
@@ -271,6 +272,11 @@ class ClaudeApiProvider:
                 else "Falta la clau d'API d'Anthropic (AOS_ANTHROPIC_API_KEY)"
             ),
         )
+
+    async def list_models(self) -> Sequence[ModelInfo]:
+        # Placeholder until live listing is implemented: the configured default only.
+        status = await self.status()
+        return (ModelInfo(id=status.model, label=status.model, is_default=True),)
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
