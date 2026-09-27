@@ -42,7 +42,11 @@ interface Usage {
 
 interface ProviderStatus {
   agent: Agent; mode: "cli" | "api" | "fake";
-  available: boolean; model: string; detail: string;
+  available: boolean; model: string; detail: string;   // detail en català
+  limits: { window: string;            // "5h", "7d"...
+            used_percent: number | null;
+            resets_at: string | null;  // ISO 8601
+            status: string }[];        // "allowed" | "warning" | "rejected"
 }
 
 interface RuntimeSettings {

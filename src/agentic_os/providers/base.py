@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
@@ -73,13 +74,27 @@ class ProviderError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class UsageLimit:
+    """A subscription usage window reported by the vendor (cli mode only)."""
+
+    window: str
+    """E.g. "5h" or "7d"."""
+    used_percent: float | None
+    resets_at: datetime | None
+    status: str = "allowed"
+    """"allowed", "warning" or "rejected"."""
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderStatus:
     agent: AgentName
     mode: ProviderMode
     available: bool
     model: str
     detail: str
-    """Human-readable state, e.g. 'Sessió de subscripció activa' or the error cause."""
+    """Human-readable state in Catalan, e.g. 'Subscripció activa' or the error cause."""
+    limits: Sequence[UsageLimit] = ()
+    """Latest subscription usage windows seen (empty when unknown or in api mode)."""
 
 
 @runtime_checkable
@@ -91,6 +106,12 @@ class Provider(Protocol):
     def mode(self) -> ProviderMode: ...
 
     def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]: ...
+
+    async def prewarm(self, request: GenerationRequest) -> None:
+        """Best-effort hint that a call like ``request`` will follow soon (e.g. the next
+        debate round), so a cli provider can start its process in advance. Must return
+        quickly and never raise; providers without a warm-up step do nothing."""
+        ...
 
     async def status(self) -> ProviderStatus: ...
 

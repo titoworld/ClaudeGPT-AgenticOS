@@ -1,0 +1,66 @@
+/* Design tokens (dark only). Chart colors validated with the dataviz palette
+   validator against --surface-1 (dark mode): agents pair and savings set pass
+   lightness, chroma, CVD (>= 8) and normal-vision (>= 15) checks. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg: #07080d;
+  --surface-1: #0d0f17; /* chart surface */
+  --surface-2: #131623;
+  --surface-3: #1b1f30;
+  --glass: rgb(19 22 35 / 0.62);
+  --glass-strong: rgb(19 22 35 / 0.86);
+  --border: rgb(255 255 255 / 0.08);
+  --border-strong: rgb(255 255 255 / 0.16);
+
+  /* Text */
+  --text-primary: #f3f4f8;
+  --text-secondary: #b7bbcc;
+  --text-muted: #7d8299;
+
+  /* Agent identity (categorical, fixed order: claude, chatgpt) */
+  --claude: #dd6b3b;
+  --claude-soft: rgb(221 107 59 / 0.16);
+  --claude-glow: #ff9a6a;
+  --chatgpt: #1aa383;
+  --chatgpt-soft: rgb(26 163 131 / 0.16);
+  --chatgpt-glow: #5ff0cc;
+
+  /* Savings kinds (categorical, fixed order: cache, compaction, early_stop, unchanged) */
+  --saving-cache: #3987e5;
+  --saving-compaction: #c98500;
+  --saving-early-stop: #9085e9;
+  --saving-unchanged: #d55181;
+
+  /* Accent and status (status colors never reused as series) */
+  --accent: #8b9cff;
+  --good: #3ecf8e;
+  --warning: #f2b441;
+  --critical: #ff5d6c;
+
+  /* Type */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+
+  /* Shape and motion */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --shadow: 0 10px 40px rgb(0 0 0 / 0.45);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-med: 260ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-med: 0ms;
+  }
+}

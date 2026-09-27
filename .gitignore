@@ -6,6 +6,9 @@ build/
 dist/
 .venv/
 
+# Frontend
+node_modules/
+
 # Herramientas
 .pytest_cache/
 .mypy_cache/
@@ -18,6 +21,7 @@ htmlcov/
 .env.*
 !.env.example
 .claude/settings.local.json
+/data/
 
 # Editores y sistema operativo
 .vscode/
