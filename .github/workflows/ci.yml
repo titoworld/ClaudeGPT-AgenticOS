@@ -6,6 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
     name: Checks (Python ${{ matrix.python-version }})
@@ -36,3 +43,76 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+
+  web:
+    name: Web (Svelte)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        run: npm run check
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  deploy:
+    name: Deploy (image, Compose, Caddy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Shell scripts
+        run: shellcheck deploy/harden.sh .claude/hooks/session-start.sh
+
+      - name: Compose file
+        run: cp .env.example .env && docker compose config --quiet
+
+      - name: Caddyfile
+        run: |
+          docker run --rm -e DOMAIN=ia.example.com -e ACME_EMAIL=ci@example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine \
+            sh -c 'caddy fmt --diff /etc/caddy/Caddyfile && caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: claudegpt-os:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm claudegpt-os:ci sh -c 'agentic-os --version && claude --version && codex --version'
+          docker run -d --name smoke --read-only --tmpfs /tmp:exec --cap-drop ALL \
+            --security-opt no-new-privileges --mount type=volume,dst=/data \
+            --mount type=volume,dst=/home/app \
+            -e AOS_CLAUDE_MODE=fake -e AOS_CHATGPT_MODE=fake claudegpt-os:ci
+          for _ in $(seq 1 30); do
+            if docker exec smoke python -c "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8000/api/health', timeout=2).status == 200" 2>/dev/null; then
+              echo "healthy"; docker rm -f smoke >/dev/null; exit 0
+            fi
+            sleep 1
+          done
+          docker logs smoke
+          exit 1

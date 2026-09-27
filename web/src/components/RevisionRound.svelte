@@ -81,7 +81,9 @@
   .round {
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
-    background: rgb(15 17 27 / 0.6);
+    background: rgb(15 17 27 / 0.82);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     animation: rise-in var(--dur-med) var(--ease-out);
   }
 

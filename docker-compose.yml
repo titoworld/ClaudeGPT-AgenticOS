@@ -1,0 +1,128 @@
+# ClaudeGPT OS on a VPS: Caddy (HTTPS edge) in front of the app.
+# Step by step (in Catalan): docs/DESPLEGAMENT.md
+#
+#   cp .env.example .env && nano .env
+#   docker compose up -d --build
+#   docker compose exec -it app agentic-os init
+#
+# Only Caddy publishes ports. The app lives on an internal network that Caddy
+# alone can reach, plus an egress network for the model APIs.
+
+name: claudegpt
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Optional overrides from .env; unset means the Dockerfile pins.
+        - CLAUDE_CLI_VERSION
+        - CODEX_CLI_VERSION
+    image: claudegpt-os:latest
+    restart: unless-stopped
+    init: true # reaps the CLI subprocesses
+    env_file: .env
+    environment:
+      # Wiring that depends on this file; .env may override it.
+      AOS_PUBLIC_ORIGIN: ${AOS_PUBLIC_ORIGIN:-https://${DOMAIN:?Defineix DOMAIN al fitxer .env}}
+      AOS_SECURE_COOKIES: ${AOS_SECURE_COOKIES:-true}
+      AOS_TRUSTED_PROXIES: ${AOS_TRUSTED_PROXIES:-172.30.0.0/24} # the `proxy` network
+    # No `ports:` on purpose: reachable only through Caddy.
+    volumes:
+      - app_data:/data # SQLite: owner, sessions, conversations, statistics
+      - app_home:/home/app # Claude and Codex logins (~/.claude, ~/.codex)
+    read_only: true
+    tmpfs:
+      # exec: the CLIs may unpack and load helpers from /tmp; the HOME volume
+      # is writable and executable anyway, so noexec here would add little.
+      - /tmp:size=256m,mode=1777,exec
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 1536m # Python + the CLIs of a debate; raise it on a 4 GB VPS if needed
+    networks:
+      - proxy
+      - egress
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+    logging: *logging
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80" # HTTP: certificate challenge + redirect to HTTPS
+      - "443:443/tcp" # HTTPS (HTTP/1.1, HTTP/2)
+      - "443:443/udp" # HTTP/3 (QUIC)
+    environment:
+      DOMAIN: ${DOMAIN:?Defineix DOMAIN al fitxer .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Defineix ACME_EMAIL al fitxer .env}
+      # Empty or unset: everyone (an empty list inside Caddy would block all).
+      ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates and ACME account: must persist
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 256m
+    networks:
+      - edge
+      - proxy
+    healthcheck:
+      # Admin API, reachable only from inside the container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+networks:
+  # Internet <-> Caddy. IPv6 enabled so IPv6 visitors keep their real address
+  # (otherwise they show up as the bridge gateway and the allowlist and the
+  # login throttling see the wrong IP).
+  edge:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:c1a0:de::/64
+  # Caddy <-> app only, no route to the outside. AOS_TRUSTED_PROXIES matches it.
+  proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  # App -> model APIs (Anthropic, OpenAI).
+  egress: {}
+
+volumes:
+  app_data: {}
+  app_home: {}
+  caddy_data: {}
+  caddy_config: {}

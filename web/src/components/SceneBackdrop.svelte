@@ -64,6 +64,10 @@
     opacity: 0;
   }
 
+  [data-scene='on'] .blob {
+    animation-play-state: paused;
+  }
+
   .blob {
     position: absolute;
     width: 46vmax;

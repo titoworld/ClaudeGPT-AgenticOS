@@ -1,0 +1,17 @@
+# Allowlist: only what the image build needs enters the build context, so
+# .git, .env, data/, .venv, node_modules, caches and local builds never do.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!web/
+
+# Excluded again inside the allowed directories.
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+web/node_modules
+web/dist
+web/.vite
+web/coverage

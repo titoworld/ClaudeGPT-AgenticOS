@@ -1,0 +1,86 @@
+# Caddy 2.11: HTTPS edge of ClaudeGPT OS (checked with caddy v2.11.4: validate + fmt).
+#
+# Environment (docker-compose.yml passes it from .env):
+#   DOMAIN       public host name, e.g. ia.example.com (automatic HTTPS)
+#   ACME_EMAIL   contact address for the certificate authority
+#   ALLOWED_IPS  optional allowlist, space-separated IPs/CIDRs (default: everyone)
+# {$VAR} is replaced before parsing, so ALLOWED_IPS may expand to several values.
+# Never leave ALLOWED_IPS set but empty here: an empty list blocks everyone
+# (docker-compose.yml turns an empty value into the default).
+{
+	email {$ACME_EMAIL}
+
+	# The admin API listens on localhost:2019 inside the container only
+	# (healthcheck and `caddy reload`); it is never published.
+
+	servers {
+		# HTTP/3 over QUIC (UDP 443) is on by default; listed for clarity.
+		protocols h1 h2 h3
+		timeouts {
+			read_header 10s
+			idle 5m
+		}
+		# Caddy is the edge: no trusted_proxies, so client X-Forwarded-For is ignored.
+	}
+}
+
+{$DOMAIN} {
+	# ---- optional IP allowlist: anyone else gets the connection closed ----
+	@blocked not client_ip {$ALLOWED_IPS:0.0.0.0/0 ::/0}
+	abort @blocked
+
+	# HTTP bodies are small JSON; prompts travel over the WebSocket.
+	request_body {
+		max_size 2MB
+	}
+
+	encode zstd gzip
+
+	header {
+		# Caddy terminates TLS, so it owns HSTS. No "preload" and no
+		# includeSubDomains: this site must not decide for other subdomains.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+		-Via
+		# Applied to the final response, replacing any upstream value.
+		defer
+	}
+	# CSP and the other security headers come from the app.
+
+	reverse_proxy app:8000 {
+		# WebSockets (also over HTTP/2 and HTTP/3) are proxied automatically.
+		# Open WebSockets survive `caddy reload` for up to 5 minutes.
+		stream_close_delay 5m
+
+		# While the app restarts, wait for it instead of answering 502 at once.
+		# A failed connection is always retried; once a request has reached
+		# the app, only GET is retried.
+		lb_try_duration 10s
+		lb_try_interval 250ms
+
+		transport http {
+			dial_timeout 3s
+			# Must be shorter than uvicorn's keep-alive timeout (75 s): Caddy has
+			# to drop idle connections first, or reusing one the app just closed
+			# gives a sporadic 502.
+			keepalive 30s
+		}
+	}
+
+	# JSON access log on stdout (`docker compose logs caddy`), without cookies.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+}
+
+# Requests by IP address or for an unknown host: close the connection.
+:80, :443 {
+	abort
+}

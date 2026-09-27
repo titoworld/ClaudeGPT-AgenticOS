@@ -17,8 +17,9 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
   [commentary]    a commentary message before the final answer
 
 Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
-``requiresOpenaiAuth``, ``config_model``, ``init_error`` and ``spawn_child`` (start a
-``sleep`` child to check process-group kills). Every message received is appended to
+``requiresOpenaiAuth``, ``config_model``, ``rate_limits_delay`` (seconds before answering
+account/rateLimits/read), ``init_error`` and ``spawn_child`` (start a ``sleep`` child to
+check process-group kills). Every message received is appended to
 ``$CODEX_HOME/requests.jsonl`` with the pid; the environment goes to ``env.json``.
 Standard library only.
 """
@@ -304,17 +305,18 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         if account is None:
             fail(request_id, -32600, "codex account authentication required to read rate limits")
             return
-        respond(
-            request_id,
-            {
-                "ordinaryUsageAllowed": True,
-                "rateLimits": rate_limits(21, 3),
-                "rateLimitsByLimitId": None,
-                "rateLimitResetCredits": None,
-                "accountId": None,
-                "rateLimitUpsell": None,
-            },
-        )
+        answer = {
+            "ordinaryUsageAllowed": True,
+            "rateLimits": rate_limits(21, 3),
+            "rateLimitsByLimitId": None,
+            "rateLimitResetCredits": None,
+            "accountId": None,
+            "rateLimitUpsell": None,
+        }
+        delay = float(OPTIONS.get("rate_limits_delay", 0))
+        timer = threading.Timer(delay, respond, args=(request_id, answer))
+        timer.daemon = True
+        timer.start()
     elif method == "config/read":
         respond(
             request_id,

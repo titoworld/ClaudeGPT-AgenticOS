@@ -118,6 +118,16 @@
     });
   });
 
+  // Screen readers get a short status instead of every streamed token.
+  let announce = $state('');
+  $effect(() => {
+    const running = !!app.runningTurn;
+    untrack(() => {
+      if (running) announce = 'Generant la resposta…';
+      else if (announce) announce = 'Resposta completada.';
+    });
+  });
+
   function pickExample(prompt: string): void {
     app.composer.draft = prompt;
     app.focusComposer();
@@ -161,6 +171,8 @@
       {/if}
     </div>
   </div>
+
+  <p class="sr-only" role="status">{announce}</p>
 
   <div class="composer-wrap">
     {#if !stick && turns.length > 0}

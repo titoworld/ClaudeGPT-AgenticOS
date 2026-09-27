@@ -445,6 +445,34 @@ async def test_status_without_login_recycles_the_process(
     assert len(set(fake.pids())) == 2
 
 
+async def test_status_is_cached_before_the_slow_usage_read(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    fake.options(rate_limits_delay=1.0)
+    # The engine gives status() a short budget: giving up must still leave a status.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.status(), 0.5)
+    status = await asyncio.wait_for(provider.status(), 0.5)
+    assert status.available
+    assert status.detail == "Subscripció ChatGPT activa (Plus)"
+    assert len(fake.received("account/read")) == 1
+
+
+async def test_respawn_backoff(fake: FakeCodex, provider: CodexAppServerProvider) -> None:
+    provider._failures = 2  # two crashes in a row: wait 0.5 s before the next spawn
+    provider._last_failure = time.monotonic()
+
+    status = await provider.status()
+    assert not status.available
+    assert status.detail == "Codex s'ha aturat; es reiniciarà d'aquí a 1 s."
+    assert not fake.pids()
+
+    started = time.monotonic()
+    _, result = await collect(provider, make_request("[echo] ja"))
+    assert result.text.strip() == "ja"
+    assert time.monotonic() - started >= 0.4
+
+
 async def test_status_with_an_api_key_account(fake: FakeCodex) -> None:
     fake.options(account={"type": "apiKey"})
     codex = CodexAppServerProvider(fake.settings(chatgpt_model="gpt-6-sol"))

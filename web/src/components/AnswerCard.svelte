@@ -83,7 +83,7 @@
     padding: 1rem 1.1rem 0.9rem;
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
-    background: rgb(15 17 27 / 0.72);
+    background: rgb(15 17 27 / 0.8);
     box-shadow: 0 8px 30px -12px rgb(0 0 0 / 0.6);
     animation: rise-in var(--dur-med) var(--ease-out);
     transition:

@@ -411,6 +411,9 @@ class _AppServerConnection:
         finally:
             # The group may hold children of the npm wrapper even after the leader exits.
             _kill_group(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
         if process.returncode is None:
             await process.wait()
 
@@ -612,6 +615,8 @@ class CodexAppServerProvider:
         self._active_calls = 0
         self._default_model: str | None = None
         self._windows: dict[str, JsonObject] = {}
+        self._limits_at = float("-inf")
+        """When the usage windows were last updated (monotonic)."""
         self._status_cache: tuple[float, ProviderStatus] | None = None
         self._status_lock = asyncio.Lock()
 
@@ -796,7 +801,7 @@ class CodexAppServerProvider:
                 await conn.request("thread/unsubscribe", {"threadId": thread_id}, CLEANUP_TIMEOUT)
         except TimeoutError:
             logger.warning("Codex app-server stopped answering; restarting it")
-            await self._discard(conn)
+            self._retire(conn)
         except ProcessGone:
             pass
 
@@ -821,8 +826,17 @@ class CodexAppServerProvider:
                 task = asyncio.create_task(self._start(delay), name="codex-start")
                 task.add_done_callback(self._start_done)
                 self._starting = task
-            # Shielded: a cancelled caller must not abort a start other calls wait for.
-            await asyncio.shield(self._starting)
+            try:
+                # Shielded: a cancelled caller must not abort a start other calls wait for.
+                await asyncio.shield(self._starting)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if self._closed and current is not None and not current.cancelling():
+                    # The start was cancelled by aclose(), not this caller.
+                    raise ProviderError(
+                        "El proveïdor de Codex està tancat.", kind="unavailable"
+                    ) from None
+                raise
 
     def _start_done(self, task: asyncio.Task[None]) -> None:
         if self._starting is task:
@@ -927,10 +941,11 @@ class CodexAppServerProvider:
         delay = min(BACKOFF_MAX, BACKOFF_BASE * 2.0 ** (self._failures - 2))
         return max(0.0, self._last_failure + delay - time.monotonic())
 
-    async def _discard(self, conn: _AppServerConnection) -> None:
+    def _retire(self, conn: _AppServerConnection) -> None:
+        """Detach ``conn`` so the next call starts a fresh process, and close it."""
         if self._conn is conn:
             self._conn = None
-        await conn.close()
+        self._spawn(conn.close())
 
     def _spawn(self, coroutine: Awaitable[None]) -> None:
         try:
@@ -961,6 +976,7 @@ class CodexAppServerProvider:
             window = data.get(name)
             if isinstance(window, dict):
                 self._windows[name] = window
+                self._limits_at = time.monotonic()
             elif not sparse:
                 self._windows.pop(name, None)
 
@@ -981,30 +997,31 @@ class CodexAppServerProvider:
             logger.debug("Codex prewarm failed", exc_info=True)
 
     async def status(self) -> ProviderStatus:
+        """Account state (cached ~60 s) with the latest subscription usage windows."""
         cached = self._status_cache
-        if cached is not None and time.monotonic() < cached[0]:
-            return replace(cached[1], limits=self._limits())
-        async with self._status_lock:
-            cached = self._status_cache
-            if cached is not None and time.monotonic() < cached[0]:
-                return replace(cached[1], limits=self._limits())
-            status, ttl = await self._read_status()
-            self._status_cache = (time.monotonic() + ttl, status)
-            return status
+        if cached is None or time.monotonic() >= cached[0]:
+            async with self._status_lock:
+                cached = self._status_cache
+                if cached is None or time.monotonic() >= cached[0]:
+                    return await self._refresh_status()
+        return replace(cached[1], limits=self._limits())
 
-    async def _read_status(self) -> tuple[ProviderStatus, float]:
+    async def _refresh_status(self) -> ProviderStatus:
+        """Read the account and cache the status before the slower (networked) usage
+        read, so a caller that gives up early still leaves a status behind."""
         model = self._settings.chatgpt_model or self._default_model or FALLBACK_MODEL_LABEL
 
-        def unavailable(detail: str) -> tuple[ProviderStatus, float]:
+        def remember(available: bool, detail: str, ttl: float) -> ProviderStatus:
             status = ProviderStatus(
                 agent="chatgpt",
                 mode="cli",
-                available=False,
+                available=available,
                 model=model,
                 detail=detail,
                 limits=self._limits(),
             )
-            return status, STATUS_TTL_UNAVAILABLE
+            self._status_cache = (time.monotonic() + ttl, status)
+            return status
 
         try:
             conn = await self._connection(wait_backoff=False)
@@ -1012,29 +1029,27 @@ class CodexAppServerProvider:
                 await conn.request("account/read", {"refreshToken": False}, STATUS_REQUEST_TIMEOUT)
             )
         except ProviderError as exc:
-            return unavailable(exc.message)
+            return remember(False, exc.message, STATUS_TTL_UNAVAILABLE)
         except (TimeoutError, ProcessGone, CodexRpcError):
             logger.warning("Could not read the Codex account", exc_info=True)
-            return unavailable("No s'ha pogut llegir l'estat de Codex.")
+            return remember(False, "No s'ha pogut llegir l'estat de Codex.", STATUS_TTL_UNAVAILABLE)
 
         account = answer.get("account")
+        subscription = False
         if not isinstance(account, dict):
-            if answer.get("requiresOpenaiAuth") is False:
-                detail = "Codex amb un proveïdor de models propi"
-            else:
+            if answer.get("requiresOpenaiAuth") is not False:
                 # A fresh process re-reads auth.json, so a later `codex login` is picked up.
                 if self._active_calls == 0:
-                    self._spawn(self._discard(conn))
-                return unavailable(f"Sense sessió: {LOGIN_HINT}")
+                    self._retire(conn)
+                return remember(False, f"Sense sessió: {LOGIN_HINT}", STATUS_TTL_UNAVAILABLE)
+            detail = "Codex amb un proveïdor de models propi"
         elif account.get("type") == "chatgpt":
+            subscription = True
             plan = account.get("planType")
             label = _PLAN_LABELS.get(plan, str(plan).replace("_", " ").title()) if plan else ""
             detail = (
                 f"Subscripció ChatGPT activa ({label})" if label else "Subscripció ChatGPT activa"
             )
-            with contextlib.suppress(TimeoutError, ProcessGone, CodexRpcError):
-                limits = await conn.request("account/rateLimits/read", None, STATUS_REQUEST_TIMEOUT)
-                self._merge_rate_limits(_as_dict(limits).get("rateLimits"), sparse=False)
         elif account.get("type") == "apiKey":
             detail = "Codex amb clau d'API (es factura per ús)"
         else:
@@ -1042,15 +1057,12 @@ class CodexAppServerProvider:
 
         if not self._settings.chatgpt_model and self._default_model is None:
             model = await self._read_default_model(conn) or model
-        status = ProviderStatus(
-            agent="chatgpt",
-            mode="cli",
-            available=True,
-            model=model,
-            detail=detail,
-            limits=self._limits(),
-        )
-        return status, STATUS_TTL
+        status = remember(True, detail, STATUS_TTL)
+        if subscription and time.monotonic() - self._limits_at >= STATUS_TTL:
+            with contextlib.suppress(TimeoutError, ProcessGone, CodexRpcError):
+                limits = await conn.request("account/rateLimits/read", None, STATUS_REQUEST_TIMEOUT)
+                self._merge_rate_limits(_as_dict(limits).get("rateLimits"), sparse=False)
+        return replace(status, limits=self._limits())
 
     async def _read_default_model(self, conn: _AppServerConnection) -> str | None:
         """Model a thread gets without an explicit one: ``model`` of the effective config
