@@ -2,7 +2,7 @@
 
 El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiquen i sintetitzen una resposta millor, gastant els mínims tokens. Tot corre al teu VPS, només hi entres tu i pots fer servir les teves subscripcions (Claude Pro/Max i ChatGPT Plus/Pro) en lloc de claus d'API.
 
-![Vista del Consell](docs/img/consell.png)
+![Vista del Consell](docs/img/consell.webp)
 
 ## Què fa
 
