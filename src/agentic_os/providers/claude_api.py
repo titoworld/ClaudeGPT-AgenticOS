@@ -29,9 +29,7 @@ import anthropic
 from anthropic import Omit, omit
 from anthropic.types import ModelCapabilities
 from anthropic.types.beta import (
-    BetaFallbackBlock,
     BetaMessage,
-    BetaMessageIterationUsage,
     BetaMessageParam,
     BetaTextBlockParam,
     BetaThinkingConfigParam,
@@ -168,6 +166,20 @@ def _attempt_billed(output_tokens: int, category: str | None) -> bool:
     return output_tokens > 0 or category in BILLED_BEFORE_OUTPUT
 
 
+def _tokens(entry: object, name: str) -> int:
+    """A token count of a usage object, 0 when missing: the SDK builds streamed objects
+    without validation, so a field the API left out can be absent or None."""
+    value = getattr(entry, name, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _category(reason: object) -> str | None:
+    """``category`` of a refusal's ``stop_details`` or of a fallback block's ``trigger``
+    (either can be missing or None)."""
+    category = getattr(reason, "category", None)
+    return category if isinstance(category, str) else None
+
+
 def billed_usage(message: BetaMessage) -> Usage:
     """Tokens Anthropic bills for ``message``, without cost (the engine prices them).
 
@@ -178,35 +190,43 @@ def billed_usage(message: BetaMessage) -> Usage:
     sent, so every ``message`` entry is a declined hop, never a tool-loop step). The
     billed declined attempts are added at their token counts, so the engine prices them
     at the serving model's rates.
+
+    Entries and blocks are picked by their ``type``, never by class: the SDK builds an
+    entry of a type it does not know as the first variant of the union (the ``message``
+    entry class). A fallback block without ``trigger`` (the documented example has none)
+    gives no category, so its hop is billed only if it streamed output.
     """
     usage = message.usage
     details = usage.output_tokens_details
     billed = Usage(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read_tokens=usage.cache_read_input_tokens or 0,
-        cache_write_tokens=usage.cache_creation_input_tokens or 0,
-        reasoning_tokens=details.thinking_tokens if details else 0,
+        input_tokens=_tokens(usage, "input_tokens"),
+        output_tokens=_tokens(usage, "output_tokens"),
+        cache_read_tokens=_tokens(usage, "cache_read_input_tokens"),
+        cache_write_tokens=_tokens(usage, "cache_creation_input_tokens"),
+        reasoning_tokens=_tokens(details, "thinking_tokens"),
     )
     if message.stop_reason == "refusal":
-        category = message.stop_details.category if message.stop_details else None
-        if not _attempt_billed(usage.output_tokens, category):
+        category = _category(message.stop_details)
+        if not _attempt_billed(billed.output_tokens, category):
             billed = Usage()
     iterations = usage.iterations or []
-    if not any(entry.type == "fallback_message" for entry in iterations):
+    if not any(getattr(entry, "type", None) == "fallback_message" for entry in iterations):
         return billed  # no fallback ran: top-level usage is the whole call
     categories = [
-        block.trigger.category for block in message.content if isinstance(block, BetaFallbackBlock)
+        _category(getattr(block, "trigger", None))
+        for block in message.content
+        if getattr(block, "type", None) == "fallback"
     ]
-    declined = [entry for entry in iterations if isinstance(entry, BetaMessageIterationUsage)]
+    declined = [entry for entry in iterations if getattr(entry, "type", None) == "message"]
     for index, entry in enumerate(declined):
         category = categories[index] if index < len(categories) else None
-        if _attempt_billed(entry.output_tokens, category):
+        output_tokens = _tokens(entry, "output_tokens")
+        if _attempt_billed(output_tokens, category):
             billed += Usage(
-                input_tokens=entry.input_tokens,
-                output_tokens=entry.output_tokens,
-                cache_read_tokens=entry.cache_read_input_tokens or 0,
-                cache_write_tokens=entry.cache_creation_input_tokens or 0,
+                input_tokens=_tokens(entry, "input_tokens"),
+                output_tokens=output_tokens,
+                cache_read_tokens=_tokens(entry, "cache_read_input_tokens"),
+                cache_write_tokens=_tokens(entry, "cache_creation_input_tokens"),
             )
     return billed
 
@@ -399,7 +419,7 @@ class ClaudeApiProvider:
         # No cost here: the engine prices every call (owner price overrides included).
         usage = billed_usage(final)
         if final.stop_reason == "refusal":
-            category = final.stop_details.category if final.stop_details else None
+            category = _category(final.stop_details)
             reason = f" (categoria: {category})" if category else ""
             raise RefusalError(
                 f"Claude ha declinat respondre aquesta petició{reason}.",

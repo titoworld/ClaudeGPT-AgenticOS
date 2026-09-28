@@ -62,8 +62,9 @@ async def get_settings(state: StateDep) -> JSONResponse:
 async def put_settings(request: Request, state: StateDep) -> JSONResponse:
     try:
         settings = RuntimeSettings.from_wire(await read_json(request))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except (ValueError, OverflowError) as exc:  # OverflowError: a backstop for huge ints
+        detail = str(exc) if isinstance(exc, ValueError) else "Hi ha un nombre massa gran."
+        raise HTTPException(status_code=422, detail=detail) from None
     await state.store.put_runtime_settings(settings)
     if settings.fx.mode == "auto":
         state.fx.poke()  # fetch the ECB rate now if there is no recent one

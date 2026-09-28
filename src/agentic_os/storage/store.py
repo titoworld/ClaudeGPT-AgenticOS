@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ from agentic_os.orchestrator.store import (
     StoredMessage,
     UsageRecord,
 )
+from agentic_os.pricing import normalize_model
 from agentic_os.storage.db import Database, Tx
 from agentic_os.storage.models import (
     TURN_MODES,
@@ -377,10 +379,13 @@ class SqliteStore:
             )
 
     async def record_saving(self, record: SavingRecord) -> None:
+        """Store a saving with its value (``cost_usd``), which, like the tokens, is
+        kept when the conversation is deleted."""
+        cost = record.cost_usd
         async with self._db.transaction() as tx:
             await tx.execute(
-                "INSERT INTO savings (ts, conversation_id, turn_id, kind, tokens, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO savings (ts, conversation_id, turn_id, kind, tokens, detail, "
+                "cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     self._now(),
                     record.conversation_id,
@@ -388,6 +393,7 @@ class SqliteStore:
                     record.kind,
                     record.tokens_saved,
                     record.detail,
+                    cost if cost is not None and math.isfinite(cost) else None,
                 ),
             )
 
@@ -825,12 +831,39 @@ async def _put_setting(tx: Tx, key: str, value: JsonValue) -> None:
     )
 
 
+def _legacy_prices(stored: object) -> object:
+    """``stored`` without the owner prices that older versions accepted and are now
+    refused: ids that normalize to nothing (they were never applied) and repeated
+    ids of one model (only the last one was applied, and it is the one kept). So the
+    rest of the owner's settings survive the stricter validation."""
+    if not isinstance(stored, Mapping):
+        return stored
+    prices = stored.get("prices")
+    if not isinstance(prices, Mapping):
+        return stored
+    kept: dict[str, tuple[str, object]] = {}
+    for model, price in prices.items():
+        if not isinstance(model, str):
+            return stored  # not written by this application: refused as a whole
+        normalized = normalize_model(model)
+        if normalized:
+            kept.pop(normalized, None)
+            kept[normalized] = (model, price)
+    if len(kept) == len(prices):
+        return stored
+    logger.warning(
+        "Ignoring %d stored owner prices that name no model or repeat one",
+        len(prices) - len(kept),
+    )
+    return {**stored, "prices": dict(kept.values())}
+
+
 async def _read_runtime_settings(tx: Tx) -> RuntimeSettings:
     stored = await _get_setting(tx, _RUNTIME_SETTINGS_KEY)
     if stored is None:
         return RuntimeSettings()
     try:
-        return RuntimeSettings.from_wire(stored)
+        return RuntimeSettings.from_wire(_legacy_prices(stored))
     except ValueError:
         logger.warning("Stored runtime settings are invalid; using the defaults")
         return RuntimeSettings()

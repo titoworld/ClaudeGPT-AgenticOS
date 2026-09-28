@@ -21,7 +21,7 @@ from agentic_os.config import Settings
 from agentic_os.domain import AgentName, DebateOptions, ProviderMode, Usage
 from agentic_os.fx import FxRate
 from agentic_os.orchestrator.store import NewMessage, UsageRecord
-from agentic_os.pricing import DEFAULT_PRICES
+from agentic_os.pricing import DEFAULT_PRICES, price_table
 from agentic_os.providers.base import ModelInfo, Provider
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.security.passwords import hash_password
@@ -848,6 +848,91 @@ async def test_settings_with_models_prices_and_money(h: Harness) -> None:
     )
     assert response.status_code == 422
     assert (await h.client.get("/api/settings")).json() == saved
+
+
+async def test_settings_refuse_huge_integers_and_ambiguous_prices(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    await h.login_session()
+    huge = "1" + "0" * 400  # a valid JSON integer, too large for a float
+    price = {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}
+    cases: list[tuple[bytes, str]] = [
+        (
+            f'{{"budgets_eur": {{"claude": {huge}}}}}'.encode(),
+            "«budgets_eur.claude» ha de ser un nombre entre 0 i 100.000.",
+        ),
+        (
+            f'{{"plans_eur": {{"chatgpt": {huge}}}}}'.encode(),
+            "«plans_eur.chatgpt» ha de ser un nombre entre 0 i 100.000.",
+        ),
+        (
+            f'{{"fx": {{"eur_per_usd": {huge}}}}}'.encode(),
+            "«fx.eur_per_usd» ha de ser un nombre entre 0,2 i 5.",
+        ),
+        (
+            f'{{"prices": {{"m": {{"input": {huge}, "output": 1, "cache_read": 0, '
+            f'"cache_write": 0}}}}}}'.encode(),
+            "«prices.m»: Preu invàlid per a «input»: ha de ser un nombre ≥ 0.",
+        ),
+        (
+            json.dumps({"prices": {"openai/": price}}).encode(),
+            "«prices»: «openai/» no identifica cap model (sense el prefix del proveïdor, la "
+            "data o el context no en queda res).",
+        ),
+        (
+            json.dumps({"prices": {"Claude-Opus-5": price, "claude-opus-5": price}}).encode(),
+            "«prices»: «Claude-Opus-5» i «claude-opus-5» són el mateix model "
+            "(«claude-opus-5»). Deixa'n només un.",
+        ),
+    ]
+    with caplog.at_level(logging.ERROR):
+        for body, detail in cases:
+            response = await h.client.put(
+                "/api/settings",
+                content=body,
+                headers={**ORIGIN_HEADERS, "content-type": "application/json"},
+            )
+            assert response.status_code == 422, detail
+            assert response.json() == {"detail": detail}
+    assert not caplog.records  # no internal error
+    assert (await h.client.get("/api/settings")).json() == RuntimeSettings().to_wire()
+
+
+async def test_pricing_lists_the_table_the_engine_charges_with(h: Harness) -> None:
+    await h.login_session()
+    custom = {"input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5}
+    response = await h.client.put(
+        "/api/settings",
+        json={"prices": {"Claude-Opus-5-20260101": custom, "gpt-7-nova": custom}},
+        headers=ORIGIN_HEADERS,
+    )
+    assert response.status_code == 200
+    runtime = await h.state.store.get_runtime_settings()
+    rows = (await h.client.get("/api/pricing")).json()["prices"]
+    assert rows == [
+        {"model": entry.model, **entry.price.to_wire(), "source": entry.source}
+        for entry in sorted(price_table(runtime.prices).values(), key=lambda e: e.model)
+    ]
+
+
+async def test_answers_given_before_the_body_ask_to_close_the_connection(h: Harness) -> None:
+    await h.add_owner()
+    body = {"password": WRONG_PASSWORD, "totp": "000000"}
+    # 403 from the Origin check and 401 without a session: the body was never read.
+    for response in (
+        await h.client.post("/api/auth/login", json=body),
+        await h.client.put("/api/settings", json={}, headers=ORIGIN_HEADERS),
+        await h.client.request("GET", "/api/health", content=b"ignored"),
+    ):
+        assert response.headers["connection"] == "close", response.request.url
+    # Requests without a body, or whose body was read, keep the connection.
+    assert "connection" not in (await h.client.get("/api/health")).headers
+    assert (await h.login(password=WRONG_PASSWORD)).status_code == 401
+    assert "connection" not in (await h.login(password=WRONG_PASSWORD)).headers
+    await h.login_session()
+    response = await h.client.put("/api/settings", json={}, headers=ORIGIN_HEADERS)
+    assert response.status_code == 200
+    assert "connection" not in response.headers
 
 
 async def test_models_catalog(h: Harness) -> None:

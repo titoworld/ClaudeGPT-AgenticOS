@@ -51,7 +51,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 
 | Tècnica | Com funciona | Com es mesura |
 | --- | --- | --- |
-| Prompt de sistema propi | Les CLI s'executen amb un prompt de sistema curt en lloc del d'agent de programació, i sense eines | – |
+| Prompt de sistema propi | Les CLI s'executen amb un prompt de sistema curt en lloc del d'agent de programació: la de Claude sense cap eina i la de Codex sense les que es poden desactivar ([Seguretat](#seguretat-un-sol-usuari)) | – |
 | Context mínim als debats | Les revisions només veuen la pregunta i les dues últimes respostes, no tota la transcripció | – |
 | Historial canònic | A l'historial de la conversa només hi van la pregunta i la resposta final (la síntesi), no les rondes intermèdies | – |
 | Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | tokens de l'historial original − tokens del context compactat |
@@ -64,7 +64,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 
 Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 
-- **`cli`** (per defecte): executa la CLI oficial (`claude`, `codex`) sense eines, amb el prompt per l'entrada estàndard, en un directori buit i amb un entorn mínim. Autenticada amb la teva subscripció (OAuth) un sol cop al VPS.
+- **`cli`** (per defecte): executa la CLI oficial (`claude`, `codex`) amb el prompt per l'entrada estàndard, en un directori buit i amb un entorn mínim: Claude sense cap eina i Codex en mode només lectura, sense les eines que es poden desactivar ([Seguretat](#seguretat-un-sol-usuari)). Autenticada amb la teva subscripció (OAuth) un sol cop al VPS.
 - **`api`**: SDK oficial amb clau d'API (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) i *prompt caching*.
 - **`fake`**: respostes deterministes per a proves i per provar la interfície sense gastar res.
 
@@ -76,12 +76,12 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 
 ## Seguretat (un sol usuari)
 
-- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. Caddy llegeix sencer el cos de les peticions (màxim 1 MiB, en 30 s) abans de passar-lo a l'aplicació, així que una pujada lenta no ocupa connexions de l'aplicació; els WebSockets no passen per aquest límit.
+- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. El cos de les peticions té un màxim d'1 MiB: Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 s (Caddy talla als 30 s), així que una pujada lenta no ocupa cap connexió gaire estona; els WebSockets no passen per aquest límit.
 - Inici de sessió amb contrasenya (argon2id) **i** codi TOTP; bloqueig exponencial després d'intents fallits. Un navegador on ja s'ha entrat (cookie de dispositiu conegut) només es bloqueja pels seus propis errors; `agentic-os reset-throttle` aixeca tots els bloquejos.
 - Sessions al servidor (només se'n desa el hash), cookie `__Host-` HttpOnly, Secure, SameSite=Strict, caducitat per inactivitat i absoluta.
 - Comprovació d'`Origin` a totes les peticions que canvien estat i al WebSocket.
 - CSP estricta (`script-src 'self'`), HSTS, `frame-ancestors 'none'`; el markdown dels models es neteja amb DOMPurify.
-- Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi dins del mateix procés (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació limita els subagents a un per crida (`agents.max_threads=1`) i interromp els torns que no són de cap crida en curs ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat.
+- Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi en un procés fill (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació només en deixa córrer un alhora (`agents.max_threads=1`), interromp de seguida els torns que no són de cap crida en curs, atura la crida que en fa servir més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat, i els registres s'esborren cada vegada que s'engega Codex.
 - Contenidors sense root (l'aplicació amb l'usuari 10001 i Caddy amb el 10002; només `caddy-init` corre uns segons com a root, sense xarxa i amb només les *capabilities* que necessita `chown`, per donar els volums de Caddy al seu usuari), `no-new-privileges`, sense *capabilities* efectives i amb límits de memòria, CPU i processos.
 
 ## Latència i connexió

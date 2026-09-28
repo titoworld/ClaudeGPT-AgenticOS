@@ -24,26 +24,6 @@
 	}
 }
 
-# Settings shared by the two reverse_proxy blocks of the site.
-(app_proxy) {
-	# Open WebSockets survive `caddy reload` for up to 5 minutes.
-	stream_close_delay 5m
-
-	# While the app restarts, wait for it instead of answering 502 at once.
-	# A failed connection is always retried; once a request has reached
-	# the app, only GET is retried.
-	lb_try_duration 10s
-	lb_try_interval 250ms
-
-	transport http {
-		dial_timeout 3s
-		# Must be shorter than uvicorn's keep-alive timeout (75 s): Caddy has
-		# to drop idle connections first, or reusing one the app just closed
-		# gives a sporadic 502.
-		keepalive 30s
-	}
-}
-
 {$DOMAIN} {
 	# ---- optional IP allowlist: anyone else gets the connection closed ----
 	@blocked not client_ip {$ALLOWED_IPS:0.0.0.0/0 ::/0}
@@ -63,24 +43,39 @@
 	# CSP and the other security headers come from the app.
 
 	# Request bodies (the API's small JSON; prompts travel over the WebSocket)
-	# are read whole here, capped like the app's (1 MiB) and within 30 s,
-	# before they are passed on: a slow or stalled upload ties up Caddy, never
-	# one of the app's connections. Only for methods that carry a body: a
-	# WebSocket is a GET, or over HTTP/2 and HTTP/3 a CONNECT whose body is the
-	# socket itself, which must be neither buffered, capped nor timed out.
+	# are capped like the app's (1 MiB) and must arrive within 30 s. Only for
+	# methods that carry a body: a WebSocket is a GET, or over HTTP/2 and HTTP/3
+	# a CONNECT whose body is the socket itself, which must be neither capped
+	# nor timed out.
 	@body method POST PUT PATCH DELETE
 	request_body @body {
 		max_size 1MiB
 		# Marked experimental in Caddy 2.11: check it when upgrading Caddy.
 		read_timeout 30s
 	}
-	reverse_proxy @body app:8000 {
-		import app_proxy
-		request_buffers 1MiB
-	}
+
+	# Bodies are streamed to the app, never buffered here (no request_buffers):
+	# buffering kept up to 1 MiB per request in this 256 MiB container, so 150
+	# stalled uploads got Caddy OOM-killed. The app bounds a slow or stalled
+	# body itself: 408 after 15 s, and the connection is closed.
+	# WebSockets are proxied automatically.
 	reverse_proxy app:8000 {
-		# WebSockets are proxied automatically.
-		import app_proxy
+		# Open WebSockets survive `caddy reload` for up to 5 minutes.
+		stream_close_delay 5m
+
+		# While the app restarts, wait for it instead of answering 502 at once.
+		# A failed connection is always retried (the body has not been sent
+		# yet); once a request has reached the app, only GET is retried.
+		lb_try_duration 10s
+		lb_try_interval 250ms
+
+		transport http {
+			dial_timeout 3s
+			# Must be shorter than uvicorn's keep-alive timeout (75 s): Caddy has
+			# to drop idle connections first, or reusing one the app just closed
+			# gives a sporadic 502.
+			keepalive 30s
+		}
 	}
 
 	# JSON access log on stdout (`docker compose logs caddy`), without cookies.

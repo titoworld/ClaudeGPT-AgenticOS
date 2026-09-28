@@ -46,7 +46,7 @@
     <span class="row total">Total<b>{formatInt(savings.total)}</b></span>
     {#if value != null}
       <span class="row money">Valor aproximat<b>≈ {formatEur(value)}</b></span>
-      <small>Al preu mitjà dels tokens d'aquest torn.</small>
+      <small>Valor aproximat: cada tipus d'estalvi al preu del que s'ha evitat.</small>
     {/if}
   </span>
 </span>

@@ -164,6 +164,56 @@ def test_other_invalid_values(patch: dict[str, object], message: str) -> None:
         RuntimeSettings.from_wire({**VALID, **patch})
 
 
+@pytest.mark.parametrize(
+    "key", ["openai/", "x/[1m]", "a/-latest", "anthropic/anthropic.", "Z/@20260101"]
+)
+def test_a_price_key_that_names_no_model_is_refused(key: str) -> None:
+    # Normalized to "", it would be a prefix of every model and reprice them all.
+    price = VALID["prices"]["my-new-model"]
+    with pytest.raises(ValueError, match=re.escape(f"«prices»: «{key}» no identifica cap model")):
+        RuntimeSettings.from_wire({**VALID, "prices": {key: price}})
+    with pytest.raises(ValueError, match="no identifica cap model"):
+        RuntimeSettings(prices={key: ModelPrice(0, 0, 0, 0)})
+
+
+def test_two_price_keys_of_the_same_model_are_refused() -> None:
+    price = VALID["prices"]["my-new-model"]
+    for first, second in (
+        ("Claude-Opus-5", "claude-opus-5"),
+        ("claude-opus-5", "anthropic/claude-opus-5-20260101"),
+        ("gpt-7-nova", "openai/gpt-7-nova[1m]"),
+    ):
+        message = f"«prices»: «{first}» i «{second}» són el mateix model"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            RuntimeSettings.from_wire({"prices": {first: price, second: price}})
+    # Different models, even when one id prefixes the other, are fine.
+    settings = RuntimeSettings.from_wire({"prices": {"claude-opus-5": price, "claude-opus": price}})
+    assert set(settings.prices) == {"claude-opus-5", "claude-opus"}
+
+
+@pytest.mark.parametrize(
+    ("patch", "name"),
+    [
+        ({"budgets_eur": {"claude": 10**400}}, "budgets_eur.claude"),
+        ({"plans_eur": {"chatgpt": -(10**400)}}, "plans_eur.chatgpt"),
+        ({"fx": {"eur_per_usd": 10**400}}, "fx.eur_per_usd"),
+    ],
+)
+def test_huge_integers_are_a_validation_error(patch: dict[str, object], name: str) -> None:
+    # A valid JSON integer too large for a float: ValueError (422), not OverflowError.
+    with pytest.raises(ValueError, match=re.escape(f"«{name}» ha de ser un nombre entre")):
+        RuntimeSettings.from_wire({**VALID, **patch})
+    huge_price = {"input": 10**400, "output": 1, "cache_read": 0, "cache_write": 0}
+    with pytest.raises(ValueError, match=re.escape("«prices.m»: Preu invàlid per a «input»")):
+        RuntimeSettings.from_wire({"prices": {"m": huge_price}})
+    # Integers within the range are still accepted, and stored as floats.
+    settings = RuntimeSettings.from_wire(
+        {"budgets_eur": {"claude": 100_000}, "fx": {"eur_per_usd": 1}}
+    )
+    assert settings.budgets_eur["claude"] == 100_000.0
+    assert settings.fx.eur_per_usd == 1.0
+
+
 def test_limits_are_formatted_the_catalan_way() -> None:
     with pytest.raises(ValueError, match=re.escape("entre 0,2 i 5.")):
         RuntimeSettings.from_wire({"fx": {"eur_per_usd": 9}})

@@ -14,8 +14,11 @@ Definitions:
   prices); ``unpriced_calls`` counts successful non-demo calls without a price.
 - ``month``: the same costs for the current UTC calendar month (whatever ``days``),
   converted to euros and compared with the owner's monthly budgets and plan prices.
-- ``savings.cost_usd``: value of the saved tokens, from ``meta.savings.cost_usd`` of
-  the last final message of each turn (``None`` when no turn reported a value).
+- ``savings.cost_usd``: value of the saved tokens, the sum of the ``cost_usd`` of the
+  saving rows in the window (kept, like their tokens, when a conversation is
+  deleted). Turns stored before savings had a value fall back to
+  ``meta.savings.cost_usd`` of their last final message (while it exists). ``None``
+  when nothing in the window has a value.
 - ``turns``: question messages created in the window, by their ``meta.mode``.
 - ``consensus``: completed debates (a debate question with a synthesis message).
   When the synthesis has ``meta.consensus`` (``{"reached", "round", ...}``, as the
@@ -277,19 +280,31 @@ async def compute_month_spend(
 
 
 async def _savings_cost(tx: Tx, start: str, end: str) -> float | None:
-    """Sum of ``meta.savings.cost_usd`` of the last final message of each turn."""
-    rows = await tx.fetchall(
+    """Value of the savings of ``[start, end)``: the ``cost_usd`` of the saving rows,
+    plus, for turns none of whose saving rows has a value (stored before the column
+    existed), ``meta.savings.cost_usd`` of the turn's last final message."""
+    recorded = await tx.fetchone(
+        "SELECT SUM(cost_usd) AS total, COUNT(cost_usd) AS priced FROM savings "
+        "WHERE ts >= ? AND ts < ?",
+        (start, end),
+    )
+    legacy_rows = await tx.fetchall(
         """
-        SELECT turn_id, json_extract(meta, '$.savings.cost_usd') AS cost_usd
-        FROM messages
-        WHERE final = 1 AND kind != 'question' AND created_at >= ? AND created_at < ?
-          AND json_type(meta, '$.savings') = 'object'
-        ORDER BY id
+        SELECT m.turn_id, json_extract(m.meta, '$.savings.cost_usd') AS cost_usd
+        FROM messages AS m
+        WHERE m.final = 1 AND m.kind != 'question' AND m.created_at >= ? AND m.created_at < ?
+          AND json_type(m.meta, '$.savings') = 'object'
+          AND NOT EXISTS (
+              SELECT 1 FROM savings AS s WHERE s.turn_id = m.turn_id AND s.cost_usd IS NOT NULL
+          )
+        ORDER BY m.id
         """,
         (start, end),
     )
-    by_turn = {int(row["turn_id"]): _number(row["cost_usd"]) for row in rows}
+    by_turn = {int(row["turn_id"]): _number(row["cost_usd"]) for row in legacy_rows}
     values = [value for value in by_turn.values() if value is not None]
+    if recorded is not None and int(recorded["priced"] or 0) > 0:
+        values.append(float(recorded["total"]))
     return round(sum(values), 6) if values else None
 
 

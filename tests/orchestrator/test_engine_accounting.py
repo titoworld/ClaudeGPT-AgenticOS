@@ -21,7 +21,7 @@ from agentic_os.orchestrator.memory import EMPTY_SUMMARY_ERROR
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
-from agentic_os.pricing import ModelPrice
+from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
@@ -29,6 +29,7 @@ from agentic_os.providers.base import (
     ProviderEvent,
     TextDelta,
 )
+from agentic_os.providers.claude_api import RefusalError
 from agentic_os.providers.fake import FakeProvider
 
 PRICE = ModelPrice(input=4.0, output=20.0, cache_read=0.2, cache_write=5.0)
@@ -67,16 +68,22 @@ def turn_messages(store: InMemoryStore, done: TurnCompleted) -> list[StoredMessa
 
 
 def reloaded_usage(store: InMemoryStore, done: TurnCompleted) -> Usage:
-    """What a reloaded client adds up: every message's ``usage`` plus the question's
-    ``compaction_usage`` (PROTOCOL.md, message meta)."""
+    """What a reloaded client adds up: every message's ``usage``, the question's
+    ``compaction_usage`` and the last final message's ``unstored_usage`` (PROTOCOL.md,
+    message meta)."""
     total = Usage()
+    unstored: Usage | None = None
     for message in turn_messages(store, done):
         if message.kind == "question":
             if "compaction_usage" in message.meta:
                 total += usage_of(message.meta["compaction_usage"])
-        else:
-            total += usage_of(message.meta["usage"])
-    return total
+            continue
+        total += usage_of(message.meta["usage"])
+        if message.final:
+            unstored = None
+            if "unstored_usage" in message.meta:
+                unstored = usage_of(message.meta["unstored_usage"])
+    return total if unstored is None else total + unstored
 
 
 def records_usage(store: InMemoryStore, done: TurnCompleted) -> Usage:
@@ -157,7 +164,7 @@ async def seed_conversation(engine: Engine, turns: int = 3) -> int:
 # -- savings value (ACC-1) --------------------------------------------------------------
 
 
-async def test_savings_value_is_below_the_highest_token_price(store: InMemoryStore) -> None:
+async def test_kept_answers_are_valued_at_the_output_price(store: InMemoryStore) -> None:
     providers: dict[AgentName, FakeProvider] = {
         agent: CachingFake(agent, chunk_delay=0, agreements=(90,))
         for agent in ("claude", "chatgpt")
@@ -169,17 +176,9 @@ async def test_savings_value_is_below_the_highest_token_price(store: InMemorySto
     done = completed(await collect(engine.run(request, price_overrides=PRICES)))
     savings = done.savings
     assert savings.unchanged > 0 and savings.cache == savings.compaction == 0
-    assert savings.cost_usd is not None
-    # Before: valued at ~1100 $/MTok, while the model's highest price is 20 $/MTok.
-    assert savings.cost_usd <= savings.total * PRICE.output / 1e6
-    billed = sum(
-        u.usage.total_tokens + u.usage.cache_read_tokens + u.usage.cache_write_tokens
-        for u in store.usage
-        if u.turn_id == done.turn_id
-    )
-    assert savings.cost_usd == pytest.approx(
-        savings.unchanged * (done.usage.cost_usd or 0.0) / billed
-    )
+    # Before: ~1100 $/MTok (a blended cost including cache writes); a kept answer is
+    # output its model did not write, at that model's output price.
+    assert savings.cost_usd == pytest.approx(savings.unchanged * PRICE.output / 1e6)
 
 
 async def test_early_stop_value_is_the_cost_of_the_skipped_revisions(
@@ -198,13 +197,8 @@ async def test_early_stop_value_is_the_cost_of_the_skipped_revisions(
     assert done.consensus is not None and done.consensus.round == 1
     records = [u for u in store.usage if u.turn_id == done.turn_id]
     revisions = [u.usage.cost_usd or 0.0 for u in records if u.purpose == "revision"]
-    billed = sum(
-        u.usage.total_tokens + u.usage.cache_read_tokens + u.usage.cache_write_tokens
-        for u in records
-    )
-    rate = (done.usage.cost_usd or 0.0) / billed
     early_stop_value = 3 * 2 * sum(revisions) / len(revisions)
-    expected = early_stop_value + (done.savings.unchanged + done.savings.compaction) * rate
+    expected = early_stop_value + done.savings.unchanged * PRICE.output / 1e6
     assert done.savings.cost_usd == pytest.approx(expected)
     saved = {s.kind: s for s in store.savings if s.turn_id == done.turn_id}
     assert saved["early_stop"].cost_usd == pytest.approx(early_stop_value)
@@ -231,6 +225,10 @@ async def test_a_billed_empty_reply_counts_in_the_turn_usage(store: InMemoryStor
     assert done.usage.cost_usd == pytest.approx(records_usage(store, done).cost_usd)
     # The savings are still valued on the calls that produced messages.
     assert done.savings.cost_usd == 0.0
+    # The final synthesis carries the empty call, so a reload adds up to the live total.
+    (synthesis,) = [m for m in turn_messages(store, done) if m.final and m.kind != "question"]
+    assert usage_of(synthesis.meta["unstored_usage"]) == empty.usage
+    assert reloaded_usage(store, done) == done.usage
 
 
 async def test_an_empty_summary_keeps_its_billed_usage(store: InMemoryStore) -> None:
@@ -285,6 +283,248 @@ async def test_a_summary_that_fails_everywhere_still_counts_what_it_billed(
     assert done.savings.compaction == 0  # nothing was compacted
     assert reloaded_usage(store, done) == done.usage
     assert usage_of(turn_messages(store, done)[0].meta["compaction_usage"]) == claude.usage
+
+
+# -- billed failures (K7) and reload parity (K9) -------------------------------------------------
+
+DECLINED = Usage(input_tokens=5000, output_tokens=300, cache_read_tokens=1000)
+
+
+class Refuses(FakeProvider):
+    """The calls of ``purposes`` are declined as the Claude API does: a refusal that
+    carries the billed usage and the model that declined."""
+
+    def __init__(
+        self,
+        agent: AgentName,
+        purposes: set[str],
+        *,
+        usage: Usage = DECLINED,
+        model: str = "fake-claude",
+    ) -> None:
+        super().__init__(agent, chunk_delay=0)
+        self._purposes = purposes
+        self._usage = usage
+        self._model = model
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        if request.purpose in self._purposes:
+            self.requests.append(request)
+            raise RefusalError("Claude ha declinat.", usage=self._usage, model=self._model)
+        async for event in super().stream(request):
+            yield event
+
+
+class BilledRetryable(ProviderError):
+    """A retryable failure that says what it billed (e.g. a stream cut after output)."""
+
+    def __init__(self, usage: Usage, model: str) -> None:
+        super().__init__("La resposta s'ha interromput.", kind="unavailable", retryable=True)
+        self.usage = usage
+        self.model = model
+
+
+def priced(model: str, usage: Usage) -> Usage:
+    return replace(usage, cost_usd=estimate_cost_usd(model, usage, PRICES))
+
+
+async def test_a_billed_refusal_is_recorded_priced_and_in_the_turn_usage(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": Refuses("claude", {"answer"}, model="fake-claude"),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    events = await collect(engine.run(TurnRequest("r", "Q?", "duel"), price_overrides=PRICES))
+    done = completed(events)
+    assert [e.error.kind for e in events if isinstance(e, StreamFailed)] == ["invalid"]
+    (refused,) = [u for u in store.usage if u.agent == "claude"]
+    # Before: Usage() with no model cost, although Anthropic billed the refusal.
+    assert (refused.ok, refused.model) == (False, "fake-claude")
+    assert refused.usage == priced("fake-claude", DECLINED)
+    assert refused.usage.cost_usd
+    assert done.usage == records_usage(store, done)
+    answer = next(u for u in store.usage if u.agent == "chatgpt")
+    assert done.usage == answer.usage + refused.usage
+
+
+async def test_an_unbilled_refusal_records_its_model_and_no_cost(store: InMemoryStore) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": Refuses("claude", {"answer"}, usage=Usage(), model="claude-opus-5"),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    done = completed(await collect(engine.run(TurnRequest("r", "Q?", "duel"))))
+    (refused,) = [u for u in store.usage if u.agent == "claude"]
+    assert (refused.ok, refused.model, refused.usage) == (False, "claude-opus-5", Usage())
+    assert done.usage == records_usage(store, done)
+    assert all("unstored_usage" not in m.meta for m in turn_messages(store, done))
+
+
+async def test_a_billed_retried_attempt_counts_and_travels_with_the_answer(
+    store: InMemoryStore,
+) -> None:
+    cut = Usage(input_tokens=800, output_tokens=40)
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": FailsFirst("claude", BilledRetryable(cut, "fake-claude")),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    done = completed(
+        await collect(engine.run(TurnRequest("r", "Q?", "solo"), price_overrides=PRICES))
+    )
+    first, second = [u for u in store.usage if u.turn_id == done.turn_id]
+    assert (first.ok, first.usage) == (False, priced("fake-claude", cut))
+    assert second.ok
+    assert done.usage == first.usage + second.usage
+    (answer,) = [m for m in turn_messages(store, done) if m.kind == "answer"]
+    assert usage_of(answer.meta["unstored_usage"]) == first.usage
+    assert reloaded_usage(store, done) == done.usage
+
+
+async def test_a_refused_revision_travels_with_the_synthesis(store: InMemoryStore) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": Refuses("claude", {"revision"}),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0, agreements=(50,)),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    options = TurnOptions(debate=DebateOptions(rounds=2), use_cache=False)
+    request = TurnRequest("r", "Q?", "debate", options=options)
+    done = completed(await collect(engine.run(request, price_overrides=PRICES)))
+    refusals = [u.usage for u in store.usage if not u.ok]
+    assert len(refusals) == 2 and all(u == priced("fake-claude", DECLINED) for u in refusals)
+    (synthesis,) = [m for m in turn_messages(store, done) if m.final and m.kind != "question"]
+    assert usage_of(synthesis.meta["unstored_usage"]) == refusals[0] + refusals[1]
+    # Before: a reload lost the refusals (the live total had none of them either).
+    assert done.usage == records_usage(store, done)
+    assert reloaded_usage(store, done) == done.usage
+
+
+async def test_a_degraded_synthesis_carries_the_refused_synthesis_calls(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": Refuses("claude", {"synthesis"}),
+        "chatgpt": Refuses("chatgpt", {"synthesis"}, model="fake-chatgpt"),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    request = TurnRequest("r", "Q?", "debate", options=TurnOptions(debate=DebateOptions(rounds=0)))
+    done = completed(await collect(engine.run(request, price_overrides=PRICES)))
+    (synthesis,) = [m for m in turn_messages(store, done) if m.final and m.kind != "question"]
+    assert synthesis.meta["degraded"] is True
+    expected = priced("fake-claude", DECLINED) + priced("fake-chatgpt", DECLINED)
+    assert usage_of(synthesis.meta["unstored_usage"]) == expected
+    assert reloaded_usage(store, done) == done.usage == records_usage(store, done)
+
+
+@pytest.mark.parametrize("mode", ["solo", "duel", "debate"])
+async def test_every_final_message_carries_the_unstored_usage_so_far(
+    store: InMemoryStore, mode: TurnMode
+) -> None:
+    cut = Usage(input_tokens=800, output_tokens=40)
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": FailsFirst("claude", BilledRetryable(cut, "fake-claude")),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    request = TurnRequest("r", "Q?", mode, options=NO_CACHE)
+    done = completed(await collect(engine.run(request, price_overrides=PRICES)))
+    finals = [m for m in turn_messages(store, done) if m.final and m.kind != "question"]
+    # The failure came first, so every final message (the last one included) has it.
+    assert finals and all(
+        usage_of(m.meta["unstored_usage"]) == priced("fake-claude", cut) for m in finals
+    )
+    assert reloaded_usage(store, done) == done.usage
+
+
+async def test_a_cache_hit_does_not_replay_the_unstored_usage(store: InMemoryStore) -> None:
+    cut = Usage(input_tokens=800, output_tokens=40)
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": FailsFirst("claude", BilledRetryable(cut, "fake-claude")),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    first = completed(await collect(engine.run(TurnRequest("a", "Hola", "solo"))))
+    assert "unstored_usage" in turn_messages(store, first)[-1].meta
+    done = completed(await collect(engine.run(TurnRequest("b", "Hola", "solo"))))
+    assert done.cached and done.usage == Usage()
+    assert all("unstored_usage" not in m.meta for m in turn_messages(store, done))
+    assert reloaded_usage(store, done) == Usage()
+
+
+async def test_a_refused_summary_counts_in_the_compaction_usage(store: InMemoryStore) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": Refuses("claude", {"summary"}, model="fake-claude-mini"),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, EngineConfig(keep_recent_messages=2), retry_delay=0)
+    conversation_id = await seed_conversation(engine)
+    done = completed(
+        await collect(
+            engine.run(
+                TurnRequest("x", "Q?", "solo", conversation_id=conversation_id),
+                compaction_threshold_tokens=100,
+                price_overrides=PRICES,
+            )
+        )
+    )
+    claude, chatgpt = (u for u in store.usage if u.purpose == "summary")
+    assert (claude.agent, claude.ok, claude.model) == ("claude", False, "fake-claude-mini")
+    assert claude.usage == priced("fake-claude-mini", DECLINED)
+    assert chatgpt.ok and done.savings.compaction > 0
+    question = turn_messages(store, done)[0]
+    assert usage_of(question.meta["compaction_usage"]) == claude.usage + chatgpt.usage
+    assert reloaded_usage(store, done) == done.usage
+
+
+async def test_a_billed_refusal_carried_the_compacted_context(store: InMemoryStore) -> None:
+    fakes: dict[AgentName, FakeProvider] = {
+        "claude": FakeProvider("claude", chunk_delay=0),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    config = EngineConfig(keep_recent_messages=2)
+    conversation_id = await seed_conversation(Engine(fakes, store, config, retry_delay=0))
+    fakes["claude"] = Refuses("claude", {"answer"})
+    engine = Engine(fakes, store, config, retry_delay=0)
+    request = TurnRequest("d", "Pregunta?", "duel", conversation_id=conversation_id)
+    done = completed(
+        await collect(engine.run(request, compaction_threshold_tokens=100, price_overrides=PRICES))
+    )
+    # The refusal was billed for the (compacted) context it carried, like the answer.
+    (record,) = [s for s in store.savings if s.turn_id == done.turn_id]
+    assert record.kind == "compaction" and record.detail.endswith("en 2 crides")
+    per_request = record.tokens_saved // 2
+    assert record.cost_usd == pytest.approx(2 * per_request * PRICE.input / 1e6)
+
+
+# -- compaction value (K8) -----------------------------------------------------------------------
+
+
+async def test_compaction_is_valued_at_the_input_price_of_each_call(store: InMemoryStore) -> None:
+    prices = {
+        **PRICES,
+        "fake-claude": ModelPrice(input=4.0, output=20.0, cache_read=0.4, cache_write=5.0),
+        "fake-chatgpt": ModelPrice(input=1.0, output=8.0, cache_read=0.1, cache_write=0.0),
+    }
+    fakes: dict[AgentName, FakeProvider] = {
+        "claude": CachingFake("claude", chunk_delay=0),
+        "chatgpt": CachingFake("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(fakes, store, EngineConfig(keep_recent_messages=2), retry_delay=0)
+    conversation_id = await seed_conversation(engine)
+    request = TurnRequest("d", "I ara?", "duel", conversation_id=conversation_id, options=NO_CACHE)
+    done = completed(
+        await collect(engine.run(request, compaction_threshold_tokens=100, price_overrides=prices))
+    )
+    (record,) = [s for s in store.savings if s.turn_id == done.turn_id]
+    per_request = record.tokens_saved // 2
+    assert record.kind == "compaction" and per_request > 0
+    # Each call's uncached input price (before: the turn's cost per billed token, which
+    # the 20 000 cache-write tokens of every call pulled far from both).
+    expected = per_request * (4.0 + 1.0) / 1e6
+    assert record.cost_usd == pytest.approx(expected)
+    assert done.savings.cost_usd == pytest.approx(expected)
 
 
 # -- context requests (ACC-5) ------------------------------------------------------------------

@@ -151,7 +151,10 @@ class Savings:
     early_stop: int = 0
     unchanged: int = 0
     cost_usd: float | None = None
-    """Estimated value of the saved tokens at this turn's average price per token."""
+    """Estimated value of the saved tokens: kept answers at the output price of their
+    model, compaction at the input price of the calls that carried the context, skipped
+    rounds at the average cost of this turn's revisions, a cache hit at the replayed
+    turn's cost. None when no saved kind can be priced."""
 
     @property
     def total(self) -> int:

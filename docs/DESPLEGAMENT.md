@@ -218,10 +218,12 @@ git pull
 docker compose pull caddy
 docker compose build --pull
 docker compose up -d
+docker compose restart caddy
 docker image prune -f
 ```
 
 - `--pull` baixa les imatges base més recents (Debian, Python, Node) amb els pegats de seguretat del mes; `docker compose pull caddy` fa el mateix amb la de Caddy. Sense això, Docker reaprofita les còpies antigues que ja té.
+- `docker compose restart caddy` aplica els canvis de `deploy/Caddyfile` que porti `git pull`: Docker no els veu sol i Caddy continuaria amb la configuració antiga.
 - Fes-ho quan no hi hagi cap resposta en curs: l'aplicació es reinicia (uns segons) i els torns que s'estiguin generant es tallen. La interfície es reconnecta sola.
 - Les versions de les CLI i de Caddy estan fixades al projecte i s'actualitzen amb `git pull`. L'aplicació parla amb cada CLI d'una manera molt concreta, sobretot amb Codex, i una versió nova pot trencar-ho.
 - Si vols provar una altra versió abans que s'actualitzi el projecte, defineix `CLAUDE_CLI_VERSION` o `CODEX_CLI_VERSION` a `.env` i torna a executar `docker compose up -d --build`. Comprova-ho amb `agentic-os doctor`. Per tornar enrere, esborra la línia i reconstrueix.
@@ -237,10 +239,11 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 
 **Un sol cop, en actualitzar una instal·lació anterior a aquests canvis** (setembre del 2026; si no calia, no fa cap mal):
 
-- Esborra el registre antic de Codex, que guardava el text sencer de cada crida a ChatGPT (ara aquests fitxers viuen en memòria, a `/run/codex-state`, i s'esborren a cada reinici): `docker compose exec app sh -c 'rm -f /home/app/.codex/logs_2.sqlite*'`. Les còpies de seguretat antigues també el contenen: esborra-les o guarda-les xifrades.
+- Esborra el registre antic de Codex, que guardava el text sencer de cada crida a ChatGPT (ara aquests fitxers viuen en memòria, a `/run/codex-state`, i s'esborren cada vegada que l'aplicació engega Codex): `docker compose exec app sh -c 'rm -f /home/app/.codex/logs_2.sqlite*'`. Les còpies de seguretat antigues també el contenen: esborra-les o guarda-les xifrades.
 - Si tens còpies a `/opt/claudegpt/backups`, descarrega-les i esborra-les del servidor (`rm -rf /opt/claudegpt/backups`): ara es desen fora del repositori (vegeu [Còpies de seguretat](#còpies-de-seguretat)).
 - Torna a executar `bash deploy/harden.sh`: treu el límit de 3 intents de l'SSH, que podia deixar fora qui té diverses claus a l'agent.
 - Caddy ja no corre com a root: el servei `caddy-init` passa els seus volums al nou usuari tot sol.
+- Si has fet alguna còpia amb les ordres antigues, comprova-la: si `tar` fallava, en quedava un fitxer incomplet que semblava bo. Al teu ordinador, `age -d -i claudegpt-backup.key claudegpt-AAAA-MM-DD.tar.gz.age | tar tzf - > /dev/null && echo Correcta` (sense xifrar, `tar tzf claudegpt-AAAA-MM-DD.tar.gz > /dev/null && echo Correcta`).
 
 ## Còpies de seguretat
 
@@ -253,52 +256,63 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 
 A més, **desa el fitxer `.env`**: té el token de Claude i les claus d'API.
 
-> Les còpies contenen secrets (el secret TOTP, els tokens de les subscripcions i les claus d'API). Es desen a `/var/backups/claudegpt`, un directori que només pot llegir root i que és **fora del repositori** (així un `git add` no les pot pujar mai). Xifra-les, descarrega-les i esborra-les del servidor.
+> Les còpies contenen secrets (el secret TOTP, els tokens de les subscripcions i les claus d'API). Es desen a `/var/backups/claudegpt`, un directori amb permisos 700 (només el teu usuari i root) que és **fora del repositori** (així un `git add` no les pot pujar mai). Xifra-les, descarrega-les i esborra-les del servidor.
 
 **Xifratge (recomanat, un sol cop).** Al teu ordinador, instal·la [age](https://github.com/FiloSottile/age) i crea una clau: `age-keygen -o claudegpt-backup.key`. Mostra la clau pública (`age1...`): és la que faràs servir al servidor. La clau privada (el fitxer) no surt mai del teu ordinador; guarda'n una còpia en un lloc segur, perquè sense ella no podràs restaurar. Al servidor: `apt-get install -y age`.
 
-**Fer una còpia** (l'aplicació s'atura uns segons perquè la base de dades quedi coherent):
+**Fer una còpia** al servidor, com a root (`sudo -i`, com al pas 2). L'aplicació s'atura uns segons perquè la base de dades quedi coherent:
 
 ```bash
 cd /opt/claudegpt
 AGE_KEY=age1...        # la teva clau pública
+DEST="/var/backups/claudegpt/claudegpt-$(date +%F).tar.gz.age"
 umask 077
+set -o pipefail        # si falla qualsevol pas de la còpia, falla tota
 install -d -m 700 /var/backups/claudegpt
 docker compose stop app
-docker run --rm -v claudegpt_app_data:/data:ro -v claudegpt_app_home:/home/app:ro \
-  claudegpt-os:latest tar czf - -C / data home/app \
-  | age -r "$AGE_KEY" > "/var/backups/claudegpt/claudegpt-$(date +%F).tar.gz.age"
+if docker run --rm -v claudegpt_app_data:/data:ro -v claudegpt_app_home:/home/app:ro \
+     claudegpt-os:latest tar czf - -C / data home/app \
+   | age -r "$AGE_KEY" > "$DEST"
+then echo "Còpia feta: $DEST"
+else rm -f "$DEST"; echo "ERROR: la còpia ha fallat i s'ha esborrat; mira el missatge de sobre." >&2
+fi
 docker compose start app
 age -r "$AGE_KEY" -o "/var/backups/claudegpt/env-$(date +%F).age" .env
+chown -R "${SUDO_USER:-root}" /var/backups/claudegpt   # perquè la puguis descarregar
 ```
 
-Sense xifrar (només si no pots instal·lar age): treu `| age -r "$AGE_KEY"` i les extensions `.age`, i a l'última línia fes `cp .env "/var/backups/claudegpt/env-$(date +%F)"`.
+- Si `tar` o `age` fallen (per exemple, perquè Docker no troba la imatge o la clau està mal copiada), no queda cap fitxer a mitges que sembli una còpia bona: surt `ERROR` i l'aplicació torna a arrencar igualment.
+- L'última línia dona els fitxers a l'usuari amb què has entrat al VPS; el directori continua sent privat.
+- Sense xifrar (només si no pots instal·lar age): treu `| age -r "$AGE_KEY"` i l'extensió `.age` de `DEST`, i canvia la penúltima línia per `cp .env "/var/backups/claudegpt/env-$(date +%F)"`.
 
-Després, descarrega-la al teu ordinador (des de l'ordinador, no des del VPS) i, quan hagis comprovat que la tens, esborra-la del servidor:
+Després, descarrega-la al teu ordinador (des de l'ordinador, no des del VPS) i, quan hagis comprovat que la tens, esborra-la del servidor. `usuari` és el mateix usuari amb què entres al VPS al pas 2 (`root` si hi entres directament com a root):
 
 ```bash
-scp -r root@IP-DEL-VPS:/var/backups/claudegpt ./claudegpt-backups
-ssh root@IP-DEL-VPS 'rm -f /var/backups/claudegpt/*'
+scp -r usuari@IP-DEL-VPS:/var/backups/claudegpt ./claudegpt-backups
+ssh usuari@IP-DEL-VPS 'rm -f /var/backups/claudegpt/*'
 ```
-
-> Si entres amb un usuari que no és root, abans de cada descàrrega dona-li els fitxers al VPS (el directori continua sent privat): `chown -R usuari /var/backups/claudegpt`. Després fes servir `usuari@IP-DEL-VPS` a les dues ordres.
 
 **Restaurar** (al mateix servidor o a un de nou amb els passos 1–4 fets). Substitueix **tot** el contingut actual dels dos volums pel de la còpia.
 
-1. Al teu ordinador, si la còpia està xifrada, desxifra-la: `age -d -i claudegpt-backup.key -o claudegpt-AAAA-MM-DD.tar.gz claudegpt-AAAA-MM-DD.tar.gz.age` (i igual amb `env-AAAA-MM-DD.age`).
-2. Puja-la al directori de root, que només pot llegir root: `scp claudegpt-AAAA-MM-DD.tar.gz env-AAAA-MM-DD root@IP-DEL-VPS:/root/`. (Amb un altre usuari, puja-la al seu directori i fes servir aquella ruta a les ordres següents.)
-3. Al servidor:
+1. Al teu ordinador, si la còpia està xifrada, desxifra-la: `age -d -i claudegpt-backup.key -o claudegpt-AAAA-MM-DD.tar.gz claudegpt-AAAA-MM-DD.tar.gz.age` (i igual amb `env-AAAA-MM-DD.age`). Si `age` dona un error, la còpia està incompleta o no és teva: no la facis servir.
+2. Puja-la al teu directori del servidor: `scp claudegpt-AAAA-MM-DD.tar.gz env-AAAA-MM-DD usuari@IP-DEL-VPS:`
+3. Al servidor, com a root (`sudo -i`). Primer es llegeix tota la còpia: si està malmesa (per exemple, una pujada interrompuda), no s'esborra res.
 
 ```bash
 cd /opt/claudegpt
-docker compose stop app
-docker run --rm -i -v claudegpt_app_data:/data -v claudegpt_app_home:/home/app \
-  claudegpt-os:latest sh -c 'find /data /home/app -mindepth 1 -delete && tar xzf - -C /' \
-  < /root/claudegpt-AAAA-MM-DD.tar.gz
-docker compose start app
-install -m 600 /root/env-AAAA-MM-DD .env
-docker compose up -d
-rm -f /root/claudegpt-AAAA-MM-DD.tar.gz /root/env-AAAA-MM-DD
+B=/home/usuari         # on l'has pujada (/root si entres com a root)
+if tar tzf "$B/claudegpt-AAAA-MM-DD.tar.gz" > /dev/null; then
+  docker compose stop app
+  docker run --rm -i -v claudegpt_app_data:/data -v claudegpt_app_home:/home/app \
+    claudegpt-os:latest sh -c 'find /data /home/app -mindepth 1 -delete && tar xzf - -C /' \
+    < "$B/claudegpt-AAAA-MM-DD.tar.gz"
+  docker compose start app
+  install -m 600 "$B/env-AAAA-MM-DD" .env
+  docker compose up -d
+  rm -f "$B/claudegpt-AAAA-MM-DD.tar.gz" "$B/env-AAAA-MM-DD"
+else
+  echo "ERROR: la còpia està malmesa; no s'ha tocat res." >&2
+fi
 ```
 
 ## Resolució de problemes
@@ -333,8 +347,8 @@ docker compose logs --tail 100 caddy
 
 **No puc iniciar sessió**
 - «Codi incorrecte»: l'hora del mòbil o del servidor no és correcta. Al servidor: `timedatectl` (ha de dir `System clock synchronized: yes`).
-- «Massa intents»: el bloqueig creix amb cada error. Un navegador on ja havies entrat abans (durant l'últim any) només es bloqueja pels seus propis errors, de manera que ningú no te'n pot deixar fora des d'Internet. Des d'un navegador o dispositiu nou, espera el temps que indica o aixeca tots els bloquejos des del servidor: `docker compose exec app agentic-os reset-throttle`.
-- Si «Massa intents» torna a sortir sense que t'hagis equivocat, algú està provant contrasenyes contra la teva web. La contrasenya i el codi TOTP continuen protegint-te, però per tallar-ho de soca-rel limita l'accés a les teves IP amb `ALLOWED_IPS` a `.env` (i `docker compose up -d`) o fes servir una VPN.
+- «Massa intents»: el bloqueig creix amb cada error. Un navegador on ja havies entrat (en els últims 12 mesos i sense esborrar-ne les cookies) només es bloqueja pels seus propis errors: encara que algú provi contrasenyes des d'Internet, hi continues podent entrar. Des d'un navegador o dispositiu nou, espera el temps que indica o aixeca tots els bloquejos des del servidor: `docker compose exec app agentic-os reset-throttle`.
+- Si «Massa intents» torna a sortir sense que t'hagis equivocat, algú està provant contrasenyes contra la teva web. La contrasenya i el codi TOTP continuen protegint-te i els navegadors on ja havies entrat no es bloquegen. Un dispositiu nou, en canvi, es tornarà a bloquejar mentre duri l'atac, encara que facis `reset-throttle` (l'atacant ho torna a activar amb pocs intents): per entrar-hi, limita l'accés a les teves IP amb `ALLOWED_IPS` a `.env` (i `docker compose up -d`) o fes servir una VPN. Això també talla l'atac de soca-rel.
 - Contrasenya oblidada o mòbil perdut: `docker compose exec -it app agentic-os init`.
 
 **Claude diu que la sessió ha caducat o no està connectat**
@@ -344,7 +358,7 @@ docker compose logs --tail 100 caddy
 
 **ChatGPT diu que no està connectat**
 - `docker compose exec app codex login status`; si cal, torna a fer el pas 7 i `docker compose restart app`.
-- Si diu «No s'ha pogut iniciar Codex» i als registres de l'aplicació surt `failed to initialize sqlite state runtime`, s'ha omplert l'espai en memòria dels registres de Codex (`/run/codex-state`, 64 MB). `docker compose restart app` el buida.
+- Els registres de Codex viuen en un espai en memòria de 64 MB (`/run/codex-state`) que l'aplicació buida cada vegada que engega Codex, de manera que mai no li impedeixen tornar a arrencar. Si, després de moltes crides sense reiniciar l'aplicació, ChatGPT comença a fallar i als registres surten errors de SQLite o d'espai ple, `docker compose restart app` el buida del tot.
 
 **Límits d'ús de la subscripció**
 - Les subscripcions tenen finestres d'ús (per exemple, de 5 hores i de 7 dies). El tauler i `agentic-os doctor` mostren el percentatge fet servir i quan es renova.
@@ -359,18 +373,18 @@ docker compose logs --tail 100 caddy
 **Què queda exposat a Internet**
 - Només Caddy (80 i 443) i l'SSH. L'aplicació no té cap port publicat i viu en una xarxa interna.
 - Caddy fa HTTPS amb HSTS, redirigeix HTTP a HTTPS i tanca les connexions que no són per al teu domini. Els registres d'accés no guarden cookies.
-- Caddy llegeix sencer el cos de les peticions (màxim 1 MiB, en 30 segons) abans de passar-lo a l'aplicació: les pujades lentes o que es queden a mitges no ocupen connexions de l'aplicació.
+- El cos de les peticions té un màxim d'1 MiB. Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit.
 - Docker i ufw: els ports que publica Docker no passen per les regles d'ufw. Aquí només es publiquen el 80 i el 443, que han de ser públics. No afegeixis `ports:` a l'aplicació; per depurar, fes servir `127.0.0.1:PORT:PORT` i un túnel SSH.
 
 **Inici de sessió i sessions**
 - Contrasenya (argon2id) **i** codi TOTP, que no es pot reutilitzar. Bloqueig exponencial després d'intents fallits, que es manté encara que reiniciïs (`agentic-os reset-throttle` l'aixeca).
-- Cada navegador on has entrat rep una segona cookie, de dispositiu conegut (un any; no s'esborra en tancar la sessió). Un dispositiu conegut només es bloqueja pels seus propis errors: els intents d'altres des d'Internet no et poden deixar fora d'un navegador que ja fas servir. `agentic-os reset-sessions` i `agentic-os init` obliden tots els dispositius.
+- Cada navegador on has entrat rep una segona cookie, de dispositiu conegut (un any; no s'esborra en tancar la sessió). Un dispositiu conegut només es bloqueja pels seus propis errors: els intents d'altres des d'Internet no et poden deixar fora d'un navegador que ja fas servir. `agentic-os reset-sessions` i `agentic-os init` obliden tots els dispositius. Durant un atac sostingut, un dispositiu nou només pot entrar si limites l'accés amb `ALLOWED_IPS` o una VPN (vegeu [Resolució de problemes](#resolució-de-problemes)).
 - Sessions desades al servidor (només se'n guarda el hash) amb una cookie `__Host-` HttpOnly, Secure i SameSite=Strict. Caduquen després de 72 hores sense activitat i als 30 dies (`AOS_SESSION_IDLE_HOURS`, `AOS_SESSION_MAX_DAYS`).
 
 **Secrets**
 - `.env` (permisos 600) i el volum `app_home` contenen credencials que donen accés a les teves subscripcions. Qui sigui root al VPS les pot fer servir: no comparteixis l'accés al servidor.
-- Les CLI s'executen en un directori buit i amb una llista tancada de variables d'entorn, sense accés a cap *shell* ni als secrets de l'aplicació. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina que executa codi dins del mateix procés (en un entorn aïllat V8, sense accés als fitxers ni a la xarxa) i eines per obrir subagents: l'aplicació limita els subagents a un per crida i interromp qualsevol feina que no pertanyi a una crida en curs. Com a protecció addicional, l'aplicació té un límit de CPU (`APP_CPUS`).
-- Codex desa el text de cada crida en els seus registres: viuen en memòria (`/run/codex-state`), fora dels volums i de les còpies de seguretat, i s'esborren a cada reinici.
+- Les CLI s'executen en un directori buit i amb una llista tancada de variables d'entorn, sense accés a cap *shell* ni als secrets de l'aplicació. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina que executa codi en un procés fill de Codex (`codex-code-mode`, un entorn aïllat V8 sense accés als fitxers ni a la xarxa, que s'atura amb Codex) i eines per obrir subagents. L'aplicació només deixa córrer un subagent alhora (`agents.max_threads=1`), interromp de seguida qualsevol feina que no pertanyi a una crida en curs, atura la crida si ChatGPT hi fa servir subagents més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun (els subagents aturats no alliberen la memòria). Com a protecció addicional, l'aplicació té un límit de CPU (`APP_CPUS`).
+- Codex desa el text de cada crida en els seus registres: viuen en memòria (`/run/codex-state`), fora dels volums i de les còpies de seguretat, i s'esborren cada vegada que l'aplicació engega Codex (i en reiniciar-la).
 
 **Reforços opcionals**
 - `ALLOWED_IPS` a `.env`: només aquestes IP podran obrir la web.

@@ -303,7 +303,7 @@ main() {
   docker_engine
   say "Fet"
   info "Comprova-ho: ufw status verbose · docker compose version"
-  info "Següent pas: docs/DESPLEGAMENT.md, apartat «Instal·lar l'aplicació»."
+  info "Següent pas: docs/DESPLEGAMENT.md, apartat «3. Configurar»."
 }
 
 main "$@"

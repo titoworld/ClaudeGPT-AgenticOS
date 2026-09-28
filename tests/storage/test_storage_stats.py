@@ -435,6 +435,85 @@ async def test_savings_value_comes_from_the_turns_final_messages(
     assert (await store.stats(30, NOW))["savings"]["cost_usd"] == 5.005
 
 
+async def test_savings_value_is_kept_with_the_savings_history(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    """The value of each saving is stored with it (like its tokens): deleting the
+    conversation no longer drops it, and the final messages' meta, which carries the
+    same total, is not counted twice."""
+    conversation_id = await store.create_conversation("Estalvi")
+    clock.now = at(27, 9)
+    question = await store.add_message(
+        NewMessage(conversation_id, "question", "Q", final=True, meta={"mode": "solo"})
+    )
+    savings: dict[str, JsonValue] = {"compaction": 3000, "total": 3000, "cost_usd": 0.012}
+    await store.add_message(
+        NewMessage(
+            conversation_id,
+            "answer",
+            "A",
+            turn_id=question,
+            agent="claude",
+            final=True,
+            meta={"savings": savings},
+        )
+    )
+    records: tuple[tuple[SavingKind, int, float], ...] = (
+        ("compaction", 3000, 0.01),
+        ("unchanged", 50, 0.002),
+    )
+    for kind, tokens, cost in records:
+        await store.record_saving(
+            SavingRecord(conversation_id, question, kind, tokens, cost_usd=cost)
+        )
+    before = (await store.stats(1, NOW))["savings"]
+    assert before["cost_usd"] == 0.012
+    assert await store.delete_conversation(conversation_id)
+    after = (await store.stats(1, NOW))["savings"]
+    assert after == before
+    assert after["total"] == 3050
+
+
+async def test_savings_value_mixes_recorded_values_and_older_turns(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    conversation_id = await store.create_conversation("Estalvi")
+    clock.now = at(27, 9)
+
+    async def older_turn(cost: float | None) -> int:
+        """A turn stored before savings rows had a value: only the meta has it."""
+        question = await store.add_message(
+            NewMessage(conversation_id, "question", "Q", final=True, meta={"mode": "solo"})
+        )
+        savings: dict[str, JsonValue] = {"total": 10, "cost_usd": cost}
+        await store.add_message(
+            NewMessage(
+                conversation_id,
+                "answer",
+                "A",
+                turn_id=question,
+                agent="claude",
+                final=True,
+                meta={"savings": savings},
+            )
+        )
+        await store.record_saving(SavingRecord(conversation_id, question, "unchanged", 10))
+        return question
+
+    await older_turn(0.25)
+    await store.record_saving(SavingRecord(None, None, "cache", 100, cost_usd=0.5))
+    await store.record_saving(SavingRecord(None, None, "early_stop", 100))  # unpriced
+    await store.record_saving(SavingRecord(None, None, "compaction", 1, cost_usd=float("nan")))
+    assert (await store.stats(1, NOW))["savings"]["cost_usd"] == 0.75
+
+
+async def test_unpriced_savings_have_no_value(store: SqliteStore) -> None:
+    await store.record_saving(SavingRecord(None, None, "compaction", 100))
+    savings = (await store.stats(1, NOW))["savings"]
+    assert savings["compaction"] == 100
+    assert savings["cost_usd"] is None
+
+
 def test_month_bounds() -> None:
     assert month_bounds(datetime(2026, 12, 31, 23, 59, tzinfo=UTC)) == (
         "2026-12",

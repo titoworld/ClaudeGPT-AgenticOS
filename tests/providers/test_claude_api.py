@@ -598,6 +598,89 @@ async def test_iterations_without_a_declined_attempt_add_nothing(
     assert result.usage == Usage(input_tokens=12, output_tokens=25)
 
 
+def fallback_without_category(index: int, source: str, target: str, trigger: Any) -> list[Event]:
+    """A fallback block whose ``trigger`` is missing (``...``), null or has no category."""
+    block: dict[str, Any] = {"type": "fallback", "from": {"model": source}, "to": {"model": target}}
+    if trigger is not ...:
+        block["trigger"] = trigger
+    return [
+        (
+            "content_block_start",
+            {"type": "content_block_start", "index": index, "content_block": block},
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": index}),
+    ]
+
+
+@pytest.mark.parametrize("trigger", [..., None, {"type": "refusal"}])
+@pytest.mark.parametrize(("declined_output", "billed"), [(0, False), (300, True)])
+async def test_a_fallback_block_without_a_category_still_returns_the_answer(
+    tmp_path: Path, trigger: Any, declined_output: int, billed: bool
+) -> None:
+    # The documented pre-output example has no ``trigger``: before, reading its category
+    # raised AttributeError after the whole answer had streamed.
+    iterations = [
+        iteration("message", "claude-fable-5", 535, declined_output),
+        iteration("fallback_message", "claude-opus-4-8", 412, 264),
+    ]
+    start = message_start("claude-opus-4-8", cache_read=0, cache_write=0)
+    usage = {"input_tokens": 412, "output_tokens": 264, "iterations": iterations}
+    body = sse(
+        [
+            start,
+            *fallback_without_category(0, "claude-fable-5", "claude-opus-4-8", trigger),
+            *text_block(1, ["Hola!"]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    deltas, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert "".join(deltas) == result.text == "Hola!"
+    served = Usage(input_tokens=412, output_tokens=264)
+    declined = Usage(input_tokens=535, output_tokens=declined_output)
+    # Without a category only a decline after some output is billed.
+    assert result.usage == (served + declined if billed else served)
+
+
+async def test_iterations_of_an_unknown_type_are_not_declined_hops(tmp_path: Path) -> None:
+    # The SDK builds an entry of a type it does not know as a ``message`` entry class:
+    # before, it was counted as a declined hop and took the first fallback's category.
+    iterations = [
+        iteration("advisor_future", "claude-haiku-4-5", 300, 0),
+        iteration("message", "claude-opus-5", 535, 0),
+        iteration("fallback_message", "claude-opus-4-8", 412, 264),
+    ]
+    start = message_start("claude-opus-4-8", cache_read=0, cache_write=0)
+    usage = {"input_tokens": 412, "output_tokens": 264, "iterations": iterations}
+    body = sse(
+        [
+            start,
+            *fallback_block(0, "claude-opus-5", "claude-opus-4-8", "bio"),
+            *text_block(1, ["Hola!"]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
+    # The bio decline (billed before any output) is counted, the unknown entry is not.
+    assert result.usage == Usage(input_tokens=412 + 535, output_tokens=264)
+
+
+async def test_a_refusal_without_stop_details_carries_its_streamed_usage(
+    tmp_path: Path,
+) -> None:
+    start = message_start("claude-opus-5", cache_read=0, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 7000
+    body = sse(
+        [
+            start,
+            *text_block(0, ["Comença"]),
+            *final_delta("refusal", {"output_tokens": 120}),
+        ]
+    )
+    error = await run_error(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert isinstance(error, RefusalError) and "categoria" not in error.message
+    assert error.usage == Usage(input_tokens=7000, output_tokens=120)
+
+
 @pytest.mark.parametrize(
     ("status", "kind", "retryable"),
     [

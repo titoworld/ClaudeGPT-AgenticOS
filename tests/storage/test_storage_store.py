@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -400,6 +401,31 @@ async def test_invalid_stored_runtime_settings_fall_back_to_defaults(store: Sqli
             "INSERT INTO settings (key, value) VALUES ('runtime', '{\"default_mode\": \"x\"}')"
         )
     assert await store.get_runtime_settings() == RuntimeSettings()
+
+
+async def test_stored_prices_refused_by_the_new_rules_are_dropped_not_the_settings(
+    store: SqliteStore,
+) -> None:
+    # Saved by an older version, which accepted a key naming no model and two keys of
+    # one model (of which only the last one was applied).
+    price = {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 1.25}
+    applied = {"input": 3.0, "output": 4.0, "cache_read": 0.3, "cache_write": 3.75}
+    old = {
+        "default_mode": "solo",
+        "budgets_eur": {"claude": 30.0, "chatgpt": None},
+        "prices": {"Claude-Opus-5": price, "claude-opus-5": applied, "openai/": price, "m": price},
+    }
+    async with store._db.transaction() as tx:
+        await tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('runtime', ?)", (json.dumps(old),)
+        )
+    settings = await store.get_runtime_settings()
+    assert settings.default_mode == "solo"
+    assert settings.budgets_eur["claude"] == 30.0
+    assert settings.prices == {
+        "claude-opus-5": ModelPrice.from_wire(applied),
+        "m": ModelPrice.from_wire(price),
+    }
 
 
 async def test_models_prices_and_money_settings_roundtrip(store: SqliteStore) -> None:

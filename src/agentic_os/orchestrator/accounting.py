@@ -2,29 +2,60 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 from agentic_os.domain import Purpose, SavingKind, Usage
 from agentic_os.orchestrator.events import Savings
 from agentic_os.orchestrator.store import SavingRecord
 from agentic_os.orchestrator.tokens import estimate_tokens
+from agentic_os.pricing import ModelPrice, estimate_cost_usd
 
 
-def _billed_tokens(usage: Usage) -> int:
-    """Every token a call is billed for: input, output, cache reads and cache writes
-    (``usage.cost_usd`` prices all four)."""
-    return usage.total_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+def is_billed(usage: Usage) -> bool:
+    """Whether a call reports any billed token (input, output, cache reads or writes)."""
+    return usage.total_tokens + usage.cache_read_tokens + usage.cache_write_tokens > 0
+
+
+def failed_call_usage(
+    error: BaseException | None,
+    fallback_model: str,
+    price_overrides: Mapping[str, ModelPrice] | None = None,
+) -> tuple[str, Usage]:
+    """Model and priced usage of a failed call.
+
+    A provider error may say what the call billed (a Claude API refusal carries
+    ``usage`` and ``model``, see ``RefusalError``): those tokens are priced with the
+    turn's prices so the failed call keeps its cost. Otherwise nothing was billed and
+    the usage is empty (``fallback_model`` is the model the call asked for)."""
+    model = getattr(error, "model", None)
+    if not isinstance(model, str) or not model:
+        model = fallback_model
+    usage = getattr(error, "usage", None)
+    if not isinstance(usage, Usage) or not is_billed(usage):
+        return model, Usage()
+    return model, replace(usage, cost_usd=estimate_cost_usd(model, usage, price_overrides))
 
 
 class TurnAccounting:
-    """Accumulates the usage of a turn and the tokens its savings avoided."""
+    """Accumulates the usage of a turn and the tokens its savings avoided.
+
+    Each kind of saving is valued at the price of what it avoided (see :meth:`_values`):
+    a kept answer at the output price of the model that kept it, the compacted context
+    at the uncached input price of the models whose calls carried it, skipped rounds at
+    the average cost of the turn's priced revision calls and a cache hit at what the
+    replayed turn cost. A kind is None when no price is known for it.
+    """
 
     def __init__(self) -> None:
         self.usage = Usage()
         """Every billed model call of the turn: the messages' calls, the compaction
-        summary and calls whose reply was unusable (empty)."""
+        summary and calls that stored no message (failed, refused or empty)."""
         self.turn_usage = Usage()
         """Only the calls that produce the turn's messages (what a cache hit replays)."""
+        self.unstored = Usage()
+        """Billed calls of the turn that stored no message: failed, refused or empty
+        replies (not the compaction summary, which travels with the question)."""
         self.cache = 0
         self.unchanged = 0
         self.early_stop = 0
@@ -35,30 +66,46 @@ class TurnAccounting:
         self.unchanged_count = 0
         self.cache_cost: float | None = None
         """Value of the turn a cache hit replays (its cost at current prices), if known."""
+        self._priced = False
+        """Whether any call of the turn has a known price."""
         self._revision_tokens = 0
         self._revision_calls = 0
         self._revision_cost = 0.0
         self._revision_priced_calls = 0
         """Cost and number of the revision calls with a known price."""
         self._early_stop_cost: float | None = None
-        """Value of the skipped rounds (their revision pairs at this turn's average cost)."""
-        self._priced_cost = 0.0
-        self._priced_tokens = 0
-        """Cost and billed tokens of the calls with a known price (the turn's average
-        price per billed token)."""
+        """Value of the skipped rounds (their revision pairs at the average cost of the
+        priced revision calls)."""
+        self._unchanged_cost = 0.0
+        self._unchanged_priced_tokens = 0
+        """Value and tokens of the kept answers whose model has a known price."""
+        self._context_input_price = 0.0
+        self._context_priced_calls = 0
+        """Sum of the uncached input prices (USD/MTok) of the priced calls that carried
+        the context, and how many they are."""
+
+    def _see(self, usage: Usage) -> None:
+        if usage.cost_usd is not None:
+            self._priced = True
 
     def add_spent(self, usage: Usage) -> None:
-        """A billed call that produced no message of the turn (the compaction summary,
-        or a reply that came back empty): it counts in the turn's usage only."""
+        """The compaction summary: billed, stored on no message of its own (its usage
+        travels with the question), so it counts in the turn's usage only."""
         self.usage += usage
+        self._see(usage)
+
+    def add_unstored(self, usage: Usage) -> None:
+        """A billed call that stored no message (failed, refused or empty): it counts in
+        the turn's usage and in :attr:`unstored`, never in the savings."""
+        self.usage += usage
+        self.unstored += usage
+        self._see(usage)
 
     def add_call(self, usage: Usage, purpose: Purpose) -> None:
         """A successful model call that produced a message of the turn."""
         self.usage += usage
         self.turn_usage += usage
-        if usage.cost_usd is not None:
-            self._priced_cost += usage.cost_usd
-            self._priced_tokens += _billed_tokens(usage)
+        self._see(usage)
         if purpose == "revision":
             self._revision_tokens += usage.total_tokens
             self._revision_calls += 1
@@ -66,14 +113,25 @@ class TurnAccounting:
                 self._revision_cost += usage.cost_usd
                 self._revision_priced_calls += 1
 
-    def add_context_request(self) -> None:
-        """A model call that carried the compacted context (and returned a result)."""
+    def add_context_request(self, price: ModelPrice | None = None) -> None:
+        """A billed model call that carried the compacted context, with the price of the
+        model that read it (None when unknown)."""
         self.context_requests += 1
+        if price is not None:
+            self._priced = True
+            self._context_input_price += price.input
+            self._context_priced_calls += 1
 
-    def add_unchanged(self, kept_answer: str) -> None:
-        """An agent kept its answer instead of rewriting it."""
-        self.unchanged += estimate_tokens(kept_answer)
+    def add_unchanged(self, kept_answer: str, price: ModelPrice | None = None) -> None:
+        """An agent kept its answer instead of rewriting it; ``price`` is the price of
+        the model that kept it (None when unknown)."""
+        tokens = estimate_tokens(kept_answer)
+        self.unchanged += tokens
         self.unchanged_count += 1
+        if price is not None:
+            self._priced = True
+            self._unchanged_cost += tokens * price.output / 1_000_000
+            self._unchanged_priced_tokens += tokens
 
     def add_early_stop(self, rounds_skipped: int) -> None:
         """Rounds skipped by consensus, counted as the average revision pair of this turn
@@ -94,32 +152,58 @@ class TurnAccounting:
     def _values(self) -> dict[SavingKind, float | None]:
         """Value in USD of each kind of saving (None when it cannot be priced).
 
-        A cache hit is worth what the replayed turn cost and skipped rounds what their
-        revision calls cost; compacted context and kept answers are valued at this
-        turn's average price per billed token (cache reads and writes included, as in
-        the cost it divides)."""
-        rate = self._priced_cost / self._priced_tokens if self._priced_tokens else None
-        early_stop = self._early_stop_cost
-        if early_stop is None and rate is not None:
-            early_stop = self.early_stop * rate  # no priced revision: the average price
-        return {
-            "cache": self.cache_cost,
-            "compaction": None if rate is None else self.compaction * rate,
-            "early_stop": early_stop,
-            "unchanged": None if rate is None else self.unchanged * rate,
+        - ``unchanged``: the kept tokens at the output price of the model that kept each
+          answer (the output it did not write);
+        - ``compaction``: the removed tokens at the uncached input price of the models
+          whose calls carried the compacted context, weighted by calls;
+        - ``early_stop``: the skipped revision pairs at the average cost of the priced
+          revision calls;
+        - ``cache``: what the replayed turn cost, at current prices.
+
+        Tokens of a kind whose calls are only partly priced are valued at the average
+        rate of the priced ones. A kind with nothing saved is worth 0 once any call of
+        the turn has a price (None before)."""
+        unchanged = (
+            self._unchanged_cost * self.unchanged / self._unchanged_priced_tokens
+            if self._unchanged_priced_tokens
+            else None
+        )
+        compaction = (
+            self.compaction * self._context_input_price / self._context_priced_calls / 1_000_000
+            if self._context_priced_calls
+            else None
+        )
+        values: dict[SavingKind, tuple[int, float | None]] = {
+            "cache": (self.cache, self.cache_cost),
+            "compaction": (self.compaction, compaction),
+            "early_stop": (self.early_stop, self._early_stop_cost),
+            "unchanged": (self.unchanged, unchanged),
         }
+        nothing = 0.0 if self._priced else None
+        return {kind: value if tokens > 0 else nothing for kind, (tokens, value) in values.items()}
 
     def savings(self) -> Savings:
-        """Tokens saved so far and their value (the sum of :meth:`_values`).
-        ``cost_usd`` is None while no call of the turn has a known price."""
+        """Tokens saved so far and their value (the sum of :meth:`_values` that are
+        known). With nothing saved it is 0 once the turn has a price; otherwise it is None
+        while no kind with saved tokens has a known value."""
         saved = Savings(
             cache=self.cache,
             compaction=self.compaction,
             early_stop=self.early_stop,
             unchanged=self.unchanged,
         )
-        known = [value for value in self._values().values() if value is not None]
-        if not known:
+        tokens: dict[SavingKind, int] = {
+            "cache": self.cache,
+            "compaction": self.compaction,
+            "early_stop": self.early_stop,
+            "unchanged": self.unchanged,
+        }
+        values = self._values()
+        saved_kinds = [kind for kind, count in tokens.items() if count > 0]
+        if not saved_kinds:  # nothing saved: worth 0 once the turn has a price
+            return replace(saved, cost_usd=0.0) if self._priced else saved
+        known = [value for kind in saved_kinds if (value := values[kind]) is not None]
+        if not known:  # no saved kind can be priced: unknown, not 0 €
             return saved
         return replace(saved, cost_usd=sum(known))
 

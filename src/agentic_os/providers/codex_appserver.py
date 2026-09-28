@@ -15,8 +15,15 @@ input...) is declined so a call can never hang waiting for a human.
 them whatever the config says), so a prompt injection can make ChatGPT spawn a
 sub-agent: a thread no call listens to, which would keep spending the owner's plan
 after the call ends. ``agents.max_threads=1`` caps them and any turn on a thread that
-no call owns is interrupted as soon as it shows up. Codex's SQLite state, whose log
-records every prompt, lives in a private directory outside ``CODEX_HOME``.
+no call owns is interrupted as soon as it shows up. Interrupting a sub-agent frees its
+slot, so a call counts the sub-agent runs (spawns and follow-ups) its turn asks for and
+is stopped when there are more than :data:`MAX_SUB_AGENT_RUNS`. The sub-agents' threads
+are unsubscribed (0.157.1 cannot archive or delete ephemeral threads) and a process that
+ran any is replaced as soon as no call uses it: their memory is never given back.
+
+Codex's SQLite state, whose log records every prompt, lives in a private directory
+outside ``CODEX_HOME``; the log databases are deleted before every start, so prompts do
+not outlive the process and a full state tmpfs cannot prevent a restart.
 """
 
 from __future__ import annotations
@@ -112,8 +119,11 @@ CONFIG_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("history.persistence", '"none"'),
     ("analytics.enabled", "false"),
     ("skills.bundled.enabled", "false"),
-    # At most one sub-agent per call (0 is rejected): see _on_stray_activity.
+    # At most one sub-agent at a time (0 is rejected): see _on_stray_activity.
     ("agents.max_threads", "1"),
+    # Unload a thread as soon as its last subscriber leaves: by default every call's
+    # thread stayed loaded (~1.2 MB each) long after thread/unsubscribe.
+    ("thread_unload_delay_secs", "0"),
     *((f"features.{name}", "false") for name in _DISABLED_FEATURES),
 )
 """``-c key=value`` overrides (TOML values), all accepted by ``--strict-config`` in 0.157.1.
@@ -138,6 +148,15 @@ BACKOFF_MAX = 30.0
 STABLE_UPTIME = 60.0
 """A process that lived this long before dying does not escalate the respawn backoff."""
 DETAIL_MAX_CHARS = 300
+MAX_SUB_AGENT_RUNS = 3
+"""Sub-agent runs (spawns and follow-ups) one call tolerates; the next one stops it."""
+SUB_AGENT_LIMIT_MESSAGE = "ChatGPT ha intentat obrir massa subagents; s'ha aturat la resposta."
+_SUB_AGENT_RUN_KINDS = frozenset({"started", "interacted"})
+"""``subAgentActivity`` kinds that start a turn on a sub-agent's thread."""
+_COLLAB_RUN_TOOLS = frozenset({"spawnAgent", "sendInput", "resumeAgent", "followupTask"})
+"""``collabAgentToolCall`` tools (multi-agent v1) that start a turn on another thread."""
+_LOG_DATABASE_RE = re.compile(r"logs_\w+\.sqlite(?:-wal|-shm|-journal)?")
+"""Codex's log databases (``logs_2.sqlite`` and its WAL files): every prompt, at DEBUG."""
 
 LOGIN_HINT = "executa «codex login --device-auth» al servidor"
 
@@ -239,7 +258,10 @@ class _AppServerConnection:
         self._write_lock = asyncio.Lock()
         self._alive = True
         self._closing = False
+        self._terminated = asyncio.Event()
         self.started_at = time.monotonic()
+        self.tainted = False
+        """Sub-agents ran in this process: it is replaced as soon as no call uses it."""
         self.stderr_tail: deque[str] = deque(maxlen=40)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stdout_task = asyncio.create_task(self._read_stdout(), name="codex-stdout")
@@ -252,6 +274,10 @@ class _AppServerConnection:
     @property
     def pid(self) -> int:
         return self._process.pid
+
+    async def wait_terminated(self) -> None:
+        """Until the process group has been stopped (SIGKILL sent, leader reaped)."""
+        await self._terminated.wait()
 
     async def request(self, method: str, params: Any, timeout: float) -> Any:
         """Send a request and wait for its result (``CodexRpcError`` on an error answer).
@@ -437,6 +463,7 @@ class _AppServerConnection:
                     process.kill()
         if process.returncode is None:
             await process.wait()
+        self._terminated.set()
 
 
 def _kill_group(pid: int, sig: signal.Signals) -> None:
@@ -615,6 +642,45 @@ def _private_dir(path: Path) -> Path:
     return path.resolve()
 
 
+def remove_log_databases(state_dir: Path) -> list[str]:
+    """Delete Codex's log databases (``logs_*.sqlite`` and their ``-wal``/``-shm``) from
+    ``state_dir``; the ``state_*`` and other databases stay. Returns the names removed.
+
+    Only while no app-server uses the directory: they hold every prompt of the previous
+    process and, on a full tmpfs, a new process cannot even start."""
+    removed: list[str] = []
+    with os.scandir(state_dir) as entries:
+        for entry in entries:
+            if not _LOG_DATABASE_RE.fullmatch(entry.name) or entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                os.unlink(entry.path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # keep going: the other files may still free space
+                logger.warning("Could not delete the Codex log file %s: %s", entry.name, exc)
+                continue
+            removed.append(entry.name)
+    return sorted(removed)
+
+
+def sub_agent_run(item: JsonObject) -> tuple[str, list[str]] | None:
+    """``(item id, thread ids)`` when a turn item starts a turn on a sub-agent's thread
+    (a spawn or a follow-up), else None. ``item/started`` and ``item/completed`` repeat
+    the same item, so callers count distinct ids."""
+    kind = item.get("type")
+    if kind == "subAgentActivity" and item.get("kind") in _SUB_AGENT_RUN_KINDS:
+        threads = [item.get("agentThreadId")]
+    elif kind == "collabAgentToolCall" and item.get("tool") in _COLLAB_RUN_TOOLS:
+        receivers = item.get("receiverThreadIds")
+        threads = receivers if isinstance(receivers, list) else []
+    else:
+        return None
+    item_id = item.get("id")
+    ids = [thread for thread in threads if isinstance(thread, str) and thread]
+    return (item_id if isinstance(item_id, str) and item_id else ",".join(ids)), ids
+
+
 class CodexAppServerProvider:
     """ChatGPT in ``cli`` mode: ``codex app-server`` signed in with the owner's ChatGPT plan.
 
@@ -632,6 +698,9 @@ class CodexAppServerProvider:
         """Threads of this provider's calls, from thread/start until they are released."""
         self._stray_turns: set[str] = set()
         """Turns on threads no call owns (sub-agents) with an interrupt sent."""
+        self._dying: set[_AppServerConnection] = set()
+        """Processes that exited or are being stopped, until a new start has waited for
+        them (two app-servers must not share the state directory)."""
         self._conn: _AppServerConnection | None = None
         self._starting: asyncio.Task[None] | None = None
         self._closed = False
@@ -639,6 +708,8 @@ class CodexAppServerProvider:
         self._last_failure = 0.0
         self._background: set[asyncio.Task[None]] = set()
         self._active_calls = 0
+        self._releasing = 0
+        """Calls that ended but whose thread is still being released."""
         self._default_model: str | None = None
         self._windows: dict[str, JsonObject] = {}
         self._limits_at = float("-inf")
@@ -673,6 +744,8 @@ class CodexAppServerProvider:
         turn_task: asyncio.Task[Any] | None = None
         thread_id: str | None = None
         turn_done = False
+        sub_agent_runs: set[str] = set()
+        sub_agent_threads: set[str] = set()
         self._active_calls += 1
         try:
             conn = await _until(deadline, self._connection(wait_backoff=True))
@@ -734,10 +807,25 @@ class CodexAppServerProvider:
                         ttft_ms = int((time.monotonic() - started) * 1000)
                     parts.append(delta)
                     yield TextDelta(delta)
-                elif method == "item/started":
+                elif method in ("item/started", "item/completed"):
                     item = _as_dict(params.get("item"))
                     if item.get("type") == "agentMessage" and item.get("phase") == "commentary":
                         commentary.add(item.get("id"))
+                    run = sub_agent_run(item)
+                    if run is not None:
+                        conn.tainted = True
+                        sub_agent_threads.update(run[1])
+                        if run[0] not in sub_agent_runs:
+                            sub_agent_runs.add(run[0])
+                            logger.warning(
+                                "ChatGPT started sub-agent run %d of a call (thread %s)",
+                                len(sub_agent_runs),
+                                ", ".join(run[1]) or "?",
+                            )
+                        if len(sub_agent_runs) > MAX_SUB_AGENT_RUNS:
+                            # Each interrupted sub-agent frees its slot: an injected loop
+                            # would start dozens of threads in a single call.
+                            raise ProviderError(SUB_AGENT_LIMIT_MESSAGE, kind="invalid")
                 elif method == "thread/tokenUsage/updated":
                     # A fresh single-turn thread: its running total is exactly this turn,
                     # including every model request the turn made.
@@ -784,8 +872,14 @@ class CodexAppServerProvider:
             if conn is not None and thread_task is not None:
                 if thread_id is not None:
                     conn.stop_listening(thread_id)
+                self._releasing += 1
                 self._spawn(
-                    self._release_thread(conn, thread_task, None if turn_done else turn_task)
+                    self._release_thread(
+                        conn,
+                        thread_task,
+                        None if turn_done else turn_task,
+                        tuple(sorted(sub_agent_threads)),
+                    )
                 )
 
     def _requested_model(self, request: GenerationRequest) -> str | None:
@@ -812,9 +906,25 @@ class CodexAppServerProvider:
         conn: _AppServerConnection,
         thread_task: asyncio.Task[Any],
         turn_task: asyncio.Task[Any] | None,
+        sub_agents: Sequence[str] = (),
     ) -> None:
-        """Interrupt an unfinished turn and unsubscribe its thread (in the background, so
-        a cancelled call returns at once). A server that does not answer is restarted."""
+        """Interrupt an unfinished turn and unsubscribe its thread and the sub-agent
+        threads it started (in the background, so a cancelled call returns at once).
+        A server that does not answer is restarted, and so is one that ran sub-agents,
+        once no call uses it."""
+        try:
+            await self._release(conn, thread_task, turn_task, sub_agents)
+        finally:
+            self._releasing -= 1
+        self._recycle_if_idle(conn)
+
+    async def _release(
+        self,
+        conn: _AppServerConnection,
+        thread_task: asyncio.Task[Any],
+        turn_task: asyncio.Task[Any] | None,
+        sub_agents: Sequence[str],
+    ) -> None:
         thread = await _outcome(thread_task)
         if thread is None:
             return
@@ -832,8 +942,13 @@ class CodexAppServerProvider:
                             {"threadId": thread_id, "turnId": turn_id},
                             CLEANUP_TIMEOUT,
                         )
-            with contextlib.suppress(CodexRpcError):
-                await conn.request("thread/unsubscribe", {"threadId": thread_id}, CLEANUP_TIMEOUT)
+            # The call's own thread first: once its turn is over no new sub-agent run can
+            # start. Their turns were interrupted as they showed up (_on_stray_activity).
+            for released in (thread_id, *sub_agents):
+                with contextlib.suppress(CodexRpcError):
+                    await conn.request(
+                        "thread/unsubscribe", {"threadId": released}, CLEANUP_TIMEOUT
+                    )
         except TimeoutError:
             logger.warning("Codex app-server stopped answering; restarting it")
             self._retire(conn)
@@ -841,6 +956,18 @@ class CodexAppServerProvider:
             pass
         finally:
             self._threads.discard(thread_id)
+
+    def _recycle_if_idle(self, conn: _AppServerConnection) -> None:
+        """Replace a process that ran sub-agents once no call uses it: interrupted and
+        unsubscribed, their threads still hold memory (~2 MB each) that 0.157.1 never
+        gives back, and a turn that starts after the last check would go unnoticed."""
+        idle = self._active_calls == 0 and self._releasing == 0
+        if conn.tainted and idle and self._conn is conn and not self._closed:
+            logger.warning(
+                "Restarting the Codex app-server (pid %d): ChatGPT started sub-agents in it",
+                conn.pid,
+            )
+            self._retire(conn)
 
     # -- process lifecycle ---------------------------------------------------------------
 
@@ -894,6 +1021,14 @@ class CodexAppServerProvider:
                 kind="unavailable",
             ) from None
         self._cwd = cwd
+        await self._wait_dying()
+        try:
+            removed = await asyncio.to_thread(remove_log_databases, state_dir)
+        except OSError as exc:
+            logger.warning("Could not delete the Codex log databases in %s: %s", state_dir, exc)
+        else:
+            if removed:
+                logger.info("Deleted the Codex log databases %s", ", ".join(removed))
         try:
             process = await asyncio.create_subprocess_exec(
                 cli,
@@ -954,7 +1089,20 @@ class CodexAppServerProvider:
         self._conn = conn
         logger.info("Codex app-server started (pid %d)", conn.pid)
 
+    async def _wait_dying(self) -> None:
+        """Wait (bounded) until the previous processes are gone: a process still shutting
+        down may write, checkpoint or unlink the log databases a new start deletes."""
+        dying = list(self._dying)
+        if dying:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*(conn.wait_terminated() for conn in dying)),
+                    SHUTDOWN_GRACE + 2.0,
+                )
+        self._dying.difference_update(dying)
+
     def _on_exit(self, conn: _AppServerConnection, expected: bool) -> None:
+        self._dying.add(conn)
         if self._conn is conn:
             self._conn = None
             self._stray_turns.clear()
@@ -984,6 +1132,7 @@ class CodexAppServerProvider:
         """Detach ``conn`` so the next call starts a fresh process, and close it."""
         if self._conn is conn:
             self._conn = None
+            self._stray_turns.clear()
         self._spawn(conn.close())
 
     def _spawn(self, coroutine: Awaitable[None]) -> None:
@@ -1017,8 +1166,8 @@ class CodexAppServerProvider:
         Such a turn is a sub-agent that ChatGPT started (a prompt injection can ask for
         one): nobody sees its output and it would go on spending the owner's plan after
         the call ends or is stopped. Threads of our own calls that are being released
-        are left to :meth:`_release_thread`."""
-        if thread_id in self._threads:
+        are left to :meth:`_release_thread`, and a process being stopped is left alone."""
+        if thread_id in self._threads or conn is not self._conn:
             return
         turn_id = params.get("turnId") or _as_dict(params.get("turn")).get("id")
         if not isinstance(turn_id, str) or not turn_id:
@@ -1029,6 +1178,7 @@ class CodexAppServerProvider:
         if turn_id in self._stray_turns:
             return
         self._stray_turns.add(turn_id)
+        conn.tainted = True
         logger.warning(
             "Codex is running a turn outside any call (thread %s, turn %s), probably a "
             "sub-agent started by the model; interrupting it",
@@ -1046,12 +1196,17 @@ class CodexAppServerProvider:
             )
         except CodexRpcError as exc:
             # Not retried: a turn that cannot be interrupted must not flood the server.
+            # The process still hosted a sub-agent, so it is replaced when idle.
             logger.warning("Could not interrupt Codex turn %s: %s", turn_id, exc.message)
+            self._recycle_if_idle(conn)
         except TimeoutError:
             logger.warning("Codex app-server stopped answering; restarting it")
             self._retire(conn)
         except ProcessGone:
             pass
+        else:
+            # A sub-agent that showed up after its call had ended.
+            self._recycle_if_idle(conn)
 
     def _merge_rate_limits(self, snapshot: Any, *, sparse: bool) -> None:
         """Keep the latest ``primary``/``secondary`` windows of the ``codex`` limit.

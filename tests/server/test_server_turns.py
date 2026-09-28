@@ -444,3 +444,81 @@ async def test_a_client_that_cannot_keep_up_is_dropped() -> None:
     assert not connection.send("m6")
     await cancel_and_wait([writer])
     assert websocket.sent == ["m0", "m1"]
+
+
+async def test_a_repeated_subscribe_is_ignored() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    starter, late = Recorder(), Recorder()
+    turns.start(request("r1"), starter)
+    await settle()
+    assert turns.subscribe("r1", late, after_seq=0)
+    for subscriber in (starter, late, late):
+        assert turns.subscribe("r1", subscriber, after_seq=0)  # known turn, nothing sent
+    assert starter.types == late.types == ["turn.started", "phase"]
+    assert late.batches == [2]
+    runner.gate.set()
+    await settle()
+    assert starter.types == late.types == ["turn.started", "phase", "turn.completed"]
+    # Also once the turn is over.
+    assert turns.subscribe("r1", late, after_seq=0)
+    assert len(late.messages) == 3
+    # A subscriber that went away (its connection closed) is a new one afterwards.
+    turns.detach(late)
+    assert turns.subscribe("r1", late, after_seq=0)
+    assert [m["seq"] for m in late.messages] == [1, 2, 3, 1, 2, 3]
+    await turns.aclose()
+
+
+async def test_a_client_that_never_reads_cannot_pile_up_replays() -> None:
+    """Many ``turn.subscribe`` for one turn from a socket that does not read: the
+    events are queued once, not once per message."""
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    turns.start(request("r1"))
+    await settle()
+    websocket = StuckWebSocket()
+    connection = ClientConnection(websocket)  # type: ignore[arg-type]
+    writer = asyncio.create_task(connection.write_loop())
+    await settle()
+    for _ in range(5000):  # more than the send queue has places
+        assert turns.subscribe("r1", connection, after_seq=0)
+    assert not connection.overflowed.is_set()
+    assert connection.pending == 2  # one replay of the two buffered events
+    await settle()
+    assert len(websocket.sent) == 2  # seq 1 went out; seq 2 is stuck in send_text
+    assert connection.pending == 1
+    await cancel_and_wait([writer])
+    await turns.aclose()
+
+
+async def test_queued_events_are_bounded_per_connection() -> None:
+    websocket = StuckWebSocket()
+    connection = ClientConnection(websocket, max_pending=10)  # type: ignore[arg-type]
+    writer = asyncio.create_task(connection.write_loop())
+    assert connection.send("m0")
+    await settle()  # m0 written; the socket then stops taking frames
+    assert connection.pending == 0
+    assert connection.send_batch([f"a{i}" for i in range(6)])
+    # Still under the bound when it arrives: a replay may take it over the limit, so
+    # a turn longer than the bound can still be recovered.
+    assert connection.send_batch([f"b{i}" for i in range(8)])
+    assert connection.pending == 14
+    assert not connection.overflowed.is_set()
+    assert not connection.send("m1")  # too many events waiting: dropped (1013)
+    assert connection.overflowed.is_set()
+    assert connection.closed
+    await cancel_and_wait([writer])
+
+
+async def test_written_events_leave_the_bound() -> None:
+    websocket = RecordingWebSocket()
+    connection = ClientConnection(websocket, max_pending=3)  # type: ignore[arg-type]
+    writer = asyncio.create_task(connection.write_loop())
+    for round_ in range(3):
+        assert connection.send_batch([f"{round_}-{i}" for i in range(5)])
+        await settle()
+        assert connection.pending == 0
+    assert not connection.overflowed.is_set()
+    assert len(websocket.sent) == 15
+    await cancel_and_wait([writer])

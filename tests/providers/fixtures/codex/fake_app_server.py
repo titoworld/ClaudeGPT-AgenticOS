@@ -17,15 +17,21 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
   [commentary]    a commentary message before the final answer
   [spawn]         like [echo], but the turn also starts a sub-agent thread (as Codex's
                   collaboration.spawn_agent does) that works until turn/interrupt
+  [spawn-loop]    an injected spawn loop: a new sub-agent every 30 ms (each one works
+                  until turn/interrupt) until the turn itself is interrupted (max 12)
+  [followup-loop] one sub-agent, then a follow-up turn on its thread every 30 ms until
+                  the turn itself is interrupted (max 12)
 
 Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
 ``requiresOpenaiAuth``, ``config_model``, ``rate_limits_delay`` (seconds before answering
 account/rateLimits/read), ``init_error``, ``spawn_child`` (start a ``sleep`` child to
 check process-group kills), ``models`` / ``page_size`` / ``model_list_error`` (the
-model/list catalog, its page size and a forced error). Every message received is appended to
-``$CODEX_HOME/requests.jsonl`` with the pid; the environment goes to ``env.json``. Like
-the real server, every turn input is logged to ``logs_2.sqlite`` (a plain-text stand-in)
-in ``-c sqlite_home=...``, or in ``$CODEX_HOME`` without that override.
+model/list catalog, its page size and a forced error), ``term_delay`` (seconds a SIGTERM
+or the end of stdin takes to stop the process, which logs ``{"exited": time}``). Every
+message received is appended to ``$CODEX_HOME/requests.jsonl`` with the pid (and the
+start time); the environment goes to ``env.json``. Like the real server, every turn input
+is logged to ``logs_2.sqlite`` (a plain-text stand-in) in ``-c sqlite_home=...``, or in
+``$CODEX_HOME`` without that override.
 Standard library only.
 """
 
@@ -34,6 +40,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -258,6 +265,8 @@ MARKERS = (
     "[retry-error]",
     "[commentary]",
     "[spawn]",
+    "[spawn-loop]",
+    "[followup-loop]",
 )
 
 
@@ -273,6 +282,36 @@ def run_sub_agent(turn: Turn) -> None:
         turn.usage(breakdown(500, 0, 0, 50, 0), breakdown(500 * (step + 1), 0, 0, 50, 0))
         notify("item/agentMessage/delta", {**turn.ids(), "itemId": "w1", "delta": "."})
     log({"sub_agent": turn.thread_id, "interrupted_after": None})
+    turn.finish()
+
+
+def start_sub_agent(turn: Turn, call: int, kind: str, child: Turn) -> None:
+    """Run ``child`` as a sub-agent of ``turn``, which shows the item 0.157.1 emits for
+    collaboration.spawn_agent (kind "started") or followup_task ("interacted")."""
+    _interrupts[child.turn_id] = threading.Event()
+    activity = {
+        "type": "subAgentActivity",
+        "id": f"call_{call}",
+        "kind": kind,
+        "agentThreadId": child.thread_id,
+        "agentPath": "/root/worker",
+    }
+    notify("item/started", {"item": activity, **turn.ids(), "startedAtMs": 0})
+    notify("item/completed", {"item": activity, **turn.ids(), "completedAtMs": 0})
+    log({"sub_agent_run": call, "thread": child.thread_id})
+    threading.Thread(target=run_sub_agent, args=(child,), daemon=True).start()
+
+
+def run_loop(turn: Turn, interrupted: threading.Event, *, follow_up: bool) -> None:
+    """A root turn that keeps starting sub-agent runs until it is interrupted."""
+    thread_id = str(uuid.uuid4())
+    for call in range(1, 13):
+        child = Turn(thread_id if follow_up else str(uuid.uuid4()), str(uuid.uuid4()))
+        start_sub_agent(turn, call, "interacted" if follow_up and call > 1 else "started", child)
+        if interrupted.wait(0.03):
+            turn.finish("interrupted")
+            return
+    turn.message("m1", ["Fet."])
     turn.finish()
 
 
@@ -320,19 +359,11 @@ def run_turn(thread_id: str, turn_id: str, text: str) -> None:
             "misalignment": None,
         }
         notify("error", {"error": error, "willRetry": True, **turn.ids()})
+    if "[spawn-loop]" in text or "[followup-loop]" in text:
+        run_loop(turn, interrupted, follow_up="[followup-loop]" in text)
+        return
     if "[spawn]" in text:
-        child = Turn(str(uuid.uuid4()), str(uuid.uuid4()))
-        _interrupts[child.turn_id] = threading.Event()
-        activity = {
-            "type": "subAgentActivity",
-            "id": "call_1",
-            "kind": "started",
-            "agentThreadId": child.thread_id,
-            "agentPath": "/root/worker",
-        }
-        notify("item/started", {"item": activity, **turn.ids(), "startedAtMs": 0})
-        notify("item/completed", {"item": activity, **turn.ids(), "completedAtMs": 0})
-        threading.Thread(target=run_sub_agent, args=(child,), daemon=True).start()
+        start_sub_agent(turn, 1, "started", Turn(str(uuid.uuid4()), str(uuid.uuid4())))
     if "[commentary]" in text:
         turn.message("c1", ["Pensant", "..."], phase="commentary")
         turn.message("m1", ["Primer."], phase="final_answer")
@@ -444,8 +475,18 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         fail(request_id, -32601, f"unknown method {method}")
 
 
+def slow_exit(signum: int, frame: Any) -> None:
+    """SIGTERM handler of the ``term_delay`` option: a process slow to shut down (the
+    real one flushes its SQLite databases)."""
+    time.sleep(float(OPTIONS["term_delay"]))
+    log({"exited": time.time()})
+    os._exit(0)
+
+
 def main() -> None:
-    log({"argv": sys.argv[1:], "cwd": os.getcwd()})
+    if OPTIONS.get("term_delay"):
+        signal.signal(signal.SIGTERM, slow_exit)
+    log({"argv": sys.argv[1:], "cwd": os.getcwd(), "started": time.time()})
     (HOME / "env.json").write_text(json.dumps(dict(os.environ)), encoding="utf-8")
     if OPTIONS.get("spawn_child"):
         child = subprocess.Popen(["sleep", "60"])
@@ -462,6 +503,8 @@ def main() -> None:
                 waiter[0].set()
         elif "id" in message:
             handle(message["id"], message["method"], message.get("params") or {})
+    if OPTIONS.get("term_delay"):
+        slow_exit(signal.SIGTERM, None)  # stdin closed: shut down just as slowly
 
 
 if __name__ == "__main__":

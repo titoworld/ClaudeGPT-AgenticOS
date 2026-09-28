@@ -539,6 +539,43 @@ def test_invalid_messages_never_close_the_socket(tmp_path: Path) -> None:
 
         ws.send_json({"type": "ping", "t": 2.5})
         assert ws.receive_json() == {"type": "pong", "t": 2.5}
+        # Integers beyond JavaScript's safe range are refused (no internal error, and the
+        # pong never grows beyond a normal timestamp).
+        ws.send_text('{"type": "ping", "t": 1' + "0" * 400 + "}")
+        assert ws.receive_json()["code"] == "invalid"
+        ws.send_json({"type": "ping", "t": 2**53})
+        assert ws.receive_json() == {"type": "pong", "t": 2**53}
+
+
+def test_a_repeated_subscribe_on_one_connection_is_ignored(tmp_path: Path) -> None:
+    providers = gates()
+    with (
+        app_client(tmp_path, dict(providers)) as (client, _state, token),
+        connect(client, token) as ws,
+        connect(client, token) as other,
+    ):
+        ws.receive_json()
+        other.receive_json()
+        ws.send_json(start("r1"))
+        started = receive_until(ws, is_type("stream.delta"))
+        # The connection that started the turn already gets it: no replay.
+        ws.send_json({"type": "turn.subscribe", "request_id": "r1", "after_seq": 0})
+        ws.send_json({"type": "ping", "t": 1})
+        assert ws.receive_json() == {"type": "pong", "t": 1}
+        # Another connection gets the replay once, whatever it sends afterwards.
+        for _ in range(3):
+            other.send_json({"type": "turn.subscribe", "request_id": "r1", "after_seq": 0})
+        other.send_json({"type": "ping", "t": 2})
+        replay = receive_until(other, is_type("pong"))
+        assert replay[:-1] == started
+        call(client, providers["claude"].release.set)
+        rest = receive_until(ws, is_type("turn.completed"))
+        assert receive_until(other, is_type("turn.completed")) == rest
+        assert_contiguous(started + rest)
+        # Also after the end of the turn.
+        other.send_json({"type": "turn.subscribe", "request_id": "r1", "after_seq": 0})
+        other.send_json({"type": "ping", "t": 3})
+        assert other.receive_json() == {"type": "pong", "t": 3}
 
 
 # -- models and prices -------------------------------------------------------------------

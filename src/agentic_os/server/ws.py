@@ -4,7 +4,10 @@ The handshake is accepted first so the browser sees the close codes: ``4403`` fo
 foreign ``Origin`` and ``4401`` without a live session. Every connection has a
 bounded outgoing queue drained by a writer task; a client that cannot keep up is
 disconnected (code 1013) and recovers what it missed with ``turn.subscribe`` after
-reconnecting (a replay takes a single place in the queue, however long it is).
+reconnecting. A replay takes a single place in the queue, however long it is, but
+its events count towards :data:`MAX_PENDING_EVENTS`, and a connection gets each
+turn only once (a repeated ``turn.subscribe`` is ignored), so a client that never
+reads cannot make the server hold an unbounded number of events for it.
 Invalid messages get an ``error`` answer; they never close the socket.
 
 The session is checked again on every message (read-only for ``ping``, so that
@@ -50,6 +53,11 @@ MAX_MESSAGE_CHARS: Final = 512 * 1024
 SEND_QUEUE_SIZE: Final = 4096
 """Messages (or replay batches) waiting to be written; a full queue drops the
 connection."""
+MAX_PENDING_EVENTS: Final = 200_000
+"""Texts waiting to be written, each text of a replay batch counted: once this many
+are waiting, the next message drops the connection (1013). The check comes before
+the new message is queued, so a single replay may be longer than this and any turn
+can still be recovered (after a 1013 the client resumes from what it got)."""
 SESSION_CHECK_SECONDS: Final = 30.0
 """How often an open socket re-checks its session (read-only)."""
 MAX_REQUEST_ID_LENGTH: Final = 128
@@ -184,32 +192,48 @@ class ClientConnection:
     out synchronously; it is the :class:`~agentic_os.server.turns.Subscriber` given
     to the turn manager."""
 
-    def __init__(self, websocket: WebSocket, *, queue_size: int = SEND_QUEUE_SIZE) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        queue_size: int = SEND_QUEUE_SIZE,
+        max_pending: int = MAX_PENDING_EVENTS,
+    ) -> None:
         self._websocket = websocket
         self._queue: asyncio.Queue[str | tuple[str, ...]] = asyncio.Queue(maxsize=queue_size)
+        self._max_pending = max_pending
+        self.pending = 0
+        """Texts queued (inside batches too) and not written yet."""
         self.overflowed = asyncio.Event()
         self.revoked = asyncio.Event()
         """Set when the session of the connection ends (see :meth:`revoke`)."""
         self.closed = False
 
-    def _put(self, item: str | tuple[str, ...]) -> bool:
+    def _put(self, item: str | tuple[str, ...], count: int) -> bool:
         if self.closed:
             return False
+        if self.pending >= self._max_pending:
+            return self._give_up()
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
-            logger.warning("WebSocket client too slow: dropping the connection")
-            self.closed = True
-            self.overflowed.set()
-            return False
+            return self._give_up()
+        self.pending += count
         return True
 
+    def _give_up(self) -> bool:
+        logger.warning("WebSocket client too slow: dropping the connection")
+        self.closed = True
+        self.overflowed.set()
+        return False
+
     def send(self, text: str) -> bool:
-        return self._put(text)
+        return self._put(text, 1)
 
     def send_batch(self, texts: Sequence[str]) -> bool:
         """Queue several texts in one place of the queue (they are written in order)."""
-        return self._put(tuple(texts))
+        batch = tuple(texts)
+        return self._put(batch, len(batch))
 
     def revoke(self) -> None:
         """The session ended: the endpoint closes the socket with ``4401``."""
@@ -227,11 +251,9 @@ class ClientConnection:
     async def write_loop(self) -> None:
         while True:
             item = await self._queue.get()
-            if isinstance(item, str):
-                await self._websocket.send_text(item)
-            else:
-                for text in item:
-                    await self._websocket.send_text(text)
+            for text in (item,) if isinstance(item, str) else item:
+                await self._websocket.send_text(text)
+                self.pending -= 1
 
 
 class ClientSession:
@@ -320,7 +342,14 @@ class ClientSession:
         turns = self._state.turns
         if kind == "ping":
             t = data.get("t")
-            if isinstance(t, bool) or not isinstance(t, int | float) or not math.isfinite(t):
+            # A finite number within the range of JavaScript's safe integers keeps the
+            # pong as small as the ping (math.isfinite would overflow on a huge int).
+            if (
+                isinstance(t, bool)
+                or not isinstance(t, int | float)
+                or (isinstance(t, float) and not math.isfinite(t))
+                or abs(t) > 2**53
+            ):
                 raise ProtocolError("«t» ha de ser un número.")
             self._connection.send_json({"type": "pong", "t": t})
         elif kind == "turn.start":
@@ -344,6 +373,8 @@ class ClientSession:
             after_seq = _int(data.get("after_seq", 0))
             if after_seq is None or after_seq < 0:
                 raise ProtocolError("«after_seq» ha de ser un enter ≥ 0.", request_id=request_id)
+            # A turn this connection already gets is not replayed again (see
+            # TurnManager.subscribe): the message is ignored.
             if not turns.subscribe(request_id, self._connection, after_seq):
                 self._connection.send_json({"type": "turn.unknown", "request_id": request_id})
         else:

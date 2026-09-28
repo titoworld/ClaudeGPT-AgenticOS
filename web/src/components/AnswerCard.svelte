@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { answerForClipboard } from '../lib/hidden-chars';
   import type { Agent } from '../lib/protocol';
   import type { StreamView } from '../lib/turns.svelte';
   import AgentLabel from './AgentLabel.svelte';
@@ -41,7 +42,7 @@
       {#if badge}{@render badge()}{/if}
       {#if status}<StreamStatus {status} />{/if}
       {#if stream?.status === 'done' && stream.text}
-        <CopyButton text={stream.text} />
+        <CopyButton text={stream.text} prepare={answerForClipboard} />
       {/if}
     </div>
   </header>

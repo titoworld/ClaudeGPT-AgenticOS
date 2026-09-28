@@ -1,5 +1,6 @@
 // Shared fixtures for unit tests (never imported by application code).
 import type { Message, TurnEvent, Usage } from './protocol';
+import { addUsage } from './turns.svelte';
 
 export const usage = (input: number, output: number, cacheRead = 0): Usage => ({
   input_tokens: input,
@@ -156,6 +157,54 @@ export function compactedDuelMessages(): Message[] {
     message({
       id: 11, turn_id: 9, kind: 'answer', agent: 'chatgpt', final: true,
       meta: { model: 'fake-chatgpt', usage: DUEL_CHATGPT, cost_basis: 'equivalent', savings },
+    }),
+  ];
+}
+
+// A duel where each answer needed a retry after a billed failure (a refusal):
+// those calls stored no message, so each final message carries the running
+// total of that unstored usage (meta.unstored_usage) and the last one the
+// turn's. turn.completed.usage is the answers plus both failed calls.
+const FAILED_CLAUDE = priced(400, 12, 0.00138);
+const FAILED_CHATGPT = priced(380, 9, 0.00104);
+
+export function retriedDuelEvents(requestId = 'req-r'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 4, turn_id: 30, mode: 'duel', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'fake-claude' },
+    { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'fake-chatgpt' },
+    {
+      type: 'stream.completed', stream_id: 'c', message_id: 31, usage: DUEL_CLAUDE, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    {
+      type: 'stream.completed', stream_id: 'g', message_id: 32, usage: DUEL_CHATGPT, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    {
+      type: 'turn.completed', conversation_id: 4, turn_id: 30, final_message_ids: [31, 32],
+      usage: [DUEL_CLAUDE, DUEL_CHATGPT, FAILED_CLAUDE, FAILED_CHATGPT].reduce(addUsage), // 1692 in, 256 out
+      savings: { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null },
+      consensus: null, cached: false,
+    },
+  ]);
+}
+
+export function retriedDuelMessages(): Message[] {
+  const savings = { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null };
+  return [
+    message({ id: 30, turn_id: 30, kind: 'question', content: 'I ara?', final: true, meta: { mode: 'duel' } }),
+    message({
+      id: 31, turn_id: 30, kind: 'answer', agent: 'claude', final: true,
+      meta: { model: 'fake-claude', usage: DUEL_CLAUDE, cost_basis: 'equivalent', savings, unstored_usage: FAILED_CLAUDE },
+    }),
+    message({
+      id: 32, turn_id: 30, kind: 'answer', agent: 'chatgpt', final: true,
+      meta: {
+        model: 'fake-chatgpt', usage: DUEL_CHATGPT, cost_basis: 'equivalent', savings,
+        unstored_usage: addUsage(FAILED_CLAUDE, FAILED_CHATGPT),
+      },
     }),
   ];
 }

@@ -11,7 +11,7 @@ import pytest
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode
 from agentic_os.fx import FxError, FxRate
-from agentic_os.pricing import DEFAULT_PRICES, ModelPrice
+from agentic_os.pricing import DEFAULT_PRICES, ModelPrice, price_table
 from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus
 from agentic_os.providers.factory import build_provider
 from agentic_os.providers.fake import FakeProvider
@@ -250,6 +250,29 @@ def test_pricing_merges_the_owner_prices() -> None:
         "cache_write": 0.125,
         "source": "default",
     }
+
+
+def test_pricing_lists_exactly_the_effective_price_table() -> None:
+    """The page shows the rows the engine charges with: an override that names no
+    model (never applied) is not listed, and of two keys of one model only the one
+    in effect is."""
+    first, last = ModelPrice(1.0, 2.0, 0.1, 1.25), ModelPrice(3.0, 4.0, 0.3, 3.75)
+    overrides = {
+        "openai/": ModelPrice(0.0, 0.0, 0.0, 0.0),
+        "x/[1m]": ModelPrice(0.0, 0.0, 0.0, 0.0),
+        "GPT-7-Nova": first,
+        "gpt-7-nova": last,
+    }
+    prices = pricing_to_wire(ECB, overrides)["prices"]
+    assert isinstance(prices, list)
+    table = price_table(overrides)
+    assert prices == [
+        {"model": entry.model, **entry.price.to_wire(), "source": entry.source}
+        for entry in sorted(table.values(), key=lambda entry: entry.model)
+    ]
+    assert len(prices) == len(DEFAULT_PRICES) + 1
+    assert {"model": "gpt-7-nova", **last.to_wire(), "source": "custom"} in prices
+    assert not [row for row in prices if row["model"] in ("openai/", "x/[1m]", "GPT-7-Nova")]
 
 
 # -- exchange rate -----------------------------------------------------------------------

@@ -34,7 +34,7 @@ from agentic_os.domain import (
     Usage,
     other_agent,
 )
-from agentic_os.orchestrator.accounting import TurnAccounting
+from agentic_os.orchestrator.accounting import TurnAccounting, failed_call_usage, is_billed
 from agentic_os.orchestrator.cache import (
     context_fingerprint,
     replay_cost_usd,
@@ -71,7 +71,7 @@ from agentic_os.orchestrator.prompts import (
 from agentic_os.orchestrator.sections import RevisionStreamParser
 from agentic_os.orchestrator.store import CachedTurn, JsonValue, NewMessage, Store, UsageRecord
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
-from agentic_os.pricing import ModelPrice, estimate_cost_usd
+from agentic_os.pricing import ModelPrice, estimate_cost_usd, find_price
 from agentic_os.providers.base import (
     MODEL_ID_PATTERN,
     GenerationRequest,
@@ -189,6 +189,15 @@ def _savings_json(savings: Savings) -> dict[str, JsonValue]:
         "total": savings.total,
         "cost_usd": savings.cost_usd,
     }
+
+
+def _set_unstored(meta: dict[str, JsonValue], accounting: TurnAccounting) -> None:
+    """On a final message: ``unstored_usage``, the billed calls of the turn so far that
+    stored no message (failed, refused or empty), so a reloaded turn adds up to the live
+    total. Every final message carries the running total and the last one the turn's
+    (a billed failure after the last final message of a duel is on none)."""
+    if is_billed(accounting.unstored):
+        meta["unstored_usage"] = _usage_json(accounting.unstored)
 
 
 def _cost_basis(mode: ProviderMode, usage: Usage) -> str | None:
@@ -703,6 +712,17 @@ class Engine:
         model = self._model_name(turn, agent)
         turn.emit(StreamStarted(turn.request_id, stream_id, agent, "synthesis", round_, model))
         turn.emit(StreamDelta(turn.request_id, stream_id, "text", content))
+        meta: dict[str, JsonValue] = {
+            "model": model,
+            "usage": _usage_json(Usage()),
+            "latency_ms": 0,
+            "ttft_ms": None,
+            "cached": False,
+            "degraded": True,
+            "consensus": _consensus_json(consensus),
+            "savings": _savings_json(turn.accounting.savings()),
+        }
+        _set_unstored(meta, turn.accounting)
         message_id = await self._store.add_message(
             NewMessage(
                 conversation_id=turn.conversation_id,
@@ -712,16 +732,7 @@ class Engine:
                 agent=agent,
                 round=round_,
                 final=True,
-                meta={
-                    "model": model,
-                    "usage": _usage_json(Usage()),
-                    "latency_ms": 0,
-                    "ttft_ms": None,
-                    "cached": False,
-                    "degraded": True,
-                    "consensus": _consensus_json(consensus),
-                    "savings": _savings_json(turn.accounting.savings()),
-                },
+                meta=meta,
             )
         )
         turn.final_ids.append(message_id)
@@ -918,12 +929,21 @@ class Engine:
             except Exception:
                 logger.exception("Provider %s failed unexpectedly", agent)
                 error = ProviderError("Error inesperat del proveïdor.", kind="internal")
+            model, usage = failed_call_usage(
+                error, request.model or self._models.get(agent, ""), turn.prices
+            )
+            if is_billed(usage):
+                # Billed all the same (a refusal): it counts in the turn's usage, and the
+                # context it was billed for was the compacted one.
+                turn.accounting.add_unstored(usage)
+                if carries_context:
+                    turn.accounting.add_context_request(find_price(model, turn.prices))
             await self._record_usage(
                 turn,
                 agent,
                 request.purpose,
-                model=request.model or self._models.get(agent, ""),
-                usage=Usage(),
+                model=model,
+                usage=usage,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 ttft_ms=None,
                 error=error,
@@ -934,10 +954,11 @@ class Engine:
                 continue
             return self._stream_failed(turn, agent, stream_id, error)
 
+        price = find_price(result.model, turn.prices)
         if carries_context:
-            # Only a call that reached a model and returned a result sent the compacted
-            # context (an empty reply did too); failed attempts saved nothing.
-            turn.accounting.add_context_request()
+            # Only a call that reached a model and was billed sent the compacted context
+            # (an empty reply did too); attempts that failed unbilled saved nothing.
+            turn.accounting.add_context_request(price)
         critique: str | None = None
         agreement: int | None = None
         unchanged = False
@@ -966,7 +987,7 @@ class Engine:
         )
         if not content:
             # Billed all the same: it counts in the turn's usage (not in its savings).
-            turn.accounting.add_spent(usage)
+            turn.accounting.add_unstored(usage)
             error = ProviderError("El model ha retornat una resposta buida.", kind="invalid")
             await self._record_usage(
                 turn,
@@ -992,7 +1013,7 @@ class Engine:
         )
         turn.accounting.add_call(usage, request.purpose)
         if unchanged:
-            turn.accounting.add_unchanged(content)
+            turn.accounting.add_unchanged(content, price)
         if not request.fast and request.model is None:
             self._models.setdefault(agent, result.model)
 
@@ -1013,6 +1034,7 @@ class Engine:
             # Final messages are stored by the turn's last call, so these savings are the
             # turn's own; only the first answer of a duel can miss the other one's cost.
             meta["savings"] = _savings_json(turn.accounting.savings())
+            _set_unstored(meta, turn.accounting)
         message = NewMessage(
             conversation_id=turn.conversation_id,
             kind=kind,

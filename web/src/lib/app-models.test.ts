@@ -90,6 +90,29 @@ describe('default models after the owner clears a saved one (F3)', () => {
     expect(app.modelFor('claude')).toBe('claude-sonnet-provider');
   });
 
+  it('retries a failed catalog fetch when the drawer or the model menu opens again (K17)', async () => {
+    server.modelsFail = true;
+    await app.saveSettings(withModels({ claude: null, chatgpt: null }, { claude: null, chatgpt: null }));
+    await app.loadModels();
+    expect(app.catalogStale).toBe(true);
+    expect(catalog()?.claude.default_model).toBe('claude-opus-saved');
+
+    server.modelsFail = false;
+    const models = vi.spyOn(api, 'models');
+    await app.loadModels(); // the drawer or the model menu opens
+    expect(models).toHaveBeenCalledWith(false); // the server's lists, without asking the vendors
+    models.mockRestore();
+    expect(app.catalogStale).toBe(false);
+    expect(app.catalogError).toBeNull();
+    expect(catalog()?.claude.default_model).toBe('claude-sonnet-provider');
+    expect(catalog()?.claude.fast_model).toBe('claude-fast-provider');
+
+    const again = vi.spyOn(api, 'models');
+    await app.loadModels(); // fresh again: no more fetches
+    expect(again).not.toHaveBeenCalled();
+    again.mockRestore();
+  });
+
   it('shows a newly saved model at once and does not refetch when models did not change', async () => {
     await app.saveSettings(withModels({ claude: 'claude-opus-new', chatgpt: null }, { claude: 'claude-haiku-saved', chatgpt: null }));
     expect(app.modelFor('claude')).toBe('claude-opus-new');

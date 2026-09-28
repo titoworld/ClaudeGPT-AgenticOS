@@ -210,10 +210,14 @@ class App {
     }
   }
 
-  /** Loads the model catalog once per session; `refresh` asks the server to query the vendors again. */
+  /**
+   * Loads the model catalog once per session, and again while it is stale (a
+   * fetch after saving other models failed); `refresh` asks the server to query
+   * the vendors again.
+   */
   loadModels(refresh = false): Promise<void> {
     if (this.#catalogRequest && !refresh) return this.#catalogRequest;
-    if (this.catalog && !refresh) return Promise.resolve();
+    if (this.catalog && !this.catalogStale && !refresh) return Promise.resolve();
     return this.#fetchModels(refresh);
   }
 

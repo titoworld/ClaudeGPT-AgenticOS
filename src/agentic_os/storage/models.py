@@ -17,7 +17,7 @@ from typing import Final, Literal
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
-from agentic_os.pricing import ModelPrice
+from agentic_os.pricing import ModelPrice, normalize_model
 from agentic_os.providers.base import MODEL_ID_PATTERN
 
 TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate")
@@ -105,10 +105,12 @@ def _format_number(value: float) -> str:
 
 def _number_in_range(value: object, name: str, bounds: tuple[float, float]) -> float:
     low, high = bounds
+    # An int is compared exactly (no float conversion, which overflows on the huge
+    # integers JSON allows); a float must also be finite.
     if (
         isinstance(value, bool)
         or not isinstance(value, int | float)
-        or not math.isfinite(value)
+        or (isinstance(value, float) and not math.isfinite(value))
         or not low <= value <= high
     ):
         raise ValueError(
@@ -181,16 +183,33 @@ def _price(value: object, name: str) -> ModelPrice:
 
 
 def _prices(value: object) -> dict[str, ModelPrice]:
+    """Owner prices by model id. Ids are compared as the price table does
+    (:func:`~agentic_os.pricing.normalize_model`): an id that normalizes to nothing
+    (``openai/``, ``x/[1m]``...) would match, and reprice, every model, and two ids
+    of the same model would leave only one of them in effect, so both are refused."""
     if not isinstance(value, Mapping):
         raise ValueError("«prices» ha de ser un objecte (model → preus).")
     if len(value) > MAX_CUSTOM_PRICES:
         raise ValueError(f"«prices» admet com a màxim {MAX_CUSTOM_PRICES} models.")
     prices: dict[str, ModelPrice] = {}
+    seen: dict[str, str] = {}
     for model, price in value.items():
         if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
             raise ValueError(
                 f"«prices»: «{str(model)[:100]}» no és un identificador de model vàlid."
             )
+        normalized = normalize_model(model)
+        if not normalized:
+            raise ValueError(
+                f"«prices»: «{model}» no identifica cap model (sense el prefix del proveïdor, "
+                "la data o el context no en queda res)."
+            )
+        if normalized in seen:
+            raise ValueError(
+                f"«prices»: «{seen[normalized]}» i «{model}» són el mateix model "
+                f"(«{normalized}»). Deixa'n només un."
+            )
+        seen[normalized] = model
         prices[model] = _price(price, f"prices.{model}")
     return prices
 

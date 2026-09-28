@@ -28,9 +28,13 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.codex_appserver import (
     ENV_ALLOWLIST,
+    MAX_SUB_AGENT_RUNS,
+    SUB_AGENT_LIMIT_MESSAGE,
     CodexAppServerProvider,
     codex_environment,
     config_arguments,
+    remove_log_databases,
+    sub_agent_run,
     turn_error,
     usage_from_breakdown,
 )
@@ -77,6 +81,10 @@ class FakeCodex:
 
     def pids(self) -> list[int]:
         return [entry["pid"] for entry in self.log() if "argv" in entry]
+
+    def entries(self, key: str) -> list[dict[str, Any]]:
+        """Log entries the fake wrote itself with this key (sub-agent runs, exits...)."""
+        return [entry for entry in self.log() if key in entry]
 
 
 @pytest.fixture
@@ -356,6 +364,9 @@ async def test_sub_agents_are_interrupted_and_not_counted(
     """A prompt injection can make ChatGPT spawn a Codex sub-agent: a thread no call
     listens to, which would keep spending the owner's plan after the call ends."""
     caplog.set_level(logging.WARNING, logger="agentic_os.providers.codex_appserver")
+    await provider.prewarm(make_request())
+    first = provider._conn
+    assert first is not None
 
     _, result = await collect(provider, make_request("[spawn] fet"))
 
@@ -364,20 +375,119 @@ async def test_sub_agents_are_interrupted_and_not_counted(
     assert result.usage == Usage(
         input_tokens=400, output_tokens=50, cache_read_tokens=600, reasoning_tokens=10
     )
-    await wait_until(lambda: any("sub_agent" in entry for entry in fake.log()))
-    [stopped] = [entry for entry in fake.log() if "sub_agent" in entry]
+    await wait_until(lambda: fake.entries("sub_agent"))
+    [stopped] = fake.entries("sub_agent")
     assert stopped["interrupted_after"] is not None
     assert stopped["interrupted_after"] < 20  # within a second, not after 20 s of work
     [root] = fake.params("turn/start")
-    await wait_until(lambda: fake.received("thread/unsubscribe"))
     # One interrupt for the sub-agent's turn despite its many notifications; none for
     # the call's own turn, which had finished.
     [interrupt] = fake.params("turn/interrupt")
     assert interrupt["threadId"] == stopped["sub_agent"] != root["threadId"]
     assert "outside any call" in caplog.text
+    # The call's thread and the sub-agent's are both released...
+    await wait_until(lambda: len(fake.received("thread/unsubscribe")) == 2)
+    unsubscribed = [p["threadId"] for p in fake.params("thread/unsubscribe")]
+    assert unsubscribed == [root["threadId"], stopped["sub_agent"]]
+    # ...and the process that ran it is replaced as soon as it is idle: 0.157.1 never
+    # gives the memory of a sub-agent's thread back.
+    await wait_until(lambda: provider._conn is None)
     await wait_until(lambda: not provider._background)
+    assert process_gone(first.pid)
+    assert "ChatGPT started sub-agents" in caplog.text
     assert not provider._stray_turns
     assert not provider._threads
+
+    _, again = await collect(provider, make_request("[echo] de nou"))
+    assert again.text.strip() == "de nou"
+    assert len(set(fake.pids())) == 2
+
+
+@pytest.mark.parametrize(
+    ("marker", "new_threads"), [("[spawn-loop]", True), ("[followup-loop]", False)]
+)
+async def test_a_sub_agent_loop_stops_the_call(
+    fake: FakeCodex, provider: CodexAppServerProvider, marker: str, new_threads: bool
+) -> None:
+    """Interrupting a sub-agent frees its slot (agents.max_threads=1), so an injected
+    loop could start dozens of sub-agent runs in one call: after MAX_SUB_AGENT_RUNS the
+    call is stopped and the process replaced."""
+    with pytest.raises(ProviderError) as caught:
+        await collect(provider, make_request(marker))
+
+    assert caught.value.message == SUB_AGENT_LIMIT_MESSAGE
+    assert caught.value.kind == "invalid"
+    assert not caught.value.retryable
+    # The root turn is interrupted and the process replaced once idle: the loop stops
+    # right after the limit, not after the twelve runs the fake would otherwise start.
+    await wait_until(lambda: provider._conn is None)
+    await wait_until(lambda: not provider._background)
+    assert all(process_gone(pid) for pid in fake.pids())
+    [root] = fake.params("turn/start")
+    root_interrupts = [
+        p for p in fake.params("turn/interrupt") if p["threadId"] == root["threadId"]
+    ]
+    assert len(root_interrupts) == 1
+    runs = fake.entries("sub_agent_run")
+    assert MAX_SUB_AGENT_RUNS < len(runs) <= MAX_SUB_AGENT_RUNS + 3  # not all twelve
+    # The call's thread and every sub-agent thread it saw are unsubscribed.
+    threads = list(dict.fromkeys(run["thread"] for run in runs[: MAX_SUB_AGENT_RUNS + 1]))
+    assert len(threads) == (MAX_SUB_AGENT_RUNS + 1 if new_threads else 1)
+    unsubscribed = [p["threadId"] for p in fake.params("thread/unsubscribe")]
+    assert unsubscribed[0] == root["threadId"]
+    assert set(threads) <= set(unsubscribed[1:])
+
+    _, result = await collect(provider, make_request("[echo] tot bé"))
+    assert result.text.strip() == "tot bé"
+    assert len(set(fake.pids())) == 2
+
+
+async def test_a_process_with_sub_agents_waits_for_the_running_calls(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    """The replacement never cuts a call short: it waits until no call uses the process."""
+    first_delta = asyncio.Event()
+
+    async def slow() -> None:
+        async for _ in provider.stream(make_request("[slow]")):
+            first_delta.set()
+
+    running = asyncio.create_task(slow())
+    await asyncio.wait_for(first_delta.wait(), 5)
+    conn = provider._conn
+    assert conn is not None
+
+    _, result = await collect(provider, make_request("[spawn] fet"))
+    assert result.text.strip() == "fet"
+    await wait_until(lambda: len(fake.received("thread/unsubscribe")) == 2)
+    await asyncio.sleep(0.1)
+    assert provider._conn is conn and conn.alive and not running.done()
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await wait_until(lambda: provider._conn is None)
+    await wait_until(lambda: not conn.alive)
+    assert len(fake.received("thread/unsubscribe")) == 3
+
+
+def test_sub_agent_run_items() -> None:
+    def activity(kind: str) -> dict[str, Any]:
+        return {"type": "subAgentActivity", "id": "call_1", "kind": kind, "agentThreadId": "t1"}
+
+    assert sub_agent_run(activity("started")) == ("call_1", ["t1"])
+    assert sub_agent_run(activity("interacted")) == ("call_1", ["t1"])
+    assert sub_agent_run(activity("interrupted")) is None
+    assert sub_agent_run(activity("completed")) is None
+    spawn = {
+        "type": "collabAgentToolCall",
+        "id": "c2",
+        "tool": "spawnAgent",
+        "receiverThreadIds": ["t2", None],
+    }
+    assert sub_agent_run(spawn) == ("c2", ["t2"])
+    assert sub_agent_run({**spawn, "tool": "wait"}) is None
+    assert sub_agent_run({"type": "agentMessage", "id": "m1"}) is None
 
 
 async def test_concurrent_calls_share_one_process(
@@ -443,6 +553,75 @@ async def test_codex_state_dir_setting(fake: FakeCodex, tmp_path: Path) -> None:
     assert "SECRET-7732" in (state / "logs_2.sqlite").read_text(encoding="utf-8")
     assert not (fake.home / "logs_2.sqlite").exists()
     assert not (fake.data_dir / "sandbox" / "codex-state").exists()
+
+
+async def test_log_databases_are_deleted_before_every_start(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    """The log databases hold every prompt: they must not outlive the process, and on a
+    full state tmpfs a new app-server cannot even start. The state databases stay."""
+    state = fake.data_dir / "sandbox" / "codex-state"
+    state.mkdir(parents=True)
+    kept = {
+        "state_5.sqlite": "state",
+        "state_5.sqlite-wal": "state wal",
+        "goals_1.sqlite": "goals",
+        "logs_2.sqlite.bak": "not a log database",
+    }
+    stale = {
+        "logs_2.sqlite": "OLD-PROMPT-1",
+        "logs_2.sqlite-wal": "OLD-PROMPT-2",
+        "logs_2.sqlite-shm": "shm",
+        "logs_1.sqlite": "OLD-PROMPT-3",
+    }
+    for name, text in (kept | stale).items():
+        (state / name).write_text(text, encoding="utf-8")
+    (state / "logs_9.sqlite").mkdir()  # never a directory
+
+    await collect(provider, make_request("[echo] SECRET-A"))
+
+    log = (state / "logs_2.sqlite").read_text(encoding="utf-8")
+    assert "SECRET-A" in log and "OLD-PROMPT" not in log
+    for name in stale:
+        if name != "logs_2.sqlite":
+            assert not (state / name).exists(), name
+    for name, text in kept.items():
+        assert (state / name).read_text(encoding="utf-8") == text
+    assert (state / "logs_9.sqlite").is_dir()
+
+    # A restart (here after a crash) starts with empty logs again.
+    with pytest.raises(ProviderError):
+        await collect(provider, make_request("[crash]"))
+    await collect(provider, make_request("[echo] SECRET-B"))
+    log = (state / "logs_2.sqlite").read_text(encoding="utf-8")
+    assert "SECRET-B" in log and "SECRET-A" not in log
+    assert len(set(fake.pids())) == 2
+
+
+async def test_a_new_process_waits_for_the_old_one_to_stop(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    """Two app-servers must not share the state directory: the one being replaced may
+    still write (or unlink) the log databases the new start deletes."""
+    fake.options(term_delay=1.0)
+    await collect(provider, make_request("[spawn] fet"))
+    await wait_until(lambda: provider._conn is None)  # replaced: now shutting down slowly
+
+    await collect(provider, make_request("[echo] nou"))
+
+    await wait_until(lambda: fake.entries("exited"))
+    [old, new] = fake.entries("started")
+    [exited] = fake.entries("exited")
+    assert exited["pid"] == old["pid"] != new["pid"]
+    assert new["started"] >= exited["exited"]
+
+
+def test_remove_log_databases_returns_what_it_deleted(tmp_path: Path) -> None:
+    for name in ("logs_2.sqlite", "logs_2.sqlite-shm", "state_5.sqlite", "xlogs_2.sqlite"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    assert remove_log_databases(tmp_path) == ["logs_2.sqlite", "logs_2.sqlite-shm"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state_5.sqlite", "xlogs_2.sqlite"]
+    assert remove_log_databases(tmp_path) == []
 
 
 def test_codex_environment_filters_the_source() -> None:
@@ -685,6 +864,7 @@ def test_config_arguments_disable_tools_and_retries(tmp_path: Path) -> None:
         "analytics.enabled=false",
         "include_environment_context=false",
         "agents.max_threads=1",
+        "thread_unload_delay_secs=0",
     ):
         assert expected in pairs
     # A TOML string: codex parses the value after "=" as TOML.

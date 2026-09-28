@@ -1,15 +1,17 @@
 """Pure ASGI middlewares (no ``BaseHTTPMiddleware``, so streaming responses and
-WebSockets pass through untouched): security headers, request body limit and the
-``Origin`` check for state-changing requests.
+WebSockets pass through untouched): security headers, ``Connection: close`` for
+answers given before the request body arrived, the ``Origin`` check for
+state-changing requests and the request body limit.
 
-Order, outermost first: security headers -> Origin check -> body limit -> app, so
-the 403 and 413 answers of the inner two also carry the security headers.
+Order, outermost first: security headers -> unread body -> Origin check -> body
+limit -> app, so the 403 and 413 answers of the inner two also carry the security
+headers and close the connection when their body was never read.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Final
 
 from starlette.datastructures import Headers, MutableHeaders
@@ -38,6 +40,9 @@ CONTENT_SECURITY_POLICY: Final = "; ".join(
 PERMISSIONS_POLICY: Final = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 HSTS: Final = "max-age=63072000; includeSubDomains"
 MAX_BODY_BYTES: Final = 1024 * 1024
+SMALL_BODY_PATHS: Final[Mapping[str, int]] = {"/api/auth/login": 4096}
+"""Routes readable without a session get a tiny limit, so stalled anonymous bodies
+cannot pile up memory while they wait for the deadline."""
 BODY_TIMEOUT_SECONDS: Final = 15.0
 """Time allowed to receive a whole request body, from the app's first read."""
 STATE_CHANGING_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -102,6 +107,53 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def expects_body(headers: Headers) -> bool:
+    """Whether the request announces a body (``Content-Length`` > 0 or any
+    ``Transfer-Encoding``); without either, an HTTP/1.1 request has none."""
+    if "transfer-encoding" in headers:
+        return True
+    declared = headers.get("content-length")
+    if declared is None:
+        return False
+    declared = declared.strip()
+    return not declared.isdigit() or int(declared) > 0
+
+
+class CloseUnreadBodyMiddleware:
+    """Adds ``Connection: close`` to a response started while part of the request
+    body has not been received yet (403, 401, 413 or 429 answered before reading
+    it, or a body sent to a route that ignores it).
+
+    uvicorn discards the rest of such a body as it arrives, and every chunk
+    restarts its keep-alive timer, so a client trickling it could otherwise hold the
+    connection (and a file descriptor) forever. With ``Connection: close`` uvicorn
+    closes the socket right after the answer. Requests whose body was read to the
+    end keep their connection."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not expects_body(Headers(raw=scope["headers"])):
+            await self.app(scope, receive, send)
+            return
+        body_done = False
+
+        async def tracking_receive() -> Message:
+            nonlocal body_done
+            message = await receive()
+            if message["type"] != "http.request" or not message.get("more_body", False):
+                body_done = True
+            return message
+
+        async def closing_send(message: Message) -> None:
+            if message["type"] == "http.response.start" and not body_done:
+                MutableHeaders(scope=message)["Connection"] = "close"
+            await send(message)
+
+        await self.app(scope, tracking_receive, closing_send)
+
+
 class OriginCheckMiddleware:
     """Rejects ``POST``/``PUT``/``PATCH``/``DELETE`` requests whose ``Origin`` header
     is missing or not allowed with ``403 {"detail"}`` (CSRF defence on top of the
@@ -148,18 +200,25 @@ class BodyLimitMiddleware:
     stops sending) cannot hold a connection: it gets ``408`` and is disconnected."""
 
     def __init__(
-        self, app: ASGIApp, *, max_bytes: int = MAX_BODY_BYTES, timeout: float | None = None
+        self,
+        app: ASGIApp,
+        *,
+        max_bytes: int = MAX_BODY_BYTES,
+        timeout: float | None = None,
+        small_paths: Mapping[str, int] = SMALL_BODY_PATHS,
     ) -> None:
         self.app = app
         self._max = max_bytes
         self._timeout = BODY_TIMEOUT_SECONDS if timeout is None else timeout
+        self._small = small_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = self._small.get(scope["path"], self._max)
         declared = Headers(raw=scope["headers"]).get("content-length")
-        if declared is not None and declared.strip().isdigit() and int(declared) > self._max:
+        if declared is not None and declared.strip().isdigit() and int(declared) > limit:
             await self._reject(scope, receive, send, RequestTooLargeError())
             return
 
@@ -183,7 +242,7 @@ class BodyLimitMiddleware:
                 body_done = True
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self._max:
+                if received > limit:
                     raise RequestTooLargeError()
             return message
 

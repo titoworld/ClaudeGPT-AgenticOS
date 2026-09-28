@@ -86,6 +86,10 @@ class _Turn:
     events: list[str] = field(default_factory=list)
     """Serialized events; ``events[i]`` has ``seq == i + 1``."""
     subscribers: set[Subscriber] = field(default_factory=set)
+    """Subscribers receiving the live events."""
+    receivers: set[Subscriber] = field(default_factory=set)
+    """Every subscriber that got this turn's events (it started the turn or
+    subscribed to it), live or not: a repeated ``subscribe`` is ignored."""
     task: asyncio.Task[None] | None = None
     terminal: bool = False
     """A terminal event (completed, failed or cancelled) was published."""
@@ -179,6 +183,7 @@ class TurnManager:
         )
         if subscriber is not None:
             turn.subscribers.add(subscriber)
+            turn.receivers.add(subscriber)
         self._turns[request.request_id] = turn
         turn.task = asyncio.create_task(self._run(turn), name=f"turn-{request.request_id}")
         turn.task.add_done_callback(lambda task: self._on_done(turn, task))
@@ -186,10 +191,18 @@ class TurnManager:
     def subscribe(self, request_id: str, subscriber: Subscriber, after_seq: int = 0) -> bool:
         """Replay the buffered events with ``seq > after_seq`` to ``subscriber`` and,
         if the turn is still running, keep sending it live events. ``False`` if the
-        turn is unknown (never existed, or ended more than the retention ago)."""
+        turn is unknown (never existed, or ended more than the retention ago).
+
+        A subscriber that already got this turn (it started it or subscribed before)
+        is left as it is: it already has every event from its first ``after_seq`` on,
+        and replaying the buffer again would only queue it once more (a client that
+        does not read could otherwise make the server hold any number of copies)."""
         turn = self._turns.get(request_id)
         if turn is None:
             return False
+        if subscriber in turn.receivers:
+            return True
+        turn.receivers.add(subscriber)
         backlog = turn.events[max(after_seq, 0) :]
         if backlog and not subscriber.send_batch(backlog):
             return True
@@ -219,6 +232,7 @@ class TurnManager:
         """Stop sending events to ``subscriber`` (its connection closed)."""
         for turn in self._turns.values():
             turn.subscribers.discard(subscriber)
+            turn.receivers.discard(subscriber)
 
     async def aclose(self) -> None:
         """Cancel every running turn, wait for them and drop all buffers."""

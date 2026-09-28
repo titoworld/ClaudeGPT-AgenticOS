@@ -8,13 +8,12 @@
 //   sanitizes the result: HTML profile only (no SVG/MathML), no inline styles,
 //   links restricted to http(s)/mailto and opened in a new tab without referrer.
 // - Hidden characters (Trojan Source, CVE-2021-42574) are made visible after
-//   sanitizing, so the screen shows the same text a copy puts on the clipboard:
-//   inside code every bidi control and invisible character becomes a ⟨U+XXXX⟩
-//   mark; in prose only the bidi embeddings, overrides and isolates do, so
-//   legitimate RTL text, marks and joiners keep working.
+//   sanitizing, so the screen shows the same text a copy puts on the clipboard
+//   (see hidden-chars.ts: every one inside code, only bidi controls in prose).
 
 import createDOMPurify, { type Config, type DOMPurify } from 'dompurify';
 import { Marked } from 'marked';
+import { revealHiddenIn } from './hidden-chars';
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ESCAPES[c] ?? c);
@@ -65,75 +64,6 @@ function getPurifier(): DOMPurify {
   });
   purifier = p;
   return p;
-}
-
-// Explicit bidi embeddings, overrides and isolates: they reorder what is shown.
-const BIDI_CONTROLS = String.raw`\u202A-\u202E\u2066-\u2069`;
-// Zero-width and invisible characters: the listed Trojan Source set plus the
-// Arabic letter mark, invisible math operators, the Mongolian vowel separator
-// and Unicode tags (used to smuggle hidden instructions to other models).
-const INVISIBLE = String.raw`\u00AD\u061C\u180E\u200B-\u200F\u2060-\u2064\uFEFF\u{E0000}-\u{E007F}`;
-// Legitimate uses, kept as they are: joiners inside emoji sequences and the
-// subdivision flags (black flag, 3-6 lowercase/digit tags, cancel tag).
-const EMOJI_SEQUENCES =
-  String.raw`(?<=[\p{Extended_Pictographic}\p{Emoji_Modifier}]\uFE0F?)\u200D(?=\p{Extended_Pictographic})` +
-  String.raw`|\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{3,6}\u{E007F}`;
-
-/** Hidden characters in code, in capture group 1 (emoji sequences match without it). */
-const HIDDEN_IN_CODE = new RegExp(`${EMOJI_SEQUENCES}|([${BIDI_CONTROLS}${INVISIBLE}])`, 'gu');
-/** Hidden characters in prose, in capture group 1. */
-const HIDDEN_IN_PROSE = new RegExp(`([${BIDI_CONTROLS}])`, 'gu');
-const MAYBE_HIDDEN = new RegExp(`[${BIDI_CONTROLS}${INVISIBLE}]`, 'u');
-
-const codePoint = (char: string): string =>
-  `U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`;
-
-/**
- * Text for the clipboard: every hidden character becomes the same ⟨U+XXXX⟩
- * mark the rendered answer shows. `revealed` counts the replacements.
- */
-export function revealHidden(text: string): { text: string; revealed: number } {
-  let revealed = 0;
-  const visible = text.replace(HIDDEN_IN_CODE, (match: string, hidden: string | undefined) => {
-    if (hidden === undefined) return match;
-    revealed++;
-    return `⟨${codePoint(hidden)}⟩`;
-  });
-  return { text: visible, revealed };
-}
-
-/** Replace the hidden characters of one text node with marks built with DOM APIs. */
-function revealTextNode(node: Text, pattern: RegExp): void {
-  const doc = node.ownerDocument;
-  const parts = doc.createDocumentFragment();
-  const text = node.data;
-  let last = 0;
-  for (const m of text.matchAll(pattern)) {
-    const hidden = m[1];
-    if (hidden === undefined) continue;
-    if (m.index > last) parts.append(text.slice(last, m.index));
-    const cp = codePoint(hidden);
-    const span = doc.createElement('span');
-    span.className = 'invisible-char';
-    span.title = `Caràcter invisible o de control de direcció (${cp})`;
-    span.textContent = `⟨${cp}⟩`;
-    parts.append(span);
-    last = m.index + hidden.length;
-  }
-  if (last === 0) return;
-  if (last < text.length) parts.append(text.slice(last));
-  node.replaceWith(parts);
-}
-
-function revealHiddenIn(root: Node): void {
-  const walker = (root.ownerDocument ?? document).createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const nodes: Text[] = [];
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    if (MAYBE_HIDDEN.test((n as Text).data)) nodes.push(n as Text);
-  }
-  for (const node of nodes) {
-    revealTextNode(node, node.parentElement?.closest('code') ? HIDDEN_IN_CODE : HIDDEN_IN_PROSE);
-  }
 }
 
 /** Render untrusted markdown to safe HTML. */

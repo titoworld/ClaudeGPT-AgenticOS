@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import sqlite3
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -88,7 +89,7 @@ async def test_version_1_databases_are_migrated(tmp_path: Path) -> None:
 
     db = await Database.open(path)
     try:
-        assert await db.schema_version() == SCHEMA_VERSION == 2
+        assert await db.schema_version() == SCHEMA_VERSION == 3
         async with db.transaction(write=False) as tx:
             rows = await tx.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
             row = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
@@ -96,6 +97,66 @@ async def test_version_1_databases_are_migrated(tmp_path: Path) -> None:
         assert row is not None and row[0] == "1"
     finally:
         await db.close()
+
+
+async def test_version_2_savings_get_their_value_from_the_turns_meta(tmp_path: Path) -> None:
+    """Migration 3 adds ``savings.cost_usd`` and copies each turn's value from the
+    meta of its last final message (the only place it was stored), so the value
+    survives the deletion of the conversation afterwards."""
+    path = tmp_path / "db.sqlite3"
+    ts = "2026-09-27T10:00:00.000Z"
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        for statement in (*MIGRATIONS[0], *MIGRATIONS[1]):
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (1, 'C', ?, ?)",
+            (ts, ts),
+        )
+
+        def message(mid: int, turn: int, kind: str, final: int, meta: str) -> None:
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, turn_id, kind, final, content, meta, "
+                "created_at) VALUES (?, 1, ?, ?, ?, 'x', ?, ?)",
+                (mid, turn, kind, final, meta, ts),
+            )
+
+        def saving(turn: int | None, kind: str, tokens: int) -> None:
+            conn.execute(
+                "INSERT INTO savings (ts, conversation_id, turn_id, kind, tokens) "
+                "VALUES (?, 1, ?, ?, ?)",
+                (ts, turn, kind, tokens),
+            )
+
+        # Turn 1 (a duel): the last final answer has the turn's total.
+        message(1, 1, "question", 1, '{"mode": "duel"}')
+        message(2, 1, "answer", 1, '{"savings": {"total": 30, "cost_usd": 0.001}}')
+        message(3, 1, "answer", 1, '{"savings": {"total": 30, "cost_usd": 0.004}}')
+        saving(1, "compaction", 20)
+        saving(1, "unchanged", 10)
+        # Turn 4: no priced call, so no value.
+        message(4, 4, "question", 1, '{"mode": "solo"}')
+        message(5, 4, "answer", 1, '{"savings": {"total": 5, "cost_usd": null}}')
+        saving(4, "compaction", 5)
+        saving(None, "cache", 7)  # no turn to take a value from
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+    async with await SqliteStore.open(path) as store:
+        async with store._db.transaction(write=False) as tx:
+            assert await tx.user_version() == SCHEMA_VERSION == 3
+            rows = await tx.fetchall("SELECT turn_id, kind, cost_usd FROM savings ORDER BY id")
+        assert [tuple(row) for row in rows] == [
+            (1, "compaction", 0.004),
+            (1, "unchanged", None),
+            (4, "compaction", None),
+            (None, "cache", None),
+        ]
+        now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+        assert (await store.stats(1, now))["savings"]["cost_usd"] == 0.004
+        assert await store.delete_conversation(1)
+        stats = await store.stats(1, now)
+        assert stats["savings"]["cost_usd"] == 0.004  # kept with the savings history
+        assert stats["savings"]["total"] == 42
 
 
 async def test_newer_schema_is_rejected(tmp_path: Path) -> None:

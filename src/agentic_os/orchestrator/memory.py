@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from agentic_os.domain import AgentName, Usage
+from agentic_os.orchestrator.accounting import failed_call_usage, is_billed
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
 from agentic_os.orchestrator.store import History, Store, StoredMessage, UsageRecord
 from agentic_os.orchestrator.tokens import estimate_context_tokens
@@ -170,15 +171,20 @@ async def compact(
             else:
                 error = f"internal: {type(exc).__name__}"
                 logger.exception("Compaction summary by %s failed unexpectedly", agent)
+            # A failure can still be billed (a refusal): it is part of the summary cost.
+            model, failed = failed_call_usage(exc, request.model or "", price_overrides)
+            if is_billed(failed):
+                spent += failed
+                billed = True
             await store.record_usage(
                 UsageRecord(
                     conversation_id=conversation_id,
                     turn_id=None,
                     agent=agent,
                     provider_mode=provider.mode,
-                    model=request.model or "",
+                    model=model,
                     purpose="summary",
-                    usage=Usage(),
+                    usage=failed,
                     latency_ms=int((time.monotonic() - started) * 1000),
                     ttft_ms=None,
                     ok=False,

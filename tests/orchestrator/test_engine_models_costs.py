@@ -25,6 +25,7 @@ from agentic_os.orchestrator.events import (
 )
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
+from agentic_os.orchestrator.tokens import estimate_tokens
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.fake import FakeProvider
@@ -239,7 +240,7 @@ async def test_cost_basis_follows_the_provider_mode(store: InMemoryStore) -> Non
 # -- savings ----------------------------------------------------------------------------------
 
 
-async def test_savings_are_valued_at_the_average_price_of_the_turn(store: InMemoryStore) -> None:
+async def test_savings_are_valued_per_kind(store: InMemoryStore) -> None:
     providers: dict[AgentName, FakeProvider] = {
         agent: FakeProvider(agent, chunk_delay=0, agreements=[88])
         for agent in ("claude", "chatgpt")
@@ -250,14 +251,22 @@ async def test_savings_are_valued_at_the_average_price_of_the_turn(store: InMemo
     done = completed(events)
     assert done.savings.early_stop > 0 and done.savings.unchanged > 0
     assert done.consensus is not None and done.consensus.round == 1
-    calls = sum((e.usage for e in of_type(events, StreamCompleted)), Usage())
-    assert calls.cost_usd is not None
-    # Kept answers at the average price per token; the 3 skipped rounds at the average
-    # cost of a revision pair (the fakes report no cache tokens).
+    # Each kept answer at the output price of the model that kept it (before: one
+    # average price for the whole turn); the 3 skipped rounds at the average cost of a
+    # revision pair.
+    kept = [m for m in store.messages if m.kind == "revision" and m.meta["unchanged"] is True]
+    assert {m.agent for m in kept} == {"claude", "chatgpt"}
+    unchanged = sum(
+        estimate_tokens(m.content) * PRICES[str(m.meta["model"])].output / 1e6 for m in kept
+    )
     revisions = [u.usage.cost_usd or 0.0 for u in store.usage if u.purpose == "revision"]
     skipped = 3 * 2 * sum(revisions) / len(revisions)
-    expected = done.savings.unchanged * calls.cost_usd / calls.total_tokens + skipped
-    assert done.savings.cost_usd == pytest.approx(expected)
+    assert done.savings.cost_usd == pytest.approx(unchanged + skipped)
+    records = {s.kind: s.cost_usd for s in store.savings if s.turn_id == done.turn_id}
+    assert records == {
+        "unchanged": pytest.approx(unchanged),
+        "early_stop": pytest.approx(skipped),
+    }
     # The final message carries the same savings, for a reloaded conversation.
     (synthesis,) = finals(store, done)
     assert synthesis.meta["savings"] == done.savings.to_wire()

@@ -156,7 +156,32 @@ _V2: Final[tuple[str, ...]] = (
     "CREATE INDEX devices_expires_at ON devices (expires_at)",
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2)
+_V3: Final[tuple[str, ...]] = (
+    # Value in USD of each saving (SavingRecord.cost_usd), kept with the savings
+    # history: it used to be read only from the messages' meta, which deleting a
+    # conversation removes. NULL when it could not be priced.
+    "ALTER TABLE savings ADD COLUMN cost_usd REAL",
+    "CREATE INDEX savings_turn ON savings (turn_id)",
+    # Backfill: until now the value only existed as meta.savings.cost_usd of the last
+    # final message of each turn (the turn's total). It goes to the first saving row
+    # of the turn, so the stats keep it even after the conversation is deleted.
+    """
+    UPDATE savings SET cost_usd = (
+        SELECT CASE
+            WHEN json_type(m.meta, '$.savings.cost_usd') IN ('integer', 'real')
+            THEN json_extract(m.meta, '$.savings.cost_usd')
+        END
+        FROM messages AS m
+        WHERE m.turn_id = savings.turn_id AND m.final = 1 AND m.kind != 'question'
+          AND CASE WHEN json_valid(m.meta) THEN json_type(m.meta, '$.savings') END = 'object'
+        ORDER BY m.id DESC
+        LIMIT 1
+    )
+    WHERE id IN (SELECT MIN(id) FROM savings WHERE turn_id IS NOT NULL GROUP BY turn_id)
+    """,
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3)
 """Statements of each schema version, oldest first. Append only."""
 
 SCHEMA_VERSION: Final = len(MIGRATIONS)

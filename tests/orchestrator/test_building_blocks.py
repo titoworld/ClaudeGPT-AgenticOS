@@ -238,17 +238,18 @@ def test_accounting_savings() -> None:
     assert all(r.turn_id == 2 and r.tokens_saved > 0 for r in records)
 
 
-def test_savings_value_uses_the_average_price_of_priced_calls() -> None:
+def test_savings_value_uses_the_price_of_each_kind() -> None:
+    price = ModelPrice(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
     accounting = TurnAccounting()
     assert accounting.savings().cost_usd is None
     accounting.add_call(Usage(input_tokens=100, output_tokens=0), "answer")  # no price
     assert accounting.savings().cost_usd is None
     accounting.add_call(Usage(input_tokens=300, output_tokens=100, cost_usd=0.002), "answer")
     assert accounting.savings().cost_usd == 0.0  # known price, nothing saved yet
-    accounting.add_unchanged("x" * 400)  # 100 tokens at 0.002 / 400 per token
+    accounting.add_unchanged("x" * 400, price)  # 100 tokens at the output price
     accounting.compaction_per_request = 50
-    accounting.add_context_request()
-    assert accounting.savings().cost_usd == pytest.approx(150 * 0.002 / 400)
+    accounting.add_context_request(price)  # 50 tokens at the input price
+    assert accounting.savings().cost_usd == pytest.approx((100 * 10.0 + 50 * 2.0) / 1e6)
 
     cached = TurnAccounting()
     cached.cache, cached.cache_cost = 1234, 0.25

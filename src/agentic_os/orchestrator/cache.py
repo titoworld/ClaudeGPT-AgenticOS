@@ -80,12 +80,14 @@ def turn_cache_key(
 
 def replayed_message(message: NewMessage, *, conversation_id: int, turn_id: int) -> NewMessage:
     """A cached message moved to a new turn and flagged as ``cached``: a replay spends
-    nothing, so its usage is zero (no cost basis) and the original turn's savings go."""
+    nothing, so its usage is zero (no cost basis) and the original turn's savings and
+    unstored usage (its failed calls) go."""
     meta: dict[str, JsonValue] = dict(message.meta)
     meta["cached"] = True
     meta["usage"] = dict(Usage().to_dict())
     meta.pop("cost_basis", None)
     meta.pop("savings", None)
+    meta.pop("unstored_usage", None)
     return replace(message, conversation_id=conversation_id, turn_id=turn_id, meta=meta)
 
 

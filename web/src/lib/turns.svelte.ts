@@ -393,7 +393,9 @@ function storedTurnFinished(mode: TurnMode, streams: StreamView[]): boolean {
  * `consensus` and `usage` are read from any message meta when the backend
  * stores them; otherwise consensus is derived from the last revision round.
  * The total usage is the answers' plus the compaction summary's
- * (`question.meta.compaction_usage`), as in the live `turn.completed`.
+ * (`question.meta.compaction_usage`) plus the billed calls that stored no
+ * message (`unstored_usage` of the last final message, a running total), as in
+ * the live `turn.completed`.
  */
 export function turnsFromMessages(messages: Message[], conversationId: number | null = null): TurnView[] {
   const groups = new Map<number, Message[]>();
@@ -411,10 +413,15 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
     let savings: Savings | null = null;
     let consensus: Consensus | null = null;
     let usage: Usage | null = null;
+    let unstored: Usage | null = null;
+    let unstoredId = -Infinity;
 
     for (const m of group) {
       if (m.kind === 'question' || !m.agent) continue;
       const meta = m.meta ?? {};
+      // Every final message carries the running total: the last stored has the turn's.
+      const pending = m.final && m.id > unstoredId ? asUsage(meta.unstored_usage) : null;
+      if (pending) [unstored, unstoredId] = [pending, m.id];
       const s = newStream(`m${m.id}`, m.agent, m.kind, m.round, typeof meta.model === 'string' ? meta.model : '');
       s.text = m.content;
       s.critique = typeof meta.critique === 'string' ? meta.critique : '';
@@ -435,8 +442,9 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
     savings = asSavings(qmeta.savings) ?? savings;
     consensus = asConsensus(qmeta.consensus) ?? consensus;
     const compaction = asUsage(qmeta.compaction_usage);
-    if (!usage && compaction) {
-      usage = streams.reduce((total, s) => (s.usage ? addUsage(total, s.usage) : total), compaction);
+    const extra = compaction && unstored ? addUsage(compaction, unstored) : (compaction ?? unstored);
+    if (!usage && extra) {
+      usage = streams.reduce((total, s) => (s.usage ? addUsage(total, s.usage) : total), extra);
     }
 
     const mode: TurnMode =

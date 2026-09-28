@@ -21,6 +21,8 @@ import {
   debateMessages,
   message,
   priced,
+  retriedDuelEvents,
+  retriedDuelMessages,
   sequence,
   usage,
 } from './test-fixtures';
@@ -317,6 +319,60 @@ describe('turnsFromMessages: turn totals after a reload (F1)', () => {
 
   it('keeps summing the answers when there was no compaction', () => {
     const msgs = compactedDuelMessages().map((m) => (m.kind === 'question' ? { ...m, meta: { mode: 'duel' as const } } : m));
+    const [t] = turnsFromMessages(msgs);
+    expect(t!.usage).toBeNull();
+    expect(turnUsage(t!)).toMatchObject({ input_tokens: 912, output_tokens: 235 });
+  });
+});
+
+describe('turnsFromMessages: billed calls that stored no message (K16)', () => {
+  const liveTurn = () => {
+    const t = createLiveTurn({ requestId: 'req-r', question: 'I ara?', mode: 'duel', conversationId: 4 });
+    applyAll(t, retriedDuelEvents());
+    return t;
+  };
+
+  it('adds the unstored usage of the last final message, as the live total does', () => {
+    const live = liveTurn();
+    const [stored] = turnsFromMessages(retriedDuelMessages(), 4);
+    const a = turnUsage(live)!;
+    const b = turnUsage(stored!)!;
+    expect([b.input_tokens, b.output_tokens]).toEqual([a.input_tokens, a.output_tokens]);
+    expect([b.input_tokens, b.output_tokens]).toEqual([1692, 256]);
+    expect(b.cost_usd).toBeCloseTo(a.cost_usd!, 12);
+    expect(turnCost(stored!).totalUsd).toBeCloseTo(turnCost(live).totalUsd!, 12);
+  });
+
+  it('counts the running total once, whatever the order of the final messages', () => {
+    const msgs = retriedDuelMessages();
+    const [t] = turnsFromMessages([msgs[0]!, msgs[2]!, msgs[1]!]);
+    expect(turnUsage(t!)).toMatchObject({ input_tokens: 1692, output_tokens: 256 });
+    // An earlier final message with a smaller running total, a non-final one with any.
+    const extra = message({
+      id: 33, turn_id: 30, kind: 'revision', agent: 'claude', round: 1,
+      meta: { usage: usage(1, 1), unstored_usage: priced(9999, 9999, 1) },
+    });
+    const [u] = turnsFromMessages([...msgs, extra]);
+    expect(turnUsage(u!)).toMatchObject({ input_tokens: 1693, output_tokens: 257 });
+  });
+
+  it('adds it on top of the compaction summary', () => {
+    const summary = priced(768, 54, 0.003114);
+    const msgs = retriedDuelMessages().map((m) =>
+      m.kind === 'question' ? { ...m, meta: { ...m.meta, compaction_usage: summary } } : m,
+    );
+    const [t] = turnsFromMessages(msgs);
+    const total = turnUsage(t!)!;
+    expect([total.input_tokens, total.output_tokens]).toEqual([1692 + 768, 256 + 54]);
+    expect(total.cost_usd).toBeCloseTo(0.008681 + 0.003114, 12);
+  });
+
+  it('is left out of cached replays, which carry none', () => {
+    const msgs = retriedDuelMessages().map((m) => {
+      const meta = { ...m.meta };
+      delete meta.unstored_usage;
+      return { ...m, meta };
+    });
     const [t] = turnsFromMessages(msgs);
     expect(t!.usage).toBeNull();
     expect(turnUsage(t!)).toMatchObject({ input_tokens: 912, output_tokens: 235 });

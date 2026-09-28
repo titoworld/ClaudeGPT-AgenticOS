@@ -18,7 +18,7 @@ from typing import Final
 from agentic_os.config import Settings
 from agentic_os.domain import AGENTS, AgentName
 from agentic_os.fx import FxRate
-from agentic_os.pricing import DEFAULT_PRICES, ModelPrice, normalize_model
+from agentic_os.pricing import ModelPrice, price_table
 from agentic_os.providers.base import ModelInfo, Provider, ProviderStatus
 from agentic_os.server.tasks import cancel_and_wait
 from agentic_os.storage import RuntimeSettings
@@ -170,15 +170,11 @@ class ModelCatalog:
 
 
 def pricing_to_wire(fx: FxRate, overrides: Mapping[str, ModelPrice]) -> Wire:
-    """``Pricing`` of PROTOCOL.md: the default prices with the owner's over them (an
-    owner price replaces the default of the same normalized model id)."""
-    table: dict[str, tuple[str, ModelPrice, str]] = {
-        normalize_model(model): (model, price, "default") for model, price in DEFAULT_PRICES.items()
-    }
-    for model, price in overrides.items():
-        table[normalize_model(model)] = (model, price, "custom")
+    """``Pricing`` of PROTOCOL.md: exactly the rows of the effective price table the
+    engine charges with (:func:`~agentic_os.pricing.price_table`: the default prices
+    with the owner's over them), sorted by model id."""
+    entries = sorted(price_table(overrides).values(), key=lambda entry: entry.model)
     prices = [
-        {"model": model, **price.to_wire(), "source": source}
-        for model, price, source in sorted(table.values(), key=lambda entry: entry[0])
+        {"model": entry.model, **entry.price.to_wire(), "source": entry.source} for entry in entries
     ]
     return {"fx": fx.to_wire(), "prices": prices}

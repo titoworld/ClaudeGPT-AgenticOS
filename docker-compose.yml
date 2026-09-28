@@ -48,7 +48,8 @@ services:
       - /tmp:size=256m,mode=1777,exec
       # Codex's SQLite state and logs, which record every prompt: in memory,
       # private and outside the backed-up volumes (AOS_CODEX_STATE_DIR in the
-      # Dockerfile). Emptied on every restart.
+      # Dockerfile). The app deletes the logs before every Codex start, so a full
+      # tmpfs cannot keep Codex down; a container restart empties all of it.
       - /run/codex-state:size=64m,mode=0700,uid=10001,gid=10001
     cap_drop: [ALL]
     security_opt:
@@ -138,6 +139,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    # Request bodies are streamed to the app, never buffered here (deploy/Caddyfile).
     mem_limit: 256m
     networks:
       - edge

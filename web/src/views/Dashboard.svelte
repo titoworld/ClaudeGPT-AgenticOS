@@ -406,8 +406,8 @@
                 {:else if money.saved == null}
                   Sense valor calculat per als {formatTokens(k.saved.total)} tokens estalviats.
                 {:else}
-                  Valor aproximat dels <strong>{formatTokens(k.saved.total)}</strong> tokens estalviats, al preu mitjà de
-                  cada torn.
+                  Valor aproximat dels <strong>{formatTokens(k.saved.total)}</strong> tokens estalviats, cada tipus al preu
+                  del que s'ha evitat.
                 {/if}
               </p>
             </article>
