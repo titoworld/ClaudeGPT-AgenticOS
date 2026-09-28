@@ -132,3 +132,15 @@ async def test_revoke_revoke_all_and_purge(sessions: SessionManager) -> None:
 def test_timeouts_must_be_positive(store: SqliteStore) -> None:
     with pytest.raises(ValueError):
         SessionManager(store, idle_timeout=timedelta(0), max_age=timedelta(days=1))
+
+
+async def test_issue_prepares_a_session_without_storing_it(
+    store: SqliteStore, sessions: SessionManager
+) -> None:
+    token, record = sessions.issue(T0, ip="203.0.113.5", user_agent="Firefox")
+    assert record.token_hash == hash_token(token)
+    assert record.created_at == record.last_seen_at == T0
+    assert record.expires_at == T0 + timedelta(days=7)
+    assert (record.ip, record.user_agent) == ("203.0.113.5", "Firefox")
+    assert await store.get_session(record.token_hash) is None  # a login stores it
+    assert sessions.issue(T0, ip=None, user_agent=None)[0] != token

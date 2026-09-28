@@ -65,3 +65,13 @@ async def test_revoke_revoke_all_and_purge(devices: DeviceManager) -> None:
 def test_max_age_must_be_positive(store: SqliteStore) -> None:
     with pytest.raises(ValueError):
         DeviceManager(store, max_age=timedelta(0))
+
+
+async def test_issue_prepares_a_device_without_storing_it(
+    store: SqliteStore, devices: DeviceManager
+) -> None:
+    token, record = devices.issue(T0)
+    assert record.token_hash == hash_token(token)
+    assert (record.created_at, record.expires_at) == (T0, T0 + DEVICE_MAX_AGE)
+    assert await store.get_device(record.token_hash) is None  # a login stores it
+    assert await devices.check(token, T0) is None

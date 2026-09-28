@@ -17,8 +17,10 @@ from agentic_os.orchestrator.store import (
 from agentic_os.pricing import ModelPrice
 from agentic_os.storage import (
     ConversationNotFoundError,
+    DeviceRecord,
     FxSettings,
     RuntimeSettings,
+    SessionRecord,
     SqliteStore,
     StoredFxRate,
 )
@@ -517,14 +519,19 @@ async def test_owner_lifecycle(store: SqliteStore, clock: FakeClock) -> None:
     assert await store.consume_totp_step(6) is False
 
     clock.advance(10)
-    await store.update_password_hash("hash2")
+    session = SessionRecord("s1", T0, T0, T0 + timedelta(days=1), None, None)
+    device = DeviceRecord("d1", T0, T0 + timedelta(days=365))
+    assert await store.complete_login(
+        owner, step=7, session=session, device=device, password_hash="hash2"
+    )
     owner = await store.get_owner()
     assert owner is not None
     assert owner.password_hash == "hash2"
-    assert owner.totp_last_step == 6
+    assert owner.totp_last_step == 7
     assert owner.updated_at == T0 + timedelta(seconds=10)
 
-    assert await store.set_owner(password_hash="h3", totp_secret="S3", totp_last_step=0) == 0
+    # The session of that login is revoked.
+    assert await store.set_owner(password_hash="h3", totp_secret="S3", totp_last_step=0) == 1
     owner = await store.get_owner()
     assert owner is not None
     assert (owner.password_hash, owner.totp_last_step, owner.created_at) == ("h3", 0, T0)

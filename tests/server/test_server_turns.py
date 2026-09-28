@@ -278,6 +278,68 @@ async def test_aclose_cancels_running_turns() -> None:
     assert turns.active_turns() == []
 
 
+# -- deleted conversations (audit point 6) ---------------------------------------------
+
+
+async def test_forgetting_a_conversation_drops_its_finished_turns_at_once() -> None:
+    runner = ScriptedRunner()
+    runner.gate.set()
+    turns = TurnManager(runner)
+    turns.start(request("r1"))  # conversation 41
+    await settle()
+    turns.start(request("r2"))  # conversation 42
+    await settle()
+    assert not turns.is_running("r1") and not turns.is_running("r2")
+
+    assert turns.forget_conversation(41) == 1
+    assert not turns.subscribe("r1", Recorder())
+    assert not turns.cancel("r1")
+    replay = Recorder()
+    assert turns.subscribe("r2", replay)  # another conversation keeps its turns
+    assert replay.types == ["turn.started", "phase", "turn.completed"]
+    assert turns.forget_conversation(41) == 0
+    await turns.aclose()
+
+
+async def test_forgetting_a_conversation_drops_its_running_turns_when_they_end() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(request("r1"), live)  # conversation 41
+    await settle()
+
+    assert turns.forget_conversation(41) == 1
+    assert not turns.subscribe("r1", Recorder())  # unknown at once
+    assert turns.active_turns() == []  # not announced to new connections either
+    assert turns.is_running("r1")  # it still holds its slot until it ends
+    with pytest.raises(TurnRejectedError):
+        turns.start(request("again", conversation_id=41))
+
+    runner.gate.set()
+    await settle()
+    assert live.types == ["turn.started", "phase", "turn.completed"]  # its tab saw the end
+    assert not turns.is_running("r1")
+    assert not turns.subscribe("r1", Recorder())
+    assert not turns.cancel("r1")  # gone at once, without the retention
+    await turns.aclose()
+
+
+async def test_a_turn_cancelled_before_the_conversation_is_deleted_is_forgotten() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(request("r1"), live)
+    await settle()
+    # What DELETE /api/conversations/{id} does: cancel, delete, then forget.
+    assert turns.cancel_conversation(41) == 1
+    assert turns.forget_conversation(41) == 1
+    await settle()
+    assert live.types == ["turn.started", "phase", "turn.cancelled"]
+    assert not turns.subscribe("r1", Recorder())
+    assert turns.active_turns() == []
+    await turns.aclose()
+
+
 # -- provider status -------------------------------------------------------------------
 
 

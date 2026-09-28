@@ -2,6 +2,7 @@
 
 import logging
 import math
+from datetime import datetime
 from typing import Final
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -13,6 +14,7 @@ from agentic_os.security.passwords import (
     needs_rehash,
     verify_password_async,
 )
+from agentic_os.security.sessions import hash_token, is_well_formed
 from agentic_os.server.deps import (
     AppState,
     SessionDep,
@@ -20,6 +22,7 @@ from agentic_os.server.deps import (
     client_ip,
     read_json,
 )
+from agentic_os.storage import OwnerRecord
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,52 @@ def _credentials(body: object) -> tuple[str, str]:
     raise HTTPException(status_code=422, detail="Cal indicar la contrasenya i el codi TOTP.")
 
 
+def _token_hash(token: str | None) -> str | None:
+    return hash_token(token) if is_well_formed(token) else None
+
+
+async def _rehash(password_hash: str, password: str) -> str | None:
+    """A new hash of ``password`` if ``password_hash`` was made with older parameters,
+    else ``None``. Computed before the login's transaction; if it fails, the login
+    still works and keeps the old hash."""
+    if not needs_rehash(password_hash):
+        return None
+    try:
+        return await hash_password_async(password)
+    except Exception:
+        logger.exception("Could not rehash the owner password")
+        return None
+
+
+async def _complete_login(
+    state: AppState,
+    request: Request,
+    owner: OwnerRecord,
+    step: int,
+    password: str,
+    now: datetime,
+) -> tuple[str, str] | None:
+    """Finish a login whose credentials match ``owner`` in one transaction (see
+    ``SqliteStore.complete_login``): the new session and device tokens, or ``None`` if
+    the owner changed meanwhile (``agentic-os init``) or the code was already used."""
+    session_token, session = state.sessions.issue(
+        now, ip=client_ip(request), user_agent=request.headers.get("user-agent")
+    )
+    device_token, device = state.devices.issue(now)
+    done = await state.store.complete_login(
+        owner,
+        step=step,
+        session=session,
+        device=device,
+        password_hash=await _rehash(owner.password_hash, password),
+        # Never reuse a session token presented before the login (session fixation);
+        # the device token is replaced on every login, so a device holds just one.
+        ended_session=_token_hash(request.cookies.get(state.cookie_name)),
+        forgotten_device=_token_hash(request.cookies.get(state.device_cookie_name)),
+    )
+    return (session_token, device_token) if done else None
+
+
 def _set_cookie(response: Response, state: AppState, name: str, value: str, max_age: int) -> None:
     response.set_cookie(
         name,
@@ -95,8 +144,10 @@ async def login(request: Request, state: StateDep) -> Response:
     wait = await state.throttle.retry_after(ip, state.clock(), device=device)
     if wait > 0:
         return _too_many_attempts(wait)
-    # The body is read outside the lock: a slow upload must not block other logins.
-    password, code = _credentials(await read_json(request))
+    # The body is read outside the lock: a slow upload must not block other logins. A
+    # password that is not valid UTF-8 is a wrong password (it counts for the lockout),
+    # not an invalid request.
+    password, code = _credentials(await read_json(request, utf8_only=False))
     async with state.login_lock:
         now = state.clock()
         # Again, atomically this time.
@@ -104,31 +155,27 @@ async def login(request: Request, state: StateDep) -> Response:
         if wait > 0:
             return _too_many_attempts(wait)
         owner = await state.store.get_owner()
-        step: int | None = None
+        tokens: tuple[str, str] | None = None
         if owner is None:
             await verify_password_async(await _dummy_password_hash(), password)
-            password_ok = False
         else:
             password_ok = await verify_password_async(owner.password_hash, password)
             step = totp.verify(code, owner.totp_secret, owner.totp_last_step, now=now)
-        # The TOTP step is consumed (replay protection) only with the right password.
-        ok = password_ok and step is not None and await state.store.consume_totp_step(step)
-        if owner is None or not ok:
+            # The TOTP step is consumed (replay protection) only with the right password,
+            # in the same transaction as the session, and only if the owner is still the
+            # one just checked: `agentic-os init` may have replaced it meanwhile.
+            if password_ok and step is not None:
+                tokens = await _complete_login(state, request, owner, step, password, now)
+        if tokens is None:
             await state.throttle.record_failure(ip, now, device=device)
             raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
         await state.throttle.record_success(ip, device=device)
 
-    if needs_rehash(owner.password_hash):
-        try:
-            await state.store.update_password_hash(await hash_password_async(password))
-        except Exception:
-            logger.exception("Could not rehash the owner password")
-    # Never reuse a session token presented before the login (session fixation).
-    await state.end_session(request.cookies.get(state.cookie_name))
-    token = await state.sessions.create(now, ip=ip, user_agent=request.headers.get("user-agent"))
-    # The device token is replaced on every login, so a device holds just one.
-    await state.devices.revoke(device_token)
-    new_device = await state.devices.create(now)
+    token, new_device = tokens
+    # The session presented with the login ended in its transaction: close its sockets.
+    ended = _token_hash(request.cookies.get(state.cookie_name))
+    if ended is not None:
+        state.connections.revoke(ended)
     response = Response(status_code=204)
     _set_cookie(
         response, state, state.cookie_name, token, int(state.sessions.max_age.total_seconds())

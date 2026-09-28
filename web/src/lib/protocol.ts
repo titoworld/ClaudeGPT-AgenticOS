@@ -334,3 +334,14 @@ export type ServerMessage =
 /** WebSocket close codes used by the server. */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
 export const WS_CLOSE_FORBIDDEN_ORIGIN = 4403;
+
+// ---------------------------------------------------------------- sessions
+
+/**
+ * Request header (value "1") of the REST requests the app makes by itself, not because
+ * the owner did something: refreshes after `hello` or a reconnection, periodic
+ * refreshes, retries. The server checks the session without counting them as activity,
+ * like a WebSocket ping, so an unused tab does not keep the session alive. Every
+ * POST /api/auth/logout carries it too: a logout that fails must not extend the session.
+ */
+export const BACKGROUND_HEADER = 'X-AOS-Background';

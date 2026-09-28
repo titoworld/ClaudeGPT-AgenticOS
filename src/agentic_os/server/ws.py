@@ -8,13 +8,17 @@ reconnecting. A replay takes a single place in the queue, however long it is, bu
 its events count towards :data:`MAX_PENDING_EVENTS`, and a connection gets each
 turn only once (a repeated ``turn.subscribe`` is ignored), so a client that never
 reads cannot make the server hold an unbounded number of events for it.
-Invalid messages get an ``error`` answer; they never close the socket.
+Invalid messages get an ``error`` answer; they never close the socket. That includes
+text that is not valid UTF-8 (a lone surrogate written as a ``\\ud800`` escape),
+refused before any part of the message is used or echoed back.
 
-The session is checked again on every message (read-only for ``ping``, so that
-heartbeats never keep an idle session alive) and every
+The session is checked in the handshake, again on every message and every
 :data:`SESSION_CHECK_SECONDS` even if the client sends nothing: a socket whose
 session ended (logout, ``agentic-os reset-sessions``, expiry) is closed with
-``4401``. A logout in this process closes its sockets at once.
+``4401``. A logout in this process closes its sockets at once. Only the owner's
+actions (:data:`ACTIVITY_MESSAGES`) refresh the idle timeout; the handshake, pings,
+resubscriptions and the periodic check are read-only, so a tab left open (and
+reconnecting) never keeps an idle session alive.
 """
 
 import asyncio
@@ -33,7 +37,7 @@ from agentic_os.domain import AGENTS, AgentName, TurnMode, TurnOptions
 from agentic_os.orchestrator.events import Wire
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.security.sessions import hash_token
-from agentic_os.server.deps import AppState, app_state
+from agentic_os.server.deps import MAX_SQLITE_ID, AppState, app_state, has_invalid_text
 from agentic_os.server.middleware import origin_allowed
 from agentic_os.server.status import status_to_wire
 from agentic_os.server.tasks import cancel_and_wait
@@ -61,6 +65,11 @@ can still be recovered (after a 1013 the client resumes from what it got)."""
 SESSION_CHECK_SECONDS: Final = 30.0
 """How often an open socket re-checks its session (read-only)."""
 MAX_REQUEST_ID_LENGTH: Final = 128
+ACTIVITY_MESSAGES: Final = frozenset({"turn.start", "turn.cancel"})
+"""Messages that are the owner's activity (they refresh the session's idle timeout).
+The others check the session read-only: ``ping`` and ``turn.subscribe`` are sent by
+the client by itself (heartbeats, resubscriptions after a reconnection)."""
+INVALID_TEXT_MESSAGE: Final = "El missatge conté text que no és UTF-8 vàlid."
 
 
 class ProtocolError(Exception):
@@ -97,6 +106,15 @@ def parse_request_id(data: Mapping[str, object]) -> str:
             f"«request_id» ha de ser un text d'1 a {MAX_REQUEST_ID_LENGTH} caràcters."
         )
     return request_id
+
+
+def valid_request_id(data: Mapping[str, object]) -> str | None:
+    """The message's ``request_id`` if it is valid (to name the request in an
+    ``error``), else ``None``."""
+    try:
+        return parse_request_id(data)
+    except ProtocolError:
+        return None
 
 
 def turn_options(options: object, runtime: RuntimeSettings) -> TurnOptions:
@@ -164,7 +182,9 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         )
         raw_conversation = data.get("conversation_id")
         conversation_id = _int(raw_conversation)
-        if raw_conversation is not None and (conversation_id is None or conversation_id < 1):
+        if raw_conversation is not None and (
+            conversation_id is None or not 1 <= conversation_id <= MAX_SQLITE_ID
+        ):
             raise ProtocolError("«conversation_id» ha de ser un enter positiu o null.")
         options = turn_options(data.get("options"), runtime)
         models = turn_models(data.get("models"), runtime)
@@ -302,9 +322,12 @@ class ClientSession:
                 self._connection.error("El missatge ha de ser un objecte amb un camp «type».")
                 continue
             kind: str = data["type"]
-            if not await self._session_alive(touch=kind != "ping"):
+            if not await self._session_alive(touch=kind in ACTIVITY_MESSAGES):
                 return CLOSE_UNAUTHORIZED
             try:
+                if has_invalid_text(data):
+                    # Nothing of it is used, nor echoed: it could not even be sent back.
+                    raise ProtocolError(INVALID_TEXT_MESSAGE, request_id=valid_request_id(data))
                 await self._dispatch(kind, data)
             except ProtocolError as exc:
                 self._connection.error(exc.message, request_id=exc.request_id)
@@ -320,7 +343,7 @@ class ClientSession:
 
     async def _session_alive(self, *, touch: bool) -> bool:
         """Whether the session is still live. Only ``touch`` checks count as activity
-        (they refresh the idle timeout); pings and the watchdog are read-only."""
+        (they refresh the idle timeout); the others and the watchdog are read-only."""
         sessions, now = self._state.sessions, self._state.clock()
         if touch:
             return await sessions.validate(self._token, now) is not None
@@ -395,7 +418,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await _close(websocket, CLOSE_FORBIDDEN_ORIGIN)
         return
     token = websocket.cookies.get(state.cookie_name)
-    if token is None or await state.sessions.validate(token, state.clock()) is None:
+    # Read-only: a (re)connection is not the owner's activity.
+    if token is None or await state.sessions.peek(token, state.clock()) is None:
         await _close(websocket, CLOSE_UNAUTHORIZED)
         return
 

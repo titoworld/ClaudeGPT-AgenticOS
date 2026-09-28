@@ -3,6 +3,7 @@ import {
   BACKOFF_MAX_MS,
   Connection,
   PING_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
   STABLE_AFTER_MS,
   WARMUP_PING_MS,
   backoffDelay,
@@ -166,6 +167,7 @@ describe('Connection', () => {
     expect(messages).toHaveLength(0); // pongs are not forwarded
     vi.advanceTimersByTime(WARMUP_PING_MS);
     expect(pings()).toHaveLength(2); // warm-up ping
+    last().receive({ type: 'pong', t: pings()[1]!.t });
     vi.advanceTimersByTime(PING_INTERVAL_MS - WARMUP_PING_MS);
     expect(pings().filter((p) => p.type === 'ping')).toHaveLength(3);
     vi.advanceTimersByTime(PING_INTERVAL_MS);
@@ -235,5 +237,94 @@ describe('Connection', () => {
     vi.advanceTimersByTime(60_000);
     expect(FakeSocket.instances.length).toBe(count);
     expect(conn.status).toBe('closed');
+  });
+});
+
+// Liveness comes from pings that get no answer, never from silence (audit N7): a hidden
+// tab runs its timers late (Chrome: once a minute), and silence between two late ticks
+// says nothing about the socket. See ws-throttle.test.ts for a model of Chrome's policy.
+describe('Connection liveness (N7)', () => {
+  /** The server answers every ping, a moment later (message events are always asynchronous). */
+  function answerPings(socket: FakeSocket): void {
+    const send = socket.send.bind(socket);
+    socket.send = (data: string) => {
+      send(data);
+      const msg = JSON.parse(data) as { type: string; t: number };
+      if (msg.type === 'ping') queueMicrotask(() => socket.receive({ type: 'pong', t: msg.t }));
+    };
+  }
+
+  const pingCount = (socket: FakeSocket) =>
+    socket.sent.filter((s) => (JSON.parse(s) as { type: string }).type === 'ping').length;
+
+  it('keeps a socket that answers its pings, however late the timers run', async () => {
+    const { conn } = make();
+    conn.connect();
+    const socket = last();
+    answerPings(socket);
+    socket.open();
+    await vi.advanceTimersByTimeAsync(WARMUP_PING_MS);
+    for (let i = 0; i < 30; i++) {
+      // Like a hidden Chrome tab: each tick runs a minute after the one before.
+      vi.setSystemTime(Date.now() + 60_000 - PING_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
+    }
+    expect(socket.closedWith).toBeNull();
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(conn.status).toBe('open');
+    expect(pingCount(socket)).toBeGreaterThanOrEqual(32);
+  });
+
+  it('drops a socket once a ping has had no answer for longer than PONG_TIMEOUT_MS', () => {
+    const { conn } = make();
+    conn.connect();
+    const socket = last();
+    socket.open(); // pings at once; nothing ever answers
+    vi.advanceTimersByTime(PING_INTERVAL_MS);
+    expect(PING_INTERVAL_MS).toBeLessThanOrEqual(PONG_TIMEOUT_MS);
+    expect(socket.closedWith).toBeNull(); // 20 s without an answer: not yet
+    vi.advanceTimersByTime(PING_INTERVAL_MS);
+    expect(socket.closedWith).toBe(4000); // 40 s
+    expect(conn.status).toBe('reconnecting');
+  });
+
+  it('counts any message as an answer to the pings sent before it', () => {
+    const { conn } = make();
+    conn.connect();
+    const socket = last();
+    socket.open();
+    vi.advanceTimersByTime(25_000);
+    socket.receive({ type: 'turn.unknown', request_id: 'x' });
+    vi.advanceTimersByTime(15_000); // 40 s: the ping of 0 s was answered at 25 s
+    expect(socket.closedWith).toBeNull();
+    vi.advanceTimersByTime(40_000); // 80 s: the ping of 40 s has had no answer for 40 s
+    expect(socket.closedWith).toBe(4000);
+    expect(conn.status).toBe('reconnecting');
+  });
+
+  it('checks at once when the tab becomes visible: a ping', async () => {
+    const { conn } = make();
+    conn.connect();
+    const socket = last();
+    answerPings(socket);
+    socket.open();
+    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS + 3_000);
+    const before = pingCount(socket);
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(pingCount(socket)).toBe(before + 1);
+    expect(socket.closedWith).toBeNull();
+    expect(conn.status).toBe('open');
+  });
+
+  it('checks at once when the tab becomes visible: a ping unanswered for too long drops it', () => {
+    const { conn } = make();
+    conn.connect();
+    const socket = last();
+    socket.open(); // this ping never gets an answer
+    vi.advanceTimersByTime(PONG_TIMEOUT_MS + 5_000); // the next check (a tick) would be at 40 s
+    expect(socket.closedWith).toBeNull();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(socket.closedWith).toBe(4000);
+    expect(conn.status).toBe('reconnecting');
   });
 });

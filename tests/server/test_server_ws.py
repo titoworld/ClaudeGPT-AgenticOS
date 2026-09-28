@@ -422,6 +422,57 @@ def test_turn_survives_disconnect_and_subscribe_replays(tmp_path: Path) -> None:
         assert replay == first + rest[2:]
 
 
+def auth_headers(token: str) -> dict[str, str]:
+    return {"origin": ORIGIN, "cookie": f"{COOKIE}={token}"}
+
+
+def test_the_turns_of_a_deleted_conversation_are_forgotten(tmp_path: Path) -> None:
+    with app_client(tmp_path) as (client, _state, token):
+        with connect(client, token) as ws:
+            ws.receive_json()
+            ws.send_json(start("r-kept"))
+            kept = receive_until(ws, is_type("turn.completed"))
+            ws.send_json(start("r-old", text="Pla privat de vacances 2027"))
+            old = receive_until(ws, is_type("turn.completed"))
+        conversation_id = old[0]["conversation_id"]
+        assert conversation_id != kept[0]["conversation_id"]
+        path = f"/api/conversations/{conversation_id}"
+        assert client.delete(path, headers=auth_headers(token)).status_code == 204
+        assert client.get(path, headers=auth_headers(token)).status_code == 404
+
+        with connect(client, token) as ws:
+            ws.receive_json()
+            ws.send_json({"type": "turn.subscribe", "request_id": "r-old", "after_seq": 0})
+            assert ws.receive_json() == {"type": "turn.unknown", "request_id": "r-old"}
+            # The other conversation's turn can still be recovered.
+            ws.send_json({"type": "turn.subscribe", "request_id": "r-kept", "after_seq": 0})
+            assert receive_until(ws, is_type("turn.completed")) == kept
+
+
+def test_a_running_turn_of_a_deleted_conversation_is_cancelled_and_forgotten(
+    tmp_path: Path,
+) -> None:
+    providers = gates()
+    with app_client(tmp_path, dict(providers)) as (client, _state, token):
+        with connect(client, token) as ws:
+            ws.receive_json()
+            ws.send_json(start("r-run"))
+            live = receive_until(ws, is_type("stream.delta"))
+            path = f"/api/conversations/{live[0]['conversation_id']}"
+            assert client.delete(path, headers=auth_headers(token)).status_code == 204
+            end = receive_until(ws, lambda m: m["type"].startswith("turn."))
+            assert end[-1] == {
+                "type": "turn.cancelled",
+                "request_id": "r-run",
+                "seq": len(live) + len(end),
+            }
+
+        with connect(client, token) as ws:
+            assert ws.receive_json()["active_turns"] == []
+            ws.send_json({"type": "turn.subscribe", "request_id": "r-run", "after_seq": 0})
+            assert ws.receive_json() == {"type": "turn.unknown", "request_id": "r-run"}
+
+
 def test_cancel(tmp_path: Path) -> None:
     gate = GateProvider("claude")
     providers: dict[AgentName, Provider] = {"claude": gate, "chatgpt": GateProvider("chatgpt")}

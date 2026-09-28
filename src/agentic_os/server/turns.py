@@ -5,7 +5,8 @@ a per-turn ``seq`` (1, 2, 3...), is serialized once, appended to the turn's buff
 and handed to the current subscribers. Buffers are kept while the turn runs and
 for :data:`RETENTION_SECONDS` after it ends, so a client that reconnects can ask
 for what it missed (``turn.subscribe``). Only ``turn.cancel`` (or shutdown) stops a
-turn; a subscriber going away does not.
+turn; a subscriber going away does not. Deleting a conversation cancels its turns
+and forgets them, so their content can no longer be replayed.
 """
 
 from __future__ import annotations
@@ -95,6 +96,9 @@ class _Turn:
     """A terminal event (completed, failed or cancelled) was published."""
     finished: bool = False
     """The task has ended (no more events)."""
+    forgotten: bool = False
+    """Its conversation was deleted: unknown to ``subscribe`` and dropped as soon as
+    it ends (see :meth:`TurnManager.forget_conversation`)."""
     expiry: asyncio.TimerHandle | None = None
 
     @property
@@ -127,7 +131,8 @@ class TurnManager:
 
     def active_turns(self) -> list[Wire]:
         """Running turns for ``hello``: ``{request_id, conversation_id, last_seq}``
-        (``conversation_id`` is ``None`` until a new conversation is created)."""
+        (``conversation_id`` is ``None`` until a new conversation is created). The
+        turns of a deleted conversation, still ending, are left out."""
         return [
             {
                 "request_id": turn.request_id,
@@ -135,6 +140,7 @@ class TurnManager:
                 "last_seq": len(turn.events),
             }
             for turn in self._running()
+            if not turn.forgotten
         ]
 
     def is_running(self, request_id: str) -> bool:
@@ -191,14 +197,15 @@ class TurnManager:
     def subscribe(self, request_id: str, subscriber: Subscriber, after_seq: int = 0) -> bool:
         """Replay the buffered events with ``seq > after_seq`` to ``subscriber`` and,
         if the turn is still running, keep sending it live events. ``False`` if the
-        turn is unknown (never existed, or ended more than the retention ago).
+        turn is unknown (never existed, ended more than the retention ago, or its
+        conversation was deleted).
 
         A subscriber that already got this turn (it started it or subscribed before)
         is left as it is: it already has every event from its first ``after_seq`` on,
         and replaying the buffer again would only queue it once more (a client that
         does not read could otherwise make the server hold any number of copies)."""
         turn = self._turns.get(request_id)
-        if turn is None:
+        if turn is None or turn.forgotten:
             return False
         if subscriber in turn.receivers:
             return True
@@ -227,6 +234,21 @@ class TurnManager:
             if turn.conversation_id == conversation_id and self.cancel(turn.request_id):
                 cancelled += 1
         return cancelled
+
+    def forget_conversation(self, conversation_id: int) -> int:
+        """Forget the turns of a deleted conversation, so their content can no longer
+        be replayed: finished turns at once, running ones as soon as they end (their
+        own subscribers still get the rest). ``subscribe`` treats them as unknown from
+        now on. Returns how many turns there were."""
+        forgotten = 0
+        for request_id, turn in list(self._turns.items()):
+            if turn.conversation_id != conversation_id:
+                continue
+            forgotten += 1
+            turn.forgotten = True
+            if turn.finished:
+                self._drop(request_id, turn)
+        return forgotten
 
     def detach(self, subscriber: Subscriber) -> None:
         """Stop sending events to ``subscriber`` (its connection closed)."""
@@ -285,10 +307,17 @@ class TurnManager:
         turn.subscribers.clear()
         if self._closed:
             return
+        if turn.forgotten:
+            self._drop(turn.request_id, turn)
+            return
         turn.expiry = asyncio.get_running_loop().call_later(
-            self._retention, self._forget, turn.request_id, turn
+            self._retention, self._drop, turn.request_id, turn
         )
 
-    def _forget(self, request_id: str, turn: _Turn) -> None:
+    def _drop(self, request_id: str, turn: _Turn) -> None:
+        """Forget ``turn`` (if ``request_id`` still names it) and its expiry timer."""
+        if turn.expiry is not None:
+            turn.expiry.cancel()
+            turn.expiry = None
         if self._turns.get(request_id) is turn:
             del self._turns[request_id]

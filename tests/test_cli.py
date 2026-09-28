@@ -96,7 +96,9 @@ def test_serve_rejects_an_unknown_log_level(
     monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: pytest.fail("must not run"))
     monkeypatch.setenv("AOS_LOG_LEVEL", "verbose")
     assert main(["serve"]) == 2
-    assert "AOS_LOG_LEVEL no és vàlid" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith("La configuració (variables AOS_*) no és vàlida:")
+    assert "- AOS_LOG_LEVEL: ha de ser un d'aquests valors: critical, error, warning" in err
 
 
 def test_log_config_adds_the_application_logger() -> None:
@@ -147,6 +149,112 @@ def test_init_runs_the_admin_command(env: Path, monkeypatch: pytest.MonkeyPatch)
 def test_invalid_settings(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AOS_PORT", "not-a-port")
     assert main(["doctor"]) == 2
+
+
+INVALID_CONFIG = "La configuració (variables AOS_*) no és vàlida:"
+
+
+@pytest.mark.parametrize("command", ["doctor", "reset-throttle", "serve"])
+def test_a_list_that_is_not_json_gets_the_catalan_message(
+    env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: pytest.fail("must not run"))
+    monkeypatch.setenv("AOS_EXTRA_ORIGINS", "http://localhost:5173")
+    assert main([command]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(INVALID_CONFIG)
+    assert "AOS_EXTRA_ORIGINS" in err and "JSON" in err
+    assert '["http://localhost:5173"]' in err
+    assert "Traceback" not in err and "SettingsError" not in err
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "reason"),
+    [
+        ("AOS_SESSION_IDLE_HOURS", "0", "com a mínim 1"),
+        ("AOS_SESSION_IDLE_HOURS", "-3", "com a mínim 1"),
+        ("AOS_SESSION_IDLE_HOURS", "9000", "com a màxim 8760"),
+        ("AOS_SESSION_MAX_DAYS", "0", "com a mínim 1"),
+        ("AOS_SESSION_MAX_DAYS", "1000000000", "com a màxim 3650"),
+        ("AOS_LOGIN_MAX_FAILURES", "0", "com a mínim 1"),
+        ("AOS_LOGIN_MAX_FAILURES", "5000", "com a màxim 1000"),
+        ("AOS_PROVIDER_TIMEOUT_SECONDS", "0", "més gran que 0"),
+        ("AOS_PROVIDER_TIMEOUT_SECONDS", "-1", "més gran que 0"),
+        ("AOS_PROVIDER_TIMEOUT_SECONDS", "nan", "com a màxim 86400"),
+        ("AOS_PROVIDER_TIMEOUT_SECONDS", "1e400", "com a màxim 86400"),
+        ("AOS_PORT", "0", "com a mínim 1"),
+        ("AOS_PORT", "70000", "com a màxim 65535"),
+        ("AOS_PORT", "abc", "ha de ser un nombre enter"),
+        ("AOS_SESSION_IDLE_HOURS", "1.5", "ha de ser un nombre enter"),
+        ("AOS_CLAUDE_MODE", "web", "ha de ser «cli», «api» o «fake»"),
+        ("AOS_SECURE_COOKIES", "potser", "ha de ser true o false"),
+        ("AOS_LOG_LEVEL", "verbose", "critical, error, warning, info, debug, trace"),
+    ],
+)
+def test_doctor_reports_values_the_server_could_not_start_with(
+    env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variable: str,
+    value: str,
+    reason: str,
+) -> None:
+    monkeypatch.setenv(variable, value)
+    assert main(["doctor"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # it stops before the diagnosis
+    assert captured.err.startswith(INVALID_CONFIG)
+    [line] = [x for x in captured.err.splitlines() if x.startswith("- ")]
+    assert line.startswith(f"- {variable}: ")
+    assert reason in line
+    assert "Input should" not in captured.err and "errors.pydantic.dev" not in captured.err
+
+
+def test_every_invalid_variable_is_listed(
+    env: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("AOS_SESSION_IDLE_HOURS", "0")
+    monkeypatch.setenv("AOS_LOGIN_MAX_FAILURES", "0")
+    assert main(["reset-sessions"]) == 2
+    lines = [x for x in capsys.readouterr().err.splitlines() if x.startswith("- ")]
+    assert [x.split(":")[0] for x in lines] == [
+        "- AOS_SESSION_IDLE_HOURS",
+        "- AOS_LOGIN_MAX_FAILURES",
+    ]
+
+
+def test_the_limits_themselves_are_valid() -> None:
+    low = isolated_settings(
+        port=1,
+        session_idle_hours=1,
+        session_max_days=1,
+        login_max_failures=1,
+        provider_timeout_seconds=0.1,
+        log_level="WARNING",
+    )
+    assert low.log_level == "warning"
+    high = isolated_settings(
+        port=65535,
+        session_idle_hours=8760,
+        session_max_days=3650,
+        login_max_failures=1000,
+        provider_timeout_seconds=86400,
+    )
+    assert (high.session_idle_hours, high.session_max_days) == (8760, 3650)
+
+
+def test_a_dotenv_that_is_not_utf8_gets_a_catalan_message(
+    env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (env / ".env").write_bytes(b"AOS_PORT=\xff\xfe9000\n")
+    assert main(["doctor"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("No s'ha pogut llegir la configuració")
+    assert ".env" in err and "UTF-8" in err
+    assert "Traceback" not in err
 
 
 # -- doctor ----------------------------------------------------------------------------

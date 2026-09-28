@@ -4,7 +4,10 @@ The browser keeps a random 256-bit token (``secrets.token_urlsafe(32)``) in an
 HttpOnly cookie; the database stores only its SHA-256, so a leaked database does
 not reveal usable cookies. A session ends after ``session_idle_hours`` without
 activity or ``session_max_days`` after login, whichever comes first. Activity is
-written at most once per :data:`TOUCH_INTERVAL` to avoid a write per request.
+written at most once per :data:`TOUCH_INTERVAL` to avoid a write per request. Only
+the owner's actions are activity: what the client does by itself (requests marked
+as background, WebSocket handshakes, pings, the periodic checks) uses the read-only
+:meth:`SessionManager.peek`, so a tab left open does not keep the session alive.
 """
 
 from __future__ import annotations
@@ -92,14 +95,31 @@ class SessionManager:
             max_age=timedelta(days=settings.session_max_days),
         )
 
-    async def create(self, now: datetime, *, ip: str | None, user_agent: str | None) -> str:
-        """Start a session and return the raw token for the cookie (never stored)."""
+    def issue(
+        self, now: datetime, *, ip: str | None, user_agent: str | None
+    ) -> tuple[str, SessionRecord]:
+        """A new session that is not stored yet: the raw token for the cookie (never
+        stored) and the record to store. A login stores it in the same transaction
+        that checks the owner (``SqliteStore.complete_login``)."""
         now = as_utc(now)
         token = new_token()
-        await self._store.create_session(
-            hash_token(token),
+        record = SessionRecord(
+            token_hash=hash_token(token),
             created_at=now,
+            last_seen_at=now,
             expires_at=now + self.max_age,
+            ip=ip,
+            user_agent=user_agent,
+        )
+        return token, record
+
+    async def create(self, now: datetime, *, ip: str | None, user_agent: str | None) -> str:
+        """Start a session and return the raw token for the cookie (never stored)."""
+        token, record = self.issue(now, ip=ip, user_agent=user_agent)
+        await self._store.create_session(
+            record.token_hash,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
             ip=ip,
             user_agent=user_agent,
         )
@@ -135,8 +155,9 @@ class SessionManager:
 
     async def peek(self, token: str | None, now: datetime) -> SessionRecord | None:
         """Like :meth:`validate` but read-only: never refreshes ``last_seen_at`` nor
-        deletes anything. For the periodic checks of long-lived connections, whose
-        heartbeats must not keep an idle session alive."""
+        deletes anything. For every check that is not the owner's activity (requests
+        the client makes by itself, WebSocket handshakes and heartbeats), which must
+        not keep an idle session alive."""
         record = await self._lookup(token)
         if record is None or self._ended(record, as_utc(now)):
             return None

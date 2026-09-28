@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import BrandMark from '../components/BrandMark.svelte';
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
@@ -18,13 +18,15 @@
   let codeInput: HTMLInputElement | undefined = $state();
 
   const remaining = $derived(lockedUntil ? Math.max(0, Math.ceil((lockedUntil - now) / 1000)) : 0);
-  const locked = $derived(remaining > 0);
+  const throttled = $derived(remaining > 0);
   const countdown = $derived(
     remaining >= 60 ? `${Math.floor(remaining / 60)} min ${String(remaining % 60).padStart(2, '0')} s` : `${remaining} s`,
   );
 
-  onMount(() => {
-    if (app.auth === 'login') passwordInput?.focus();
+  // The password field takes the focus whenever the plain login screen shows, also
+  // after the lock screen once the server has confirmed the logout.
+  $effect(() => {
+    if (app.auth === 'login') untrack(() => passwordInput?.focus());
   });
 
   $effect(() => {
@@ -42,7 +44,7 @@
   function setCode(raw: string): void {
     code = raw.replace(/\D/g, '').slice(0, 6);
     if (codeInput && codeInput.value !== code) codeInput.value = code;
-    if (code.length === 6 && password && !locked) void submit();
+    if (code.length === 6 && password && !throttled) void submit();
   }
 
   function onPaste(e: ClipboardEvent): void {
@@ -53,7 +55,7 @@
   }
 
   async function submit(): Promise<void> {
-    if (busy || locked) return;
+    if (busy || throttled) return;
     if (!password) {
       error = 'Escriu la contrasenya.';
       passwordInput?.focus();
@@ -122,7 +124,25 @@
           <Icon name="refresh" size={16} />Torna-ho a provar
         </button>
       </div>
+    {:else if app.auth === 'locked' && app.logoutBusy}
+      <p class="closing" role="status"><span class="spinner" aria-hidden="true"></span>Tancant la sessió…</p>
     {:else}
+      {#if app.auth === 'locked'}
+        <div class="lock">
+          <div role="alert">
+            <h2><Icon name="lock" size={18} />La sessió encara no s'ha pogut tancar al servidor</h2>
+            <p>
+              Aquest bloqueig només és local: aquesta pàgina ja no mostra res de la sessió, però al servidor la
+              sessió continua oberta fins que es pugui tancar o caduqui.
+            </p>
+            {#if app.logoutError}<p class="reason">Motiu: {app.logoutError}</p>{/if}
+          </div>
+          <button type="button" class="btn primary wide" disabled={busy} onclick={() => void app.retryLogout()}>
+            <Icon name="refresh" size={16} />Torna-ho a provar
+          </button>
+        </div>
+        <p class="again">O torna a entrar: en iniciar sessió es tanca la sessió anterior.</p>
+      {/if}
       <form
         onsubmit={(e) => {
           e.preventDefault();
@@ -158,7 +178,7 @@
             placeholder="000000"
             aria-describedby="{uid}-code-hint"
             required
-            disabled={busy || locked} />
+            disabled={busy || throttled} />
           <span class="digits" aria-hidden="true">
             {#each Array.from({ length: 6 }, (_, i) => i) as i (i)}<i class:on={i < code.length}></i>{/each}
           </span>
@@ -166,7 +186,7 @@
         </label>
 
         <div class="messages" aria-live="assertive">
-          {#if locked}
+          {#if throttled}
             <p class="error" role="alert">
               <Icon name="clock" size={16} />Massa intents. Torna-ho a provar d'aquí a {countdown}.
             </p>
@@ -175,7 +195,7 @@
           {/if}
         </div>
 
-        <button type="submit" class="btn primary wide" disabled={busy || locked}>
+        <button type="submit" class="btn primary wide" disabled={busy || throttled}>
           {#if busy}<span class="spinner" aria-hidden="true"></span>Entrant…{:else}<Icon name="lock" size={16} />Entra{/if}
         </button>
       </form>
@@ -337,6 +357,55 @@
     font-size: 0.8rem;
     color: #a5e075;
     overflow-wrap: anywhere;
+  }
+
+  .lock {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.9rem;
+    padding: 0.9rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgb(242 180 65 / 0.4);
+    background: rgb(242 180 65 / 0.08);
+  }
+
+  .lock h2 {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: var(--text-md);
+    font-weight: 650;
+    color: #ffd99a;
+  }
+
+  .lock h2 :global(.icon) {
+    flex: none;
+    margin-top: 0.1rem;
+  }
+
+  .lock p {
+    margin-top: 0.45rem;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+  }
+
+  .lock .reason {
+    color: var(--text-muted);
+  }
+
+  .again {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    text-align: center;
+  }
+
+  .closing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    min-height: 2.75rem;
+    color: var(--text-secondary);
   }
 
   .foot {

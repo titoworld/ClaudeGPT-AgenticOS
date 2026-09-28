@@ -6,7 +6,11 @@
 // - Immediate retry on the browser `online` event and when the tab becomes
 //   visible again (laptops waking up, phones switching apps).
 // - Application ping every 20 s measures the round trip and detects half-open
-//   sockets (no traffic for too long -> close and reconnect).
+//   sockets: a ping with no answer (nor any other message) for 30 s -> close and
+//   reconnect. Liveness is never judged from silence alone: a hidden tab runs its
+//   timers late (Chrome: once a minute after 5 minutes hidden), and a healthy socket
+//   must not be dropped and reopened in a loop (audit N7). A tab that becomes
+//   visible again checks at once.
 // - Close code 4401 (no session) and 4403 (origin rejected) stop retrying.
 //
 // Svelte 5 pitfall: connect() reads $state (status, attempt). Called from a
@@ -27,8 +31,8 @@ export type ConnectionStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' |
 export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 10_000;
 export const PING_INTERVAL_MS = 20_000;
-/** No message at all for this long means the socket is dead. */
-export const STALE_AFTER_MS = 2 * PING_INTERVAL_MS + 5_000;
+/** A ping with no answer (nor any other message) for longer than this means the socket is dead. */
+export const PONG_TIMEOUT_MS = 30_000;
 /** Connection must stay open this long before the backoff resets. */
 export const STABLE_AFTER_MS = 5_000;
 /** Extra ping shortly after connecting: the first one often lands while the
@@ -76,7 +80,8 @@ export class Connection {
   #pingTimer: ReturnType<typeof setInterval> | undefined;
   #stableTimer: ReturnType<typeof setTimeout> | undefined;
   #warmupTimer: ReturnType<typeof setTimeout> | undefined;
-  #lastRx = 0;
+  /** When the oldest ping that has had no answer yet was sent (null: all answered). */
+  #pingSentAt: number | null = null;
   #listening = false;
 
   constructor(opts: ConnectionOptions) {
@@ -159,7 +164,7 @@ export class Connection {
   #onOpen(ws: WebSocket): void {
     if (this.#ws !== ws) return;
     this.status = 'open';
-    this.#lastRx = Date.now();
+    this.#pingSentAt = null;
     this.#stableTimer = setTimeout(() => {
       this.attempt = 0;
     }, STABLE_AFTER_MS);
@@ -170,7 +175,8 @@ export class Connection {
 
   #onMessage(ws: WebSocket, ev: MessageEvent): void {
     if (this.#ws !== ws) return;
-    this.#lastRx = Date.now();
+    // Anything from the server answers the pings sent before it: the socket works.
+    this.#pingSentAt = null;
     if (typeof ev.data !== 'string') return;
     let msg: ServerMessage;
     try {
@@ -214,10 +220,14 @@ export class Connection {
     }, delay);
   }
 
-  #tick = (): void => {
+  /** Every PING_INTERVAL_MS, or much later in a hidden tab. */
+  #tick = (): void => this.#checkAlive();
+
+  /** Drops the socket if a ping has had no answer for too long; otherwise pings. */
+  #checkAlive(): void {
     const ws = this.#ws;
     if (!ws || ws.readyState !== OPEN) return;
-    if (Date.now() - this.#lastRx > STALE_AFTER_MS) {
+    if (this.#pingSentAt !== null && Date.now() - this.#pingSentAt > PONG_TIMEOUT_MS) {
       // Half-open socket: drop it and reconnect through the normal path.
       this.#ws = null;
       this.#detach(ws, 4000, 'stale');
@@ -227,13 +237,15 @@ export class Connection {
       return;
     }
     this.#ping();
-  };
+  }
 
   #ping(): void {
     const ws = this.#ws;
     if (!ws || ws.readyState !== OPEN) return;
+    const now = Date.now();
+    this.#pingSentAt ??= now; // before sending, so even an answer delivered at once clears it
     try {
-      ws.send(JSON.stringify({ type: 'ping', t: Date.now() } satisfies ClientMessage));
+      ws.send(JSON.stringify({ type: 'ping', t: now } satisfies ClientMessage));
     } catch {
       /* close will follow */
     }
@@ -262,7 +274,8 @@ export class Connection {
 
   #onVisibility = (): void => {
     if (document.visibilityState !== 'visible') return;
-    if (this.#ws) this.#ping(); // quick liveness check after sleep
+    // At once: while hidden (or asleep) the timers may not have run for minutes.
+    if (this.#ws) this.#checkAlive();
     else this.retryNow();
   };
 

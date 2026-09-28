@@ -57,6 +57,11 @@ _RUNTIME_SETTINGS_KEY: Final = "runtime"
 _ECB_RATE_KEY: Final = "fx_ecb"
 _CACHE_FORMAT: Final = 1
 _MESSAGE_KINDS: Final[tuple[MessageKind, ...]] = ("question", "answer", "revision", "synthesis")
+_VERIFIED_OWNER: Final = (
+    "WHERE id = 1 AND totp_last_step < ? AND password_hash = ? AND totp_secret = ?"
+)
+"""Condition of :meth:`SqliteStore.complete_login`: a newer TOTP step, on the owner
+whose credentials were verified."""
 
 _MESSAGE_COLUMNS: Final = (
     "id, conversation_id, turn_id, kind, agent, round, final, content, meta, created_at"
@@ -605,7 +610,13 @@ class SqliteStore:
     async def set_owner(self, *, password_hash: str, totp_secret: str, totp_last_step: int) -> int:
         """Create or replace the owner and, atomically, revoke every session, forget
         every known device and clear the login throttling. Returns the number of
-        sessions revoked."""
+        sessions revoked.
+
+        A login in flight in another process (``agentic-os init`` runs next to the
+        server) cannot outlive this: it checked the credentials against the previous
+        owner, and :meth:`complete_login` only writes if the owner is still that one.
+        So no session or device made with the old credentials survives, and a rehash
+        of the old password never replaces the new one."""
         now = self._now()
         async with self._db.transaction() as tx:
             await tx.execute(
@@ -619,24 +630,58 @@ class SqliteStore:
             await tx.execute("DELETE FROM login_throttle")
             return await tx.execute("DELETE FROM sessions")
 
-    async def update_password_hash(self, password_hash: str) -> None:
-        """Replace the stored hash (e.g. after a successful login that needed a rehash)."""
-        async with self._db.transaction() as tx:
-            await tx.execute(
-                "UPDATE owner SET password_hash = ?, updated_at = ? WHERE id = 1",
-                (password_hash, self._now()),
-            )
-
     async def consume_totp_step(self, step: int) -> bool:
         """Atomically record ``step`` as the last accepted TOTP step if it is newer
         than the stored one. ``False`` means the code was already used (replay) or
-        there is no owner: reject the login."""
+        there is no owner. The login uses :meth:`complete_login` instead, which also
+        checks that the owner did not change."""
         async with self._db.transaction() as tx:
             updated = await tx.execute(
                 "UPDATE owner SET totp_last_step = ? WHERE id = 1 AND totp_last_step < ?",
                 (step, step),
             )
         return updated == 1
+
+    async def complete_login(
+        self,
+        verified: OwnerRecord,
+        *,
+        step: int,
+        session: SessionRecord,
+        device: DeviceRecord,
+        password_hash: str | None = None,
+        ended_session: str | None = None,
+        forgotten_device: str | None = None,
+    ) -> bool:
+        """Finish a login in one write transaction, only if the owner is still
+        ``verified``, the snapshot whose password and TOTP secret the credentials were
+        checked against, and ``step`` is newer than the last accepted TOTP step.
+
+        Then, all or nothing: record ``step`` (replay protection), store
+        ``password_hash`` if given (a rehash, computed before), end the session
+        ``ended_session`` presented with the login (session fixation), forget the
+        device ``forgotten_device`` presented, and store the new ``session`` and
+        ``device`` (token hashes only). ``False``, with nothing written, if the owner
+        changed meanwhile (``agentic-os init`` in another process), the code was
+        already used or there is no owner: reject the login."""
+        verified_owner = (step, verified.password_hash, verified.totp_secret)
+        if password_hash is None:
+            sql = "UPDATE owner SET totp_last_step = ? " + _VERIFIED_OWNER
+            params: tuple[object, ...] = (step, *verified_owner)
+        else:
+            sql = "UPDATE owner SET totp_last_step = ?, password_hash = ?, updated_at = ? "
+            sql += _VERIFIED_OWNER
+            params = (step, password_hash, self._now(), *verified_owner)
+        async with self._db.transaction() as tx:
+            if await tx.execute(sql, params) != 1:
+                return False
+            if ended_session is not None:
+                await tx.execute("DELETE FROM sessions WHERE token_hash = ?", (ended_session,))
+            if forgotten_device is not None:
+                await tx.execute("DELETE FROM devices WHERE token_hash = ?", (forgotten_device,))
+            await _insert_session(tx, session)
+            await _insert_device(tx, device)
+        return True
 
     # ------------------------------------------------------------------
     # Sessions (only SHA-256 hashes of the tokens are stored)
@@ -651,20 +696,16 @@ class SqliteStore:
         ip: str | None,
         user_agent: str | None,
     ) -> None:
-        created = format_ts(created_at)
+        session = SessionRecord(
+            token_hash=token_hash,
+            created_at=created_at,
+            last_seen_at=created_at,
+            expires_at=expires_at,
+            ip=ip,
+            user_agent=user_agent,
+        )
         async with self._db.transaction() as tx:
-            await tx.execute(
-                "INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at, ip, "
-                "user_agent) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    token_hash,
-                    created,
-                    created,
-                    format_ts(expires_at),
-                    ip[:_MAX_IP_LENGTH] if ip else None,
-                    user_agent[:_MAX_USER_AGENT_LENGTH] if user_agent else None,
-                ),
-            )
+            await _insert_session(tx, session)
 
     async def get_session(self, token_hash: str) -> SessionRecord | None:
         async with self._db.transaction(write=False) as tx:
@@ -706,11 +747,9 @@ class SqliteStore:
     async def create_device(
         self, token_hash: str, *, created_at: datetime, expires_at: datetime
     ) -> None:
+        device = DeviceRecord(token_hash=token_hash, created_at=created_at, expires_at=expires_at)
         async with self._db.transaction() as tx:
-            await tx.execute(
-                "INSERT INTO devices (token_hash, created_at, expires_at) VALUES (?, ?, ?)",
-                (token_hash, format_ts(created_at), format_ts(expires_at)),
-            )
+            await _insert_device(tx, device)
 
     async def get_device(self, token_hash: str) -> DeviceRecord | None:
         async with self._db.transaction(write=False) as tx:
@@ -840,6 +879,28 @@ class SqliteStore:
             settings = await _read_runtime_settings(tx)
             fx = effective_fx(settings, await _read_ecb_rate(tx), now)
             return await compute_month_spend(tx, now, fx, settings.budgets_eur, settings.plans_eur)
+
+
+async def _insert_session(tx: Tx, session: SessionRecord) -> None:
+    await tx.execute(
+        "INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at, ip, "
+        "user_agent) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            session.token_hash,
+            format_ts(session.created_at),
+            format_ts(session.last_seen_at),
+            format_ts(session.expires_at),
+            session.ip[:_MAX_IP_LENGTH] if session.ip else None,
+            session.user_agent[:_MAX_USER_AGENT_LENGTH] if session.user_agent else None,
+        ),
+    )
+
+
+async def _insert_device(tx: Tx, device: DeviceRecord) -> None:
+    await tx.execute(
+        "INSERT INTO devices (token_hash, created_at, expires_at) VALUES (?, ?, ?)",
+        (device.token_hash, format_ts(device.created_at), format_ts(device.expires_at)),
+    )
 
 
 async def _get_setting(tx: Tx, key: str) -> object | None:

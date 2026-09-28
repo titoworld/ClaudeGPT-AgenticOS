@@ -2,10 +2,11 @@
 // conversations and composer state. Components read its reactive fields and
 // call its methods; nothing else talks to the network.
 
-import { api, ApiError, setUnauthorizedHandler } from './api';
+import { api, ApiError, setUnauthorizedHandler, type RequestOptions } from './api';
 import { ComposerState } from './composer.svelte';
 import { Conversations, errorMessage } from './conversations.svelte';
 import { inferCostBasis } from './costs';
+import { clearLogoutPending, isLogoutPending, LOGOUT_PENDING_KEY, markLogoutPending } from './logout-pending';
 import { modelOverridesPayload } from './models';
 import { prefs } from './prefs.svelte';
 import {
@@ -31,7 +32,12 @@ import { createLiveTurn, isTerminal, mergeTurns, TurnRegistry, type TurnView } f
 import { uuid } from './uuid';
 import { Connection } from './ws.svelte';
 
-export type AuthPhase = 'checking' | 'login' | 'setup' | 'ready' | 'unreachable';
+/**
+ * `locked`: a logout the server has not confirmed yet (A4). Nothing of the session is in
+ * memory, and the app does not open until the server confirms the logout or the owner
+ * logs in again. The lock is local: on the server the session is still open.
+ */
+export type AuthPhase = 'checking' | 'login' | 'setup' | 'ready' | 'unreachable' | 'locked';
 
 /** Whether the server's settings are loaded: `ready` once a load has worked. */
 export type SettingsStatus = 'loading' | 'ready' | 'error';
@@ -44,6 +50,13 @@ const SETTINGS_NOT_LOADED = "La configuració encara no s'ha carregat.";
 const SETTINGS_CONFLICT =
   'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.';
 
+/**
+ * Requests the app makes by itself (refreshes after `hello`, after turn events, retries):
+ * the server does not count them as owner activity, so an unused tab does not keep the
+ * session alive (N7).
+ */
+const BACKGROUND: RequestOptions = { background: true };
+
 /** A save based on settings that changed elsewhere (409): `app.settings` holds the current ones now. */
 export class SettingsConflictError extends Error {
   constructor(message: string) {
@@ -54,6 +67,10 @@ export class SettingsConflictError extends Error {
 
 class App {
   auth: AuthPhase = $state('checking');
+  /** A POST /api/auth/logout is under way (the lock screen says so and waits). */
+  logoutBusy = $state(false);
+  /** Why the last attempt to end the session on the server failed (Catalan), for the lock screen. */
+  logoutError: string | null = $state(null);
   /** Unrecoverable problem (WebSocket origin rejected). */
   fatal: string | null = $state(null);
   providers: ProviderStatus[] = $state([]);
@@ -95,7 +112,7 @@ class App {
   readonly convs = new Conversations();
   readonly conn = new Connection({
     onMessage: (msg) => this.#onMessage(msg),
-    onUnauthorized: () => this.toLogin(),
+    onUnauthorized: () => this.#sessionGone(),
     onForbidden: () => {
       this.fatal =
         "El servidor ha rebutjat la connexió en temps real perquè l'origen d'aquesta pàgina no és a la llista permesa (codi 4403).";
@@ -125,18 +142,40 @@ class App {
   #settingsAttempt = 0;
   /** Bumped when the session ends or a save answers: a request started before is stale. */
   #settingsTicket = 0;
+  /** Bumped whenever the session ends here: answers to requests of before change nothing. */
+  #epoch = 0;
+  #logoutRequest: Promise<boolean> | null = null;
+  #watchingTabs = false;
 
   // ------------------------------------------------------------ auth
 
   async init(): Promise<void> {
-    setUnauthorizedHandler(() => this.toLogin());
+    setUnauthorizedHandler(() => this.#sessionGone());
+    if (!this.#watchingTabs && typeof window !== 'undefined') {
+      this.#watchingTabs = true;
+      window.addEventListener('storage', (e) => this.#onStorage(e));
+    }
     await this.checkAuth();
   }
 
+  /**
+   * Opens the app if this browser has a session. A pending logout is finished first:
+   * until the server confirms it, /api/auth/state still says the session works (A4).
+   */
   async checkAuth(): Promise<void> {
+    if (isLogoutPending()) await this.retryLogout();
+    else await this.#askServer();
+  }
+
+  async #askServer(): Promise<void> {
     this.auth = 'checking';
     try {
       const state = await api.authState();
+      if (state.authenticated && isLogoutPending()) {
+        // Another tab started a logout meanwhile: never open the app on our own.
+        this.#lock();
+        return;
+      }
       if (state.authenticated) await this.#enter();
       else this.auth = state.setup_required ? 'setup' : 'login';
     } catch {
@@ -147,31 +186,90 @@ class App {
   /** Throws ApiError for the login form to display. */
   async login(password: string, totp: string): Promise<void> {
     await api.login(password, totp);
+    // The login ended the session the cookie presented: nothing is left to log out.
+    clearLogoutPending();
     await this.#enter();
   }
 
+  /**
+   * Ends the session. Only the server can (the cookie is HttpOnly): until it confirms
+   * (204, or 401: there was none), this browser stays locked, with nothing of the
+   * session in memory and the socket closed, and a reload finishes the logout before
+   * anything else (A4). The marker is set before asking, in case the page goes away.
+   */
   async logout(): Promise<void> {
+    markLogoutPending();
+    this.#lock();
+    if (await this.#endServerSession()) this.toLogin();
+  }
+
+  /** «Torna-ho a provar» on the lock screen, and every page load while a logout is pending. */
+  async retryLogout(): Promise<void> {
+    this.#lock();
+    if (await this.#endServerSession()) await this.#askServer();
+  }
+
+  /** POST /api/auth/logout (one at a time): true once the server has no session for this browser. */
+  #endServerSession(): Promise<boolean> {
+    if (this.#logoutRequest) return this.#logoutRequest;
+    const request = this.#sendLogout().finally(() => {
+      if (this.#logoutRequest === request) this.#logoutRequest = null;
+    });
+    this.#logoutRequest = request;
+    return request;
+  }
+
+  async #sendLogout(): Promise<boolean> {
+    this.logoutBusy = true;
+    this.logoutError = null;
+    let ended: boolean;
     try {
       await api.logout();
-    } catch {
-      // the session is dropped locally anyway
+      ended = true;
+    } catch (err) {
+      ended = err instanceof ApiError && err.status === 401;
+      if (!ended) this.logoutError = errorMessage(err, 'El servidor ha respost amb un error.');
+    } finally {
+      this.logoutBusy = false;
     }
-    this.toLogin();
+    // Logged in again meanwhile (which ended that session too): this answer is old news.
+    if (this.auth !== 'locked') return false;
+    if (ended) clearLogoutPending();
+    return ended;
   }
 
   toLogin(): void {
     if (this.auth === 'login' || this.auth === 'setup') return;
+    this.#endSession();
+    this.auth = 'login';
+  }
+
+  /** The lock screen: the session's data leaves this page and its traffic stops. */
+  #lock(): void {
+    this.#endSession();
+    this.settings = normalizeSettings(DEFAULT_SETTINGS);
+    this.composer.draft = '';
+    this.auth = 'locked';
+  }
+
+  /** Forgets what the session showed and stops its traffic: socket, timers and answers still to come. */
+  #endSession(): void {
+    this.#epoch++;
     this.conn.disconnect();
+    clearTimeout(this.#providersTimer);
     this.turns.clear();
     this.convs.clear();
     this.providers = [];
     this.catalog = null;
     this.catalogStale = false;
+    this.catalogError = null;
     this.#catalogTicket++;
     this.#catalogRequest = null;
     this.catalogLoading = false;
     this.pricing = null;
+    this.pricingError = null;
     this.spend = null;
+    this.#spendRequest = null;
     this.fx = null;
     this.#settingsTicket++;
     this.#settingsRequest = null;
@@ -182,12 +280,32 @@ class App {
     this.settingsLoading = false;
     this.paletteOpen = false;
     this.settingsOpen = false;
-    this.auth = 'login';
+    this.sidebarOpen = false;
+  }
+
+  /** A 401, or the socket closed with 4401: the server has no session for this browser. */
+  #sessionGone(): void {
+    clearLogoutPending(); // nothing left to log out
+    this.toLogin();
+  }
+
+  /** Another tab of this browser started or finished a logout (A4). */
+  #onStorage(e: StorageEvent): void {
+    if (e.key !== LOGOUT_PENDING_KEY) return;
+    if (e.newValue !== null) {
+      // It is logging out: this tab locks too, and helps to finish it.
+      if (this.auth === 'ready') void this.retryLogout();
+    } else if (this.auth === 'locked' && !this.logoutBusy) {
+      // It is done (the server confirmed it, or the owner logged in again there).
+      clearLogoutPending();
+      void this.#askServer();
+    }
   }
 
   async #enter(): Promise<void> {
     this.auth = 'ready';
     this.fatal = null;
+    this.logoutError = null;
     this.conn.connect();
     // The open conversation follows the route (App.svelte effect on auth + route).
     void this.loadModels();
@@ -206,9 +324,9 @@ class App {
    * failure is shown and retried with backoff, and at once on every `hello`.
    * Resolves true when `settings` holds what the server has now.
    */
-  loadSettings(): Promise<boolean> {
+  loadSettings(options: RequestOptions = {}): Promise<boolean> {
     if (this.#settingsRequest) return this.#settingsRequest;
-    const request = this.#fetchSettings().finally(() => {
+    const request = this.#fetchSettings(options).finally(() => {
       if (this.#settingsRequest !== request) return;
       this.#settingsRequest = null;
       this.settingsLoading = false;
@@ -218,11 +336,11 @@ class App {
     return request;
   }
 
-  async #fetchSettings(): Promise<boolean> {
+  async #fetchSettings(options: RequestOptions): Promise<boolean> {
     clearTimeout(this.#settingsRetry);
     const ticket = this.#settingsTicket;
     try {
-      const settings = normalizeSettings(await api.settings());
+      const settings = normalizeSettings(await api.settings(options));
       // Stale: the session ended (not ready), or a save answered with newer settings.
       if (ticket !== this.#settingsTicket) return this.settingsStatus === 'ready';
       this.#takeSettings(settings);
@@ -243,7 +361,7 @@ class App {
     if (this.auth !== 'ready') return;
     const delay = SETTINGS_RETRY_MS[Math.min(this.#settingsAttempt, SETTINGS_RETRY_MS.length - 1)];
     this.#settingsAttempt++;
-    this.#settingsRetry = setTimeout(() => void this.loadSettings(), delay);
+    this.#settingsRetry = setTimeout(() => void this.loadSettings(BACKGROUND), delay);
   }
 
   /** The server's current settings become the ones this tab works with. */
@@ -344,23 +462,28 @@ class App {
   }
 
   async loadPricing(): Promise<void> {
+    const epoch = this.#epoch;
     try {
       const pricing = await api.pricing();
+      if (epoch !== this.#epoch) return; // the session ended meanwhile
       this.pricing = pricing;
       this.fx = pricing.fx;
       this.pricingError = null;
     } catch (err) {
+      if (epoch !== this.#epoch) return;
       this.pricingError = errorMessage(err, "No s'han pogut carregar els preus.");
     }
   }
 
   /** Concurrent calls (login and the first hello) share one request. */
-  refreshSpend(): Promise<void> {
-    this.#spendRequest ??= api
-      .spend()
+  refreshSpend(options: RequestOptions = {}): Promise<void> {
+    if (this.#spendRequest) return this.#spendRequest;
+    const epoch = this.#epoch;
+    const request = api
+      .spend(options)
       .then(
         (spend) => {
-          if (this.auth !== 'ready') return;
+          if (epoch !== this.#epoch || this.auth !== 'ready') return;
           this.spend = spend;
           this.fx = spend.fx;
         },
@@ -368,8 +491,11 @@ class App {
           // the bars keep the last known values
         },
       )
-      .finally(() => (this.#spendRequest = null));
-    return this.#spendRequest;
+      .finally(() => {
+        if (this.#spendRequest === request) this.#spendRequest = null;
+      });
+    this.#spendRequest = request;
+    return request;
   }
 
   /** Model an agent will use in the next turn of this tab. */
@@ -386,9 +512,11 @@ class App {
     return catalog || provider;
   }
 
-  async refreshProviders(): Promise<void> {
+  async refreshProviders(options: RequestOptions = {}): Promise<void> {
+    const epoch = this.#epoch;
     try {
-      this.providers = await api.providers();
+      const providers = await api.providers(options);
+      if (epoch === this.#epoch) this.providers = providers;
     } catch {
       // hello messages also carry provider status
     }
@@ -398,8 +526,8 @@ class App {
   #refreshUsageSoon(): void {
     clearTimeout(this.#providersTimer);
     this.#providersTimer = setTimeout(() => {
-      void this.refreshProviders();
-      void this.refreshSpend();
+      void this.refreshProviders(BACKGROUND);
+      void this.refreshSpend(BACKGROUND);
     }, 1500);
   }
 
@@ -542,11 +670,11 @@ class App {
         this.providers = msg.providers;
         if (msg.fx) this.fx = msg.fx;
         this.#resubscribe(msg.active_turns);
-        void this.refreshSpend();
+        void this.refreshSpend(BACKGROUND);
         if (this.settingsStatus !== 'ready') {
           // The server answers again: retry a failed load now, and soon after if it fails.
           this.#settingsAttempt = 0;
-          void this.loadSettings();
+          void this.loadSettings(BACKGROUND);
         }
         return;
       case 'turn.unknown':
@@ -586,7 +714,7 @@ class App {
           this.convs.adopt(ev.conversation_id);
           router.replace({ name: 'chat', id: ev.conversation_id });
         }
-        if (ev.new_conversation) void this.convs.refresh();
+        if (ev.new_conversation) void this.convs.refresh(BACKGROUND);
         break;
       case 'stream.delta': {
         const stream = turn.streams.find((s) => s.id === ev.stream_id);
@@ -604,7 +732,7 @@ class App {
         break;
       }
       case 'turn.completed':
-        void this.convs.refresh();
+        void this.convs.refresh(BACKGROUND);
         this.#refreshUsageSoon();
         if (ev.consensus?.reached) sceneHost.flash('consensus');
         break;
@@ -648,7 +776,7 @@ class App {
     const conversationId = turn.conversationId;
     this.turns.remove(requestId);
     if (conversationId != null && conversationId === this.convs.currentId) {
-      await this.convs.reload();
+      await this.convs.reload(BACKGROUND);
       this.#fillQuestions();
     }
   }

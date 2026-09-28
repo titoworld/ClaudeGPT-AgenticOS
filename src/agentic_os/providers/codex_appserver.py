@@ -391,9 +391,12 @@ class _AppServerConnection:
                 await self._terminate()
 
     async def _read_stderr(self) -> None:
+        """Keep and log the process's stderr, redacted line by line as it is read: the
+        tail reaches error messages (and so the browser, the database and the logs)."""
         stderr = self._process.stderr
         if stderr is None:
             return
+        bearer_before = False
         with contextlib.suppress(Exception):
             while True:
                 try:
@@ -403,6 +406,10 @@ class _AppServerConnection:
                 if not line:
                     return
                 text = line.decode("utf-8", "replace").rstrip()
+                if bearer_before:  # the token of a "Bearer" that ended the previous line
+                    text = _FIRST_WORD_RE.sub("***", text, count=1)
+                bearer_before = _BEARER_AT_END_RE.search(text) is not None
+                text = redact(text)
                 self.stderr_tail.append(text)
                 logger.debug("codex app-server: %s", text)
 
@@ -553,6 +560,8 @@ def _nested_id(result: Any, key: str) -> str:
 _SECRET_RE = re.compile(
     r"(sk-)[A-Za-z0-9_\-]{8,}|(Bearer\s+)\S+|(eyJ)[A-Za-z0-9_\-]+\.[A-Za-z0-9_.\-]+"
 )
+_BEARER_AT_END_RE = re.compile(r"\bBearer\s*$")
+_FIRST_WORD_RE = re.compile(r"^\s*\S+")
 
 
 def redact(text: str) -> str:

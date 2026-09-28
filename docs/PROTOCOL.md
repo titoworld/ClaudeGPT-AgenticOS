@@ -5,10 +5,12 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 ## Autenticació i seguretat comuna
 
 - Sessió amb una cookie `__Host-aos_session` (HttpOnly, Secure, SameSite=Strict, Path=/). En desenvolupament sense HTTPS (`AOS_SECURE_COOKIES=false`) la cookie es diu `aos_session` i no és `Secure`. La sessió caduca després de `AOS_SESSION_IDLE_HOURS` sense activitat (72 h) i als `AOS_SESSION_MAX_DAYS` (30 dies).
+- Activitat: només les accions del propietari allarguen la caducitat per inactivitat (iniciar sessió, obrir una conversa, desar, esborrar, canviar un nom, `turn.start`, `turn.cancel`...). Les peticions REST que el client fa pel seu compte, sense cap acció del propietari (els refrescos després d'un `hello` o d'una reconnexió, els refrescos periòdics i els reintents), porten la capçalera `X-AOS-Background: 1`. Per a aquestes, el servidor comprova la sessió només en lectura, com un `ping`: respon igual (`401` si ja no és vàlida), però no allarga la caducitat. Així, una pestanya oberta sense ús no manté la sessió viva. El client també posa la capçalera a tots els `POST /api/auth/logout`, perquè un logout que falla no allargui la sessió (si funciona, la tanca igualment). Sense la capçalera, o amb un altre valor, la petició compta com a activitat. L'*handshake* del WebSocket també és només de lectura (vegeu [WebSocket](#websocket-apiws)).
 - Dispositiu conegut: cada inici de sessió correcte posa també una cookie `__Host-aos_device` (HttpOnly, Secure, SameSite=Strict, Path=/; sense HTTPS es diu `aos_device` i no és `Secure`) amb un testimoni aleatori que dura 1 any i se substitueix per un de nou a cada inici de sessió. El logout la conserva; `agentic-os init` i `agentic-os reset-sessions` obliden tots els dispositius. Un intent d'inici de sessió que la porta només es limita pel comptador d'errors d'aquell dispositiu (no pel de l'adreça ni pel global), de manera que ningú no pot bloquejar el propietari des d'un navegador on ja ha entrat.
 - Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
 - Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`; si no, `403`.
-- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir), `409` si la configuració ha canviat des que el client la va llegir (només `PUT /api/settings`, amb `settings` al cos), `413` cos massa gran (1 MiB, pel `Content-Length` o comptat mentre arriba), `422` validació (també els nombres fora de rang, per grans que siguin), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
+- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir), `409` si la configuració ha canviat des que el client la va llegir (només `PUT /api/settings`, amb `settings` al cos), `413` cos massa gran (1 MiB, pel `Content-Length` o comptat mentre arriba), `422` validació (també els nombres fora de rang, per grans que siguin; vegeu «Validació de l'entrada»), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
+- Validació de l'entrada: els identificadors de conversa (a la ruta, a `before` i al `conversation_id` del WebSocket) han de ser enters d'1 a 2^63 − 1, el màxim de SQLite; si no, `422` (`Dades no vàlides: «conversation_id».`, o `«before»`). El text dels cossos JSON (claus i valors) s'ha de poder codificar en UTF-8: un substitut solitari, que en JSON s'escriu `"\ud800"` i és JSON vàlid, dona `422` amb `La petició conté text que no és UTF-8 vàlid.` i no es desa res. Les parelles de substituts, com `"\ud83d\ude00"` (😀), són text vàlid. L'única excepció és `POST /api/auth/login`: una contrasenya o un codi amb aquest text són credencials incorrectes (`401`), i l'intent compta per al bloqueig per intents fallits. Els missatges d'error no inclouen mai els missatges interns de Python.
 - Una resposta que surt abans que el servidor hagi rebut tot el cos de la petició (`403`, `401`, `413` pel `Content-Length`, `429`, `408`, o un cos enviat a una ruta que no el llegeix) porta `Connection: close` i el servidor tanca la connexió: el client no la pot reutilitzar. Les peticions sense cos o amb el cos llegit sencer mantenen la connexió.
 
 ## REST
@@ -17,8 +19,8 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 | --- | --- | --- |
 | `GET /api/health` | – | `{"status": "ok"}` |
 | `GET /api/auth/state` | – | `{"authenticated": bool, "setup_required": bool}` (`setup_required`: encara no s'ha executat `agentic-os init`) |
-| `POST /api/auth/login` | `{"password": str, "totp": str}` | `204` + cookies de sessió i de dispositiu; `401`; `429` |
-| `POST /api/auth/logout` | – | `204` (esborra la cookie de sessió i tanca els WebSockets d'aquesta sessió; la de dispositiu es conserva) |
+| `POST /api/auth/login` | `{"password": str, "totp": str}` | `204` + cookies de sessió i de dispositiu; `401`; `429`. L'inici de sessió acaba en una sola transacció, condicionada al propietari amb què s'han comprovat les credencials: si mentrestant `agentic-os init` l'ha canviat, `401` i no es desa res. La mateixa transacció tanca la sessió que presentava la cookie, si n'hi havia; després se'n tanquen els WebSockets |
+| `POST /api/auth/logout` | – | `204` (esborra la cookie de sessió i tanca els WebSockets d'aquesta sessió; la de dispositiu es conserva); `401` sense sessió. Per al client, només `204` i `401` volen dir que la sessió s'ha acabat. Amb qualsevol altra resposta, o si no n'arriba cap, bloqueja la pàgina localment (al servidor, la sessió continua oberta) i, fins que el servidor confirma el logout o el propietari torna a iniciar sessió, cada càrrega de la pàgina torna a provar el logout abans de consultar `GET /api/auth/state` |
 | `GET /api/providers` | – | `[ProviderStatus]` |
 | `GET /api/models` | `?refresh=1` opcional (ignora la memòria cau) | `ModelCatalog` |
 | `GET /api/pricing` | – | `Pricing` |
@@ -28,7 +30,7 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 | `GET /api/conversations` | `?limit=50&before=<id>` | `[ConversationSummary]`, les més recents primer |
 | `GET /api/conversations/{id}` | – | `ConversationDetail` |
 | `PATCH /api/conversations/{id}` | `{"title": str}` | `ConversationSummary` |
-| `DELETE /api/conversations/{id}` | – | `204` |
+| `DELETE /api/conversations/{id}` | – | `204`. Els torns en curs de la conversa es cancel·len, i el servidor n'oblida tots els torns: un `turn.subscribe` posterior rep `turn.unknown` |
 | `GET /api/stats` | `?days=30` (1–365) | `Stats` |
 | `GET /api/ws` | WebSocket | vegeu més avall |
 
@@ -209,7 +211,7 @@ Una sola connexió persistent per pestanya. El servidor tanca amb el codi:
 - `1013` si el client no rep prou ràpid: té 4096 missatges pendents d'enviar, o 20.000 esdeveniments o més (cada esdeveniment d'un reenviament de `turn.subscribe` compta; un sol reenviament pot ser més llarg, així que qualsevol torn es pot recuperar), quan n'arriba un altre. Ha de reconnectar i fer `turn.subscribe` des de l'últim `seq` que té.
 - `1011` si hi ha un error intern.
 
-Cada missatge del client (amb `type`) comprova la sessió. Un `ping` la comprova però no compta com a activitat: no allarga la caducitat per inactivitat, de manera que una pestanya oberta sense ús no manté la sessió viva.
+L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Només `turn.start` i `turn.cancel`, que són accions del propietari, compten com a activitat. L'*handshake*, el `ping` i el `turn.subscribe` (que el client envia sol després de reconnectar) la comproven només en lectura: no allarguen la caducitat per inactivitat. Així, una pestanya oberta sense ús no manté la sessió viva, encara que es reconnecti.
 
 ### Client → servidor
 
@@ -228,9 +230,9 @@ Cada missatge del client (amb `type`) comprova la sessió. Un `ping` la comprova
 
 ### Servidor → client
 
-En connectar: `{"type": "hello", "version": "0.2.0", "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null fins al turn.started d'una conversa nova), "last_seq"}]}`. `active_turns` només inclou els torns en curs.
+En connectar: `{"type": "hello", "version": "0.2.0", "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null fins al turn.started d'una conversa nova), "last_seq"}]}`. `active_turns` només inclou els torns en curs, i no els d'una conversa esborrada.
 
-Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix respon `{"type": "turn.unknown", "request_id"}`. Una connexió rep cada torn una sola vegada: un `turn.subscribe` d'un torn que la connexió ja rep (perquè l'ha començat o ja s'hi ha subscrit) s'ignora, sense resposta, ja que ja té tots els esdeveniments des del primer `after_seq`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura.
+Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix, o la seva conversa s'ha esborrat, respon `{"type": "turn.unknown", "request_id"}`. Una connexió rep cada torn una sola vegada: un `turn.subscribe` d'un torn que la connexió ja rep (perquè l'ha començat o ja s'hi ha subscrit) s'ignora, sense resposta, ja que ja té tots els esdeveniments des del primer `after_seq`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura.
 
 | `type` | Camps | Significat |
 | --- | --- | --- |
@@ -244,7 +246,7 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `turn.failed` | `error: {kind, message}` | Torn avortat |
 | `turn.cancelled` | – | Cancel·lat per l'usuari |
 
-Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start`).
+Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start`). Un `conversation_id` fora de l'interval 1 – 2^63 − 1 dona `invalid`. Un missatge amb text que no es pot codificar en UTF-8 (un substitut solitari, `\ud800`, en qualsevol clau o valor) dona `invalid` amb `El missatge conté text que no és UTF-8 vàlid.` i el `request_id` si aquest és vàlid; no se n'usa res.
 
 `savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens estimats estalviats i el seu valor aproximat: les respostes conservades al preu de sortida del seu model, la compactació al preu d'entrada de les crides que portaven el context, les rondes omeses al cost mitjà de les revisions del torn i un encert de memòria cau al cost del torn original; `null` si no se'n pot posar preu a cap). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
 

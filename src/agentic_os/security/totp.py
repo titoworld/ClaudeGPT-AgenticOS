@@ -1,8 +1,9 @@
 """TOTP (RFC 6238: 6 digits, 30 s steps, SHA-1) with replay protection.
 
 :func:`verify` is pure: it returns the matched time step, which the caller must
-then record atomically with ``SqliteStore.consume_totp_step(step)``; a ``False``
-there means the code was already used and the login must be rejected.
+then record atomically: the login does it in ``SqliteStore.complete_login``, in the
+same transaction that creates the session. A ``False`` there means the code was
+already used (or the owner changed meanwhile) and the login must be rejected.
 """
 
 from __future__ import annotations

@@ -1,8 +1,20 @@
 // A fake of the REST API (docs/PROTOCOL.md) behind a `fetch` stub, and a WebSocket
 // double, for tests that drive the real api.ts and app controller. Settings carry a
 // revision and a save based on an older one gets 409 with the current settings, like
-// server/routes_api.py. Never imported by application code.
-import type { Pricing, RuntimeSettings, ServerMessage } from './protocol';
+// server/routes_api.py. The browser's session cookie is a flag: a login sets it, a
+// logout the server confirms (204) clears it, and /api/auth/state reports it. Never
+// imported by application code.
+import {
+  BACKGROUND_HEADER,
+  type ConversationDetail,
+  type ConversationSummary,
+  type ModelCatalog,
+  type MonthSpend,
+  type Pricing,
+  type ProviderStatus,
+  type RuntimeSettings,
+  type ServerMessage,
+} from './protocol';
 
 export const CONFLICT_DETAIL =
   'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.';
@@ -26,6 +38,8 @@ export function deferred<T>(): Deferred<T> {
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
+const unavailable = (): Response => json({ detail: 'No disponible en aquesta prova.' }, 503);
+
 export class FakeApi {
   /** The stored settings, with their revision. */
   settings: RuntimeSettings;
@@ -35,8 +49,25 @@ export class FakeApi {
    */
   settingsGet: (() => RuntimeSettings | Promise<RuntimeSettings>) | null = null;
   pricing: Pricing = { fx: { eur_per_usd: 0.9, as_of: null, source: 'manual' }, prices: [] };
+  /** GET /api/providers. */
+  providers: ProviderStatus[] = [];
+  /** GET /api/conversations (every page) and, by id, GET/PATCH/DELETE /api/conversations/{id}. */
+  conversations: ConversationSummary[] = [];
+  /** GET /api/spend; null answers 503. */
+  spend: MonthSpend | null = null;
+  /** GET /api/models; null answers 503. */
+  catalog: ModelCatalog | null = null;
+  /** Whether the browser's session cookie names a live session. */
+  session = true;
+  /**
+   * Answers POST /api/auth/logout instead of ending the session: return an error
+   * (e.g. a 502 from the proxy) or throw a TypeError (the network failed).
+   */
+  logoutAnswer: (() => Response | Promise<Response>) | null = null;
   /** Every request, as "METHOD /path". */
   readonly calls: string[] = [];
+  /** Every request with whether it said the app made it by itself (BACKGROUND_HEADER). */
+  readonly requests: { call: string; background: boolean }[] = [];
   /** Bodies of every PUT /api/settings. */
   readonly puts: RuntimeSettings[] = [];
 
@@ -46,6 +77,11 @@ export class FakeApi {
 
   count(call: string): number {
     return this.calls.filter((c) => c === call).length;
+  }
+
+  /** Calls that carried BACKGROUND_HEADER (`background`) or did not. */
+  made(background: boolean): string[] {
+    return this.requests.filter((r) => r.background === background).map((r) => r.call);
   }
 
   /** Another tab or device saves: the revision moves on. */
@@ -71,9 +107,20 @@ export class FakeApi {
     const path = new URL(String(input), 'https://aos.test').pathname;
     const call = `${method} ${path}`;
     this.calls.push(call);
+    this.requests.push({ call, background: new Headers(init.headers).get(BACKGROUND_HEADER) === '1' });
+    const one = /^\/api\/conversations\/(\d+)$/.exec(path);
+    if (one) return this.#conversation(method, Number(one[1]), init);
     switch (call) {
       case 'GET /api/auth/state':
-        return json({ authenticated: true, setup_required: false });
+        return json({ authenticated: this.session, setup_required: false });
+      case 'POST /api/auth/login':
+        this.session = true;
+        return new Response(null, { status: 204 });
+      case 'POST /api/auth/logout':
+        if (this.logoutAnswer) return this.logoutAnswer();
+        if (!this.session) return json({ detail: 'Cal iniciar sessió.' }, 401);
+        this.session = false;
+        return new Response(null, { status: 204 });
       case 'GET /api/settings':
         return json(this.settingsGet ? await this.settingsGet() : this.settings);
       case 'PUT /api/settings':
@@ -81,12 +128,35 @@ export class FakeApi {
       case 'GET /api/pricing':
         return json(this.pricing);
       case 'GET /api/providers':
+        return json(this.providers);
       case 'GET /api/conversations':
-        return json([]);
-      case 'POST /api/auth/logout':
+        return json(this.conversations);
+      case 'GET /api/spend':
+        return this.spend ? json(this.spend) : unavailable();
+      case 'GET /api/models':
+        return this.catalog ? json(this.catalog) : unavailable();
+      default:
+        return unavailable();
+    }
+  }
+
+  #conversation(method: string, id: number, init: RequestInit): Response {
+    const summary = this.conversations.find((c) => c.id === id);
+    if (!summary) return json({ detail: 'La conversa no existeix.' }, 404);
+    switch (method) {
+      case 'GET':
+        return json({ ...summary, summary: null, messages: [] } satisfies ConversationDetail);
+      case 'PATCH': {
+        const { title } = JSON.parse(String(init.body)) as { title: string };
+        const renamed = { ...summary, title };
+        this.conversations = this.conversations.map((c) => (c.id === id ? renamed : c));
+        return json(renamed);
+      }
+      case 'DELETE':
+        this.conversations = this.conversations.filter((c) => c.id !== id);
         return new Response(null, { status: 204 });
       default:
-        return json({ detail: 'No disponible en aquesta prova.' }, 503);
+        return unavailable();
     }
   }
 

@@ -33,6 +33,15 @@ SECURE_DEVICE_COOKIE_NAME: Final = "__Host-aos_device"
 DEV_DEVICE_COOKIE_NAME: Final = "aos_device"
 UNAUTHORIZED_DETAIL: Final = "Cal iniciar sessió."
 CLIENT_DISCONNECT_DETAIL: Final = "La connexió s'ha tancat abans de rebre la petició sencera."
+INVALID_JSON_DETAIL: Final = "El cos de la petició ha de ser JSON vàlid."
+INVALID_TEXT_DETAIL: Final = "La petició conté text que no és UTF-8 vàlid."
+BACKGROUND_HEADER: Final = "X-AOS-Background"
+"""With the value ``1``, marks a request the client makes by itself, not because the
+owner did something (refreshes after ``hello`` or a reconnection, periodic refreshes,
+retries): its session check is read-only (docs/PROTOCOL.md)."""
+MAX_SQLITE_ID: Final = 2**63 - 1
+"""The largest INTEGER SQLite stores: no row id can be larger, and Python's sqlite3
+refuses to even send one (``OverflowError``)."""
 
 
 def cookie_name(settings: Settings) -> str:
@@ -110,8 +119,13 @@ class AppState:
         return normalize_origins(self.settings.allowed_origins)
 
     async def session_for(self, connection: HTTPConnection) -> SessionRecord | None:
-        """The live session of the request's cookie, or ``None``."""
+        """The live session of the request's cookie, or ``None``. The check is the
+        owner's activity (it refreshes the idle timeout) unless the client marked the
+        request as its own (:func:`is_background`): then it is read-only, so a tab
+        left open does not keep the session alive by refreshing things."""
         token = connection.cookies.get(self.cookie_name)
+        if is_background(connection):
+            return await self.sessions.peek(token, self.clock())
         return await self.sessions.validate(token, self.clock())
 
     async def end_session(self, token: str | None) -> None:
@@ -147,21 +161,55 @@ async def require_session(request: Request, state: StateDep) -> SessionRecord:
 SessionDep = Annotated[SessionRecord, Depends(require_session)]
 
 
+def is_background(connection: HTTPConnection) -> bool:
+    """Whether the client made the request by itself (``X-AOS-Background: 1``)."""
+    return connection.headers.get(BACKGROUND_HEADER, "").strip() == "1"
+
+
 def client_ip(connection: HTTPConnection) -> str | None:
     """Client address (uvicorn already applied the trusted proxy headers)."""
     return connection.client.host if connection.client else None
 
 
-async def read_json(request: Request) -> object:
-    """The decoded JSON body; 422 if it is not valid JSON, 400 (without a traceback
-    in the logs) if the client disconnects before sending all of it."""
+def is_utf8(text: str) -> bool:
+    """Whether ``text`` can be encoded as UTF-8 (it has no lone surrogate)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def has_invalid_text(value: object) -> bool:
+    """Whether decoded JSON holds a string, as a key or a value at any depth, that
+    cannot be encoded as UTF-8: a lone surrogate, which JSON allows as ``"\\ud800"``.
+    Such text could be neither stored nor sent back to the client."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if not is_utf8(item):
+                return True
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
+
+
+async def read_json(request: Request, *, utf8_only: bool = True) -> object:
+    """The decoded JSON body. 422 if it is not valid JSON or, with ``utf8_only``, if
+    it holds text that is not valid UTF-8 (:func:`has_invalid_text`); 400 (without a
+    traceback in the logs) if the client disconnects before sending all of it."""
     try:
         body = await request.body()
     except ClientDisconnect:
         raise HTTPException(status_code=400, detail=CLIENT_DISCONNECT_DETAIL) from None
     try:
-        return json.loads(body)
+        value = json.loads(body)
     except (ValueError, RecursionError):
-        raise HTTPException(
-            status_code=422, detail="El cos de la petició ha de ser JSON vàlid."
-        ) from None
+        raise HTTPException(status_code=422, detail=INVALID_JSON_DETAIL) from None
+    if utf8_only and has_invalid_text(value):
+        raise HTTPException(status_code=422, detail=INVALID_TEXT_DETAIL)
+    return value

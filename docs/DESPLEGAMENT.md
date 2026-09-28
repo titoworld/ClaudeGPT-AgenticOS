@@ -352,7 +352,7 @@ docker compose logs --tail 100 caddy
 
 **Error 502 (Bad Gateway)**
 - L'aplicació no respon. Mira `docker compose logs --tail 100 app`.
-- Si diu que «La configuració (variables AOS_*) no és vàlida», revisa `.env` i aplica-ho amb `docker compose up -d`.
+- Si diu que «La configuració (variables AOS_*) no és vàlida», les línies de sota diuen quina variable falla i per què. Corregeix-la a `.env` i aplica-ho amb `docker compose up -d`. `agentic-os doctor` fa la mateixa comprovació.
 - Si s'ha quedat sense memòria (`docker compose ps` la mostra reiniciant-se; `dmesg | grep -i oom`), puja `mem_limit` al `docker-compose.yml` o el VPS a 4 GB.
 - Durant una actualització és normal durant uns segons.
 
@@ -394,7 +394,7 @@ docker compose logs --tail 100 caddy
 **Inici de sessió i sessions**
 - Contrasenya (argon2id) **i** codi TOTP, que no es pot reutilitzar. Bloqueig exponencial després d'intents fallits, que es manté encara que reiniciïs (`agentic-os reset-throttle` l'aixeca).
 - Cada navegador on has entrat rep una segona cookie, de dispositiu conegut (un any; no s'esborra en tancar la sessió). Un dispositiu conegut només es bloqueja pels seus propis errors: els intents d'altres des d'Internet no et poden deixar fora d'un navegador que ja fas servir. `agentic-os reset-sessions` i `agentic-os init` obliden tots els dispositius. Durant un atac sostingut, un dispositiu nou només pot entrar si limites l'accés amb `ALLOWED_IPS` o una VPN (vegeu [Resolució de problemes](#resolució-de-problemes)).
-- Sessions desades al servidor (només se'n guarda el hash) amb una cookie `__Host-` HttpOnly, Secure i SameSite=Strict. Caduquen després de 72 hores sense activitat i als 30 dies (`AOS_SESSION_IDLE_HOURS`, `AOS_SESSION_MAX_DAYS`).
+- Sessions desades al servidor (només se'n guarda el hash) amb una cookie `__Host-` HttpOnly, Secure i SameSite=Strict. Caduquen després de 72 hores sense activitat i als 30 dies (`AOS_SESSION_IDLE_HOURS`, d'1 a 8.760 hores; `AOS_SESSION_MAX_DAYS`, d'1 a 3.650 dies). Una pestanya oberta que no fas servir no compta com a activitat.
 
 **Secrets**
 - `.env` (permisos 600) i el volum `app_home` contenen credencials que donen accés a les teves subscripcions. Qui sigui root al VPS les pot fer servir: no comparteixis l'accés al servidor.

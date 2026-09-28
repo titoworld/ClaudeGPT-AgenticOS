@@ -46,13 +46,15 @@ def hash_password(password: str) -> str:
 
 def verify_password(password_hash: str, password: str) -> bool:
     """``True`` if ``password`` matches. Never raises: a mismatch, an oversized
-    password or a malformed hash all return ``False``."""
+    password, a password that cannot be encoded as UTF-8 (a lone surrogate, which JSON
+    allows as ``"\\ud800"``) or a malformed hash all return ``False``, so the login
+    counts them as failed attempts."""
     if len(password) > MAX_PASSWORD_LENGTH:
         return False
     try:
         with _slots:
             return _hasher.verify(password_hash, password)
-    except (VerificationError, InvalidHashError):
+    except (VerificationError, InvalidHashError, UnicodeError):
         return False
 
 

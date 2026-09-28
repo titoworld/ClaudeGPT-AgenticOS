@@ -50,12 +50,20 @@ class DeviceManager:
         self.max_age = max_age
         """Lifetime; use it as the cookie ``Max-Age``."""
 
-    async def create(self, now: datetime) -> str:
-        """Register a new device and return its raw token for the cookie."""
+    def issue(self, now: datetime) -> tuple[str, DeviceRecord]:
+        """A new device that is not stored yet: the raw token for the cookie and the
+        record to store (a login stores it in its own transaction)."""
         now = as_utc(now)
         token = new_token()
+        return token, DeviceRecord(
+            token_hash=hash_token(token), created_at=now, expires_at=now + self.max_age
+        )
+
+    async def create(self, now: datetime) -> str:
+        """Register a new device and return its raw token for the cookie."""
+        token, record = self.issue(now)
         await self._store.create_device(
-            hash_token(token), created_at=now, expires_at=now + self.max_age
+            record.token_hash, created_at=record.created_at, expires_at=record.expires_at
         )
         return token
 

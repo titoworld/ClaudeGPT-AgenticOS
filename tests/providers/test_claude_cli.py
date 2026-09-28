@@ -360,6 +360,62 @@ async def test_crash_without_result_reports_redacted_stderr(
     assert "Bearer ***" in error.message and "sk-ant-***" in error.message
 
 
+TOKEN_BODY = "Zx9" * 30
+"""The body of a token: without its "Bearer "/"sk-ant-" prefix nothing hides it."""
+
+
+async def test_a_secret_cut_by_the_edge_of_the_stderr_tail_is_hidden(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    stderr = "API Error: 401 Authorization: Bearer sk-ant-oat01-" + TOKEN_BODY + "\n" + "q" * 300
+    # The premise: the last 400 characters start inside the token's prefix.
+    assert stderr[-400:].startswith("nt-oat01-" + TOKEN_BODY)
+    fake.scenario(action="crash", stderr=stderr + "\n", exit_code=3)
+    error = await expect_error(provider, request())
+    assert "codi 3" in error.message
+    assert "Zx9" not in error.message
+    assert "Bearer ***" in error.message and error.message.endswith("q" * 300)
+
+
+async def test_a_secret_cut_by_the_edge_of_the_stderr_buffer_is_hidden(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    # Only the last STDERR_KEEP bytes are kept: here they start inside the token and,
+    # after it, there is only blank space.
+    stderr = "boom: Bearer sk-ant-oat01-" + TOKEN_BODY + " " * (claude_cli.STDERR_KEEP - 40)
+    fake.scenario(action="crash", stderr=stderr + "\n", exit_code=3)
+    error = await expect_error(provider, request())
+    assert "codi 3" in error.message
+    assert "Zx9" not in error.message
+
+
+@pytest.mark.parametrize(
+    ("dropped", "kept"),
+    [
+        # "Bearer" ends the partial first line that the cut leaves, and its token is on
+        # the next line; the last 400 characters start inside the token too.
+        ("y" * 50, "y" * 50 + " Bearer\n" + TOKEN_BODY + "\n" + "q" * 350),
+        # The cut falls inside "Bearer": only "arer" is left before the token's line.
+        ("boom: Be", "arer\n" + TOKEN_BODY),
+        # The cut falls right after "Bearer", before a blank line and the token.
+        ("boom: Bearer", "\n\n  " + TOKEN_BODY),
+    ],
+    ids=["bearer-ends-the-cut-line", "cut-inside-bearer", "cut-after-bearer"],
+)
+async def test_a_token_on_the_line_after_its_bearer_is_hidden_when_stderr_is_cut(
+    fake: FakeCli, provider: ClaudeCliProvider, dropped: str, kept: str
+) -> None:
+    # The "\s+" after "Bearer" spans lines. Only the last STDERR_KEEP bytes of stderr
+    # are kept: `kept`, padded with blank space to exactly that many, so the cut falls
+    # right between `dropped` and `kept`.
+    kept += " " * (claude_cli.STDERR_KEEP - len(kept) - 1) + "\n"
+    assert len(kept.encode()) == claude_cli.STDERR_KEEP
+    fake.scenario(action="crash", stderr=dropped + kept, exit_code=3)
+    error = await expect_error(provider, request())
+    assert "codi 3" in error.message
+    assert "Zx9" not in error.message and "***" in error.message
+
+
 async def test_invalid_flags_would_crash(fake: FakeCli, provider: ClaudeCliProvider) -> None:
     # The fake refuses any forbidden or missing flag: guard against the fake itself.
     fake.scenario()

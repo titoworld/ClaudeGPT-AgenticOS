@@ -770,6 +770,34 @@ async def bare_connection(*arguments: str) -> _AppServerConnection:
     return _AppServerConnection(process, on_notification=lambda *_: None, on_exit=lambda *_: None)
 
 
+async def test_codex_stderr_is_redacted_before_it_is_kept_or_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every stderr line is redacted as it is read: the tail that reaches error messages
+    and the server log never holds a key or a token, not even one split after "Bearer"."""
+    caplog.set_level(logging.DEBUG, logger="agentic_os.providers.codex_appserver")
+    lines = [
+        "auth header Bearer abc.def-123456",
+        "key sk-ABCDEFGH12345678 rejected",
+        "retrying with Bearer",
+        "xyz-split-token-999 after the break",
+        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+    ]
+    text = "\n".join(lines) + "\n"
+    conn = await bare_connection(
+        f"import sys, time; sys.stderr.write({text!r}); sys.stderr.flush(); time.sleep(30)"
+    )
+    try:
+        await wait_until(lambda: len(conn.stderr_tail) == len(lines))
+    finally:
+        await conn.close()
+    kept = "\n".join(conn.stderr_tail)
+    for secret in ("abc.def-123456", "ABCDEFGH12345678", "xyz-split-token-999", "c2lnbmF0dXJl"):
+        assert secret not in kept
+        assert secret not in caplog.text
+    assert "after the break" in kept  # only the token itself is hidden
+
+
 async def test_a_process_that_stops_reading_a_long_input_is_replaced(
     fake: FakeCodex, short_timeouts: None
 ) -> None:

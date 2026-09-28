@@ -59,3 +59,12 @@ def test_policy_rejections(password: str, fragment: str) -> None:
 def test_policy_accepts_twelve_characters() -> None:
     assert password_policy_error("x" * 12) is None
     assert password_policy_error(PASSWORD) is None
+
+
+@pytest.mark.parametrize("password", ["\ud800" + PASSWORD, PASSWORD + "\udfff", "\udcff" * 20])
+async def test_a_password_that_is_not_utf8_never_matches(password: str) -> None:
+    # A lone surrogate (valid JSON as "\ud800") cannot be encoded for argon2: a failed
+    # attempt like any other, never an exception.
+    password_hash = hash_password(PASSWORD)
+    assert verify_password(password_hash, password) is False
+    assert await verify_password_async(password_hash, password) is False

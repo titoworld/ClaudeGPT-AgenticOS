@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import copy
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -24,6 +25,8 @@ from typing import Any, Final
 from urllib.parse import urlsplit
 
 from pydantic import ValidationError
+from pydantic_core import ErrorDetails
+from pydantic_settings import SettingsError
 
 from agentic_os import __version__
 from agentic_os.config import Settings, get_settings
@@ -40,7 +43,10 @@ never reuses a connection uvicorn has just closed (sporadic 502s)."""
 STATUS_TIMEOUT_SECONDS: Final = 30.0
 VERSION_TIMEOUT_SECONDS: Final = 15.0
 LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
-LOG_LEVELS: Final = ("critical", "error", "warning", "info", "debug", "trace")
+INVALID_SETTINGS: Final = "La configuració (variables AOS_*) no és vàlida:"
+_SHOWN_VALUE_CHARS: Final = 60
+_FIELD_RE: Final = re.compile(r'field "(\w+)"')
+_QUOTED_RE: Final = re.compile(r"'([^']*)'")
 
 Output = Callable[[str], None]
 
@@ -124,8 +130,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         settings = get_settings()
-    except ValidationError as exc:
-        print(f"La configuració (variables AOS_*) no és vàlida:\n{exc}", file=sys.stderr)
+    except (ValidationError, SettingsError) as exc:
+        print(describe_invalid_settings(exc), file=sys.stderr)
+        return 2
+    except UnicodeError:
+        print("No s'ha pogut llegir la configuració: el fitxer .env no és UTF-8.", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(
+            f"No s'ha pogut llegir la configuració (fitxer .env): {exc.strerror or exc}.",
+            file=sys.stderr,
+        )
         return 2
     if args.command == "serve":
         return serve(settings, host=args.host, port=args.port, dev=args.dev)
@@ -142,6 +157,91 @@ def main(argv: Sequence[str] | None = None) -> int:
     from agentic_os.admin import run_reset_sessions
 
     return _with_store(settings, run_reset_sessions)
+
+
+def _variable(field: object) -> str:
+    """The environment variable of a :class:`Settings` field."""
+    name = str(field)
+    return name if name.isupper() else f"AOS_{name.upper()}"
+
+
+def _number(value: object) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def _alternatives(options: Sequence[str]) -> str:
+    quoted = [f"«{option}»" for option in options]
+    return quoted[0] if len(quoted) == 1 else f"{', '.join(quoted[:-1])} o {quoted[-1]}"
+
+
+_BOUNDS: Final = (
+    ("ge", "com a mínim"),
+    ("gt", "més gran que"),
+    ("le", "com a màxim"),
+    ("lt", "més petit que"),
+)
+_BOUND_ERRORS: Final = frozenset(
+    {"greater_than_equal", "greater_than", "less_than_equal", "less_than"}
+)
+
+
+def _range(field: object) -> str:
+    """The bounds of a :class:`Settings` field in Catalan (``com a mínim 1 i com a
+    màxim 8760``), or ``""``."""
+    info = Settings.model_fields.get(str(field))
+    parts = [
+        f"{text} {_number(getattr(item, key))}"
+        for item in (info.metadata if info is not None else ())
+        for key, text in _BOUNDS
+        if getattr(item, key, None) is not None
+    ]
+    return " i ".join(parts)
+
+
+def _reason(error: ErrorDetails) -> str:
+    """Why a value is invalid, in Catalan (pydantic's own messages are English)."""
+    kind, ctx = error["type"], error.get("ctx") or {}
+    if kind in _BOUND_ERRORS and (bounds := _range(error["loc"][0])):
+        return f"ha de ser {bounds}"
+    if kind in ("int_parsing", "int_from_float", "int_type"):
+        return "ha de ser un nombre enter"
+    if kind in ("float_parsing", "float_type", "finite_number"):
+        return "ha de ser un número"
+    if kind in ("bool_parsing", "bool_type"):
+        return "ha de ser true o false"
+    if kind == "literal_error" and (options := _QUOTED_RE.findall(str(ctx.get("expected")))):
+        return f"ha de ser {_alternatives(options)}"
+    if kind == "value_error" and ctx.get("error") is not None:
+        return str(ctx["error"])  # our own validators' messages are Catalan
+    return "no és vàlid"
+
+
+def _shown(error: ErrorDetails, variable: str) -> str:
+    """`` (valor: «…»)`` for a value read from the environment (never for keys)."""
+    value = error.get("input")
+    if not isinstance(value, str) or "KEY" in variable:
+        return ""
+    if len(value) > _SHOWN_VALUE_CHARS:
+        value = value[: _SHOWN_VALUE_CHARS - 1] + "…"
+    return f" (valor: «{value}»)"
+
+
+def describe_invalid_settings(exc: ValidationError | SettingsError) -> str:
+    """The invalid ``AOS_*`` variables, one per line, in Catalan."""
+    lines = [INVALID_SETTINGS]
+    if isinstance(exc, SettingsError):
+        # pydantic-settings reads lists (AOS_EXTRA_ORIGINS) as JSON.
+        match = _FIELD_RE.search(str(exc))
+        variable = _variable(match.group(1)) if match else "AOS_EXTRA_ORIGINS"
+        lines.append(
+            f"- {variable}: ha de ser JSON; per exemple, una llista d'orígens s'escriu "
+            f"{variable}='[\"http://localhost:5173\"]'."
+        )
+        return "\n".join(lines)
+    for error in exc.errors():
+        variable = _variable(error["loc"][0]) if error["loc"] else "?"
+        lines.append(f"- {variable}: {_reason(error)}{_shown(error, variable)}.")
+    return "\n".join(lines)
 
 
 def _with_store(settings: Settings, command: Callable[[SqliteStore], Awaitable[int]]) -> int:
@@ -204,13 +304,7 @@ def serve(settings: Settings, *, host: str | None, port: int | None, dev: bool) 
     """Run uvicorn with the app factory until interrupted."""
     import uvicorn
 
-    level = "debug" if dev else settings.log_level.lower()
-    if level not in LOG_LEVELS:
-        print(
-            f"AOS_LOG_LEVEL no és vàlid: «{settings.log_level}» (valors: {', '.join(LOG_LEVELS)}).",
-            file=sys.stderr,
-        )
-        return 2
+    level = "debug" if dev else settings.log_level  # checked by Settings
     if dev:
         _dev_hints(settings, print)
     uvicorn.run(

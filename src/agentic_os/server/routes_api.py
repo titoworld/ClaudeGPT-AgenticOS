@@ -3,11 +3,11 @@
 import asyncio
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from agentic_os.server.catalog import pricing_to_wire
-from agentic_os.server.deps import StateDep, read_json, require_session
+from agentic_os.server.deps import MAX_SQLITE_ID, StateDep, read_json, require_session
 from agentic_os.server.status import status_to_wire
 from agentic_os.storage import MAX_LIST_LIMIT, RuntimeSettings, SettingsConflictError
 
@@ -19,6 +19,9 @@ REVISION_REQUIRED_DETAIL: Final = (
 SETTINGS_CONFLICT_DETAIL: Final = (
     "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar."
 )
+
+ConversationId = Annotated[int, Path(ge=1, le=MAX_SQLITE_ID)]
+"""A conversation id in a path: 422 outside SQLite's positive INTEGER range."""
 
 public_router = APIRouter(prefix="/api")
 """Routes that never require a session."""
@@ -94,14 +97,14 @@ async def put_settings(request: Request, state: StateDep) -> JSONResponse:
 async def list_conversations(
     state: StateDep,
     limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = 50,
-    before: Annotated[int | None, Query(ge=1)] = None,
+    before: Annotated[int | None, Query(ge=1, le=MAX_SQLITE_ID)] = None,
 ) -> JSONResponse:
     conversations = await state.store.list_conversations(limit=limit, before=before)
     return JSONResponse([c.to_wire() for c in conversations])
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: int, state: StateDep) -> JSONResponse:
+async def get_conversation(conversation_id: ConversationId, state: StateDep) -> JSONResponse:
     detail = await state.store.get_conversation(conversation_id)
     if detail is None:
         raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
@@ -110,7 +113,7 @@ async def get_conversation(conversation_id: int, state: StateDep) -> JSONRespons
 
 @router.patch("/conversations/{conversation_id}")
 async def rename_conversation(
-    conversation_id: int, request: Request, state: StateDep
+    conversation_id: ConversationId, request: Request, state: StateDep
 ) -> JSONResponse:
     body = await read_json(request)
     title = body.get("title") if isinstance(body, dict) else None
@@ -126,11 +129,13 @@ async def rename_conversation(
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
-async def delete_conversation(conversation_id: int, state: StateDep) -> Response:
+async def delete_conversation(conversation_id: ConversationId, state: StateDep) -> Response:
     # A running turn would fail on the deleted conversation: stop it first.
     state.turns.cancel_conversation(conversation_id)
     if not await state.store.delete_conversation(conversation_id):
         raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+    # Its turns cannot be replayed any more (turn.subscribe answers turn.unknown).
+    state.turns.forget_conversation(conversation_id)
     return Response(status_code=204)
 
 

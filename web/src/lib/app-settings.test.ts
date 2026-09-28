@@ -270,7 +270,7 @@ describe('logging out', () => {
     // Back in: nothing is sent until this session has loaded them.
     const next = deferred<RuntimeSettings>();
     server.settingsGet = () => next.promise;
-    const entering = app.checkAuth();
+    const entering = app.login('contrasenya', '123456');
     await vi.waitFor(() => expect(app.auth).toBe('ready'));
     FakeSocket.last().open();
     expect(app.canSend()).toBe(false);

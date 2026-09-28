@@ -128,7 +128,10 @@ ANTHROPIC_BASE_URL would send the OAuth token elsewhere, and AOS_* are app secre
 
 _RATE_WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
 _RATE_STATUS = {"allowed": "allowed", "allowed_warning": "warning", "rejected": "rejected"}
-_SECRET_RE = re.compile(r"(sk-ant-)[A-Za-z0-9_\-]+|(Bearer\s+)[A-Za-z0-9._~+/=\-]+")
+_BEARER_TOKEN = r"[A-Za-z0-9._~+/=\-]+"
+_SECRET_RE = re.compile(rf"(sk-ant-)[A-Za-z0-9_\-]+|(Bearer\s+){_BEARER_TOKEN}")
+_LEADING_TOKEN_RE = re.compile(rf"\A(\s*){_BEARER_TOKEN}")
+"""A bearer token at the start of a text, after any blank space (line breaks too)."""
 
 
 class _Key(NamedTuple):
@@ -251,6 +254,9 @@ class _CliProcess:
         self.key = key
         self.expiry: asyncio.TimerHandle | None = None
         self._stderr = bytearray()
+        self._stderr_cut = False
+        """The start of stderr was dropped (:data:`STDERR_KEEP`): the first line kept
+        is only the end of a line."""
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._terminate_lock = asyncio.Lock()
         self._terminated = False
@@ -268,10 +274,23 @@ class _CliProcess:
             self._stderr += chunk
             if len(self._stderr) > STDERR_KEEP:
                 del self._stderr[:-STDERR_KEEP]
+                self._stderr_cut = True
 
     def stderr_tail(self, limit: int = 400) -> str:
-        text = self._stderr.decode("utf-8", "replace").strip()
-        return redact(text[-limit:]) if text else ""
+        """The end of stderr, at most ``limit`` characters, with secrets hidden.
+
+        They are hidden before anything is cut: a cut could leave the body of a token
+        without the prefix that gives it away. :meth:`_drain_stderr` cuts earlier, so
+        after its cut the partial first line goes as well, and so does the token after
+        that line when the line could be the end of a "Bearer" prefix (only the end of
+        the word and blank space: the space after "Bearer" may span lines).
+        """
+        text = redact(self._stderr.decode("utf-8", "replace"))
+        if self._stderr_cut:
+            partial, _, text = text.partition("\n")
+            if "Bearer".endswith(partial.rstrip()):
+                text = _LEADING_TOKEN_RE.sub(r"\1***", text, count=1)
+        return text.strip()[-limit:]
 
     async def send(self, line: bytes) -> None:
         """Write the only user message and close stdin (the CLI exits after the turn)."""
