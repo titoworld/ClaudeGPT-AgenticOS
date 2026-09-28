@@ -4,6 +4,10 @@ Replies are canned Catalan Markdown built from the question, streamed in small
 chunks. Revisions follow the debate format (critique, answer or UNCHANGED,
 agreement) with agreement values taken from a configurable sequence, which
 restarts for every new question.
+
+Like a real model it honours ``max_output_tokens`` (about 4 characters per token): a
+longer reply is cut and reported as truncated (``finish_reason`` "max_tokens"). Tests can
+also ask for truncated replies or refusals per call purpose.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from agentic_os.providers.base import (
     ProviderError,
     ProviderEvent,
     ProviderStatus,
+    RefusalError,
     TextDelta,
 )
 from agentic_os.providers.prompt_format import AGENT_LABELS
@@ -36,10 +41,12 @@ _TAGGED = {
     "previous": re.compile(r"<your_previous_answer>\n(.*?)\n</your_previous_answer>", re.DOTALL),
 }
 _WORD_RE = re.compile(r"\S+\s*|\s+")
+_CHARS_PER_TOKEN = 4
+REFUSAL_TEXT = "No puc ajudar amb aquesta petició."
 
 
 def _estimate(text: str) -> int:
-    return max(1, -(-len(text) // 4)) if text else 0
+    return max(1, -(-len(text) // _CHARS_PER_TOKEN)) if text else 0
 
 
 def _topic(question: str) -> str:
@@ -60,7 +67,11 @@ def _chunks(text: str) -> list[str]:
 class FakeProvider:
     """Provider that never leaves the process. ``requests`` and ``prewarmed`` record
     every call, which tests use to check what the engine sent. Results report the
-    requested model (``fake-<agent>`` or ``fake-<agent>-mini`` for fast calls by default)."""
+    requested model (``fake-<agent>`` or ``fake-<agent>-mini`` for fast calls by default).
+
+    ``fail`` makes the calls of those purposes fail; ``truncate`` cuts their reply in
+    half (a truncated result); ``refuse`` makes them raise :class:`RefusalError` with
+    the billed usage, after streaming ``refuse_after`` chunks."""
 
     def __init__(
         self,
@@ -69,11 +80,17 @@ class FakeProvider:
         chunk_delay: float = 0.015,
         agreements: Sequence[int] | None = None,
         fail: set[Purpose] | None = None,
+        truncate: set[Purpose] | None = None,
+        refuse: set[Purpose] | None = None,
+        refuse_after: int = 0,
     ) -> None:
         self._agent: AgentName = agent
         self._chunk_delay = chunk_delay
         self._agreements = tuple(agreements) if agreements else DEFAULT_AGREEMENTS
         self._fail = frozenset(fail or ())
+        self._truncate = frozenset(truncate or ())
+        self._refuse = frozenset(refuse or ())
+        self._refuse_after = refuse_after
         self._revisions = 0
         self._revision_question: str | None = None
         self.requests: list[GenerationRequest] = []
@@ -110,8 +127,18 @@ class FakeProvider:
                 kind="unavailable",
             )
         text = self._compose(request)
+        truncated = False
+        if request.purpose in self._truncate:
+            text, truncated = text[: max(1, len(text) // 2)], True
+        budget = max(1, request.max_output_tokens) * _CHARS_PER_TOKEN
+        if len(text) > budget:
+            text, truncated = text[:budget], True
+        chunks = _chunks(text)
+        refusing = request.purpose in self._refuse
+        if refusing:
+            chunks = chunks[: self._refuse_after]
         ttft_ms: int | None = None
-        for chunk in _chunks(text):
+        for chunk in chunks:
             await asyncio.sleep(self._chunk_delay)
             if ttft_ms is None:
                 ttft_ms = int((time.monotonic() - started) * 1000)
@@ -119,12 +146,24 @@ class FakeProvider:
         prompt_tokens = _estimate(request.system) + _estimate(request.prompt)
         prompt_tokens += sum(_estimate(turn.content) for turn in request.history)
         prompt_tokens += _estimate(request.context_summary or "")
+        model = request.model or (self.fast_model if request.fast else self.model)
+        if refusing:
+            await asyncio.sleep(self._chunk_delay)
+            streamed = "".join(chunks)
+            raise RefusalError(
+                f"{AGENT_LABELS[self._agent]} (demostració) ha declinat respondre aquesta petició.",
+                usage=Usage(input_tokens=prompt_tokens, output_tokens=_estimate(streamed)),
+                model=model,
+                refusal=REFUSAL_TEXT,
+            )
         yield GenerationResult(
             text=text,
             usage=Usage(input_tokens=prompt_tokens, output_tokens=_estimate(text)),
-            model=request.model or (self.fast_model if request.fast else self.model),
+            model=model,
             latency_ms=int((time.monotonic() - started) * 1000),
             ttft_ms=ttft_ms,
+            truncated=truncated,
+            finish_reason="max_tokens" if truncated else None,
         )
 
     async def prewarm(self, request: GenerationRequest) -> None:

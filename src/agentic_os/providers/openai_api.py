@@ -3,9 +3,15 @@
 Every call is stateless (``store=False``): the system prompt goes in ``instructions``
 and the conversation in ``input``, append-only across turns so OpenAI's automatic
 prompt cache keeps hitting; ``prompt_cache_key`` is stable per purpose. Reasoning
-models (GPT-5 on, o-series) get an effort per purpose; older chat models such as gpt-4o
-reject ``reasoning`` and run without it. openai>=3 uses httpx2 (never httpx) for its
+models (GPT-5 on, o-series) get an effort per purpose, or the lowest one they accept
+when the request asks for reasoning "off"; older chat models such as gpt-4o reject
+``reasoning`` and run without it. ``max_output_tokens`` is the request's billed output
+budget exactly (it includes the reasoning). openai>=3 uses httpx2 (never httpx) for its
 client, timeouts and transports.
+
+A reply that stops early (``response.incomplete``) is a truncated result, or an error
+with its billed usage when no text came at all; a refusal (``refusal`` events or parts)
+raises :class:`RefusalError` with its billed usage, even after some text streamed.
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ from agentic_os.providers.base import (
     ProviderError,
     ProviderEvent,
     ProviderStatus,
+    RefusalError,
     TextDelta,
+    clean_refusal,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
 
@@ -45,14 +53,19 @@ MAX_RETRIES = 2
 """SDK retries (408/409/429/5xx and connection errors), only before the stream starts."""
 DETAIL_MAX_CHARS = 200
 
-Effort = Literal["low", "medium"]
+Effort = Literal["none", "minimal", "low", "medium"]
 EFFORT_BY_PURPOSE: dict[Purpose, Effort] = {
     "answer": "medium",
     "revision": "low",
     "synthesis": "medium",
     "summary": "low",
 }
-"""Never "none": gpt-6-astra rejects it. No temperature/top_p either (unsupported)."""
+"""Never "none" here: gpt-6-astra rejects it. No temperature/top_p either (unsupported)."""
+
+_NO_EFFORT_MODEL = re.compile(r"^gpt-6-(?:sol|luna)(?:-\d{4}-\d{2}-\d{2})?$")
+_MINIMAL_EFFORT_MODEL = re.compile(r"^gpt-5(?:-mini|-nano)?(?:-\d{4}-\d{2}-\d{2})?$")
+FINISH_REASONS: dict[str, str] = {"max_output_tokens": "max_tokens"}
+"""``incomplete_details.reason`` -> ``GenerationResult.finish_reason`` (others as they are)."""
 
 MODELS_TTL_SECONDS = 600.0
 FALLBACK_TTL_SECONDS = 60.0
@@ -75,6 +88,56 @@ _REASONING_MODEL = re.compile(r"^(o\d|gpt-([5-9]|[1-9]\d))")
 _NOT_REASONING = re.compile(r"-chat\b|^o1-(mini|preview)")
 _SECRET_RE = re.compile(r"(sk-)[A-Za-z0-9_\-*]{8,}|(Bearer\s+)\S+")
 _SERVER_CODES = frozenset({"server_error", "vector_store_timeout"})
+
+
+def lowest_effort(model_id: str) -> Effort:
+    """Lowest reasoning effort ``model_id`` accepts (reasoning "off"): "none" on GPT-6 Sol
+    and Luna, "minimal" on the first GPT-5 models and "low" on the rest (GPT-6 Astra and
+    the o-series reject lower values, and "low" is safe on a model this list does not
+    know yet)."""
+    if _NO_EFFORT_MODEL.match(model_id):
+        return "none"
+    if _MINIMAL_EFFORT_MODEL.match(model_id):
+        return "minimal"
+    return "low"
+
+
+def _refusal_in_output(output: object) -> str | None:
+    """Text of the ``refusal`` content parts of a response's output (None when none)."""
+    found: list[str] = []
+    for item in output if isinstance(output, list) else []:
+        for part in getattr(item, "content", None) or []:
+            if getattr(part, "type", None) == "refusal":
+                text = getattr(part, "refusal", "")
+                found.append(text if isinstance(text, str) else "")
+    return "\n".join(found) if found else None
+
+
+def refusal_error(refusal: str, usage: Usage, model: str) -> RefusalError:
+    """RefusalError for a refusal of ChatGPT, with its billed usage and its explanation
+    (cleaned and shortened) in the message."""
+    explanation = clean_refusal(refusal)
+    message = "ChatGPT ha declinat respondre aquesta petició."
+    if explanation:
+        message = f"ChatGPT ha declinat respondre aquesta petició: «{explanation}»"
+    return RefusalError(message, usage=usage, model=model, refusal=explanation)
+
+
+def incomplete_error(reason: str | None, budget: int, usage: Usage, model: str) -> ProviderError:
+    """ProviderError for a reply that stopped before writing any text (billed all the
+    same: the usage goes with it)."""
+    if reason == "max_output_tokens":
+        message = (
+            f"ChatGPT ha esgotat el límit de sortida de {budget} tokens (raonament inclòs) "
+            "abans d'escriure cap resposta."
+        )
+    elif reason == "content_filter":
+        message = (
+            "El filtre de contingut d'OpenAI ha aturat la resposta abans que ChatGPT escrivís res."
+        )
+    else:
+        message = "La resposta de ChatGPT ha quedat incompleta abans d'escriure res."
+    return ProviderError(message, kind="invalid", usage=usage, model=model)
 
 
 def is_chat_model(model_id: str) -> bool:
@@ -240,9 +303,16 @@ class OpenAIApiProvider:
             {"role": role, "content": content}
             for role, content in to_chat_messages(request, "chatgpt")
         ]
+        effort: Effort = (
+            lowest_effort(model)
+            if request.reasoning == "off"
+            else EFFORT_BY_PURPOSE[request.purpose]
+        )
         started = time.monotonic()
         deadline = started + self._settings.provider_timeout_seconds
         parts: list[str] = []
+        refusal: list[str] = []
+        refused = False
         ttft_ms: int | None = None
         try:
             stream = await self._until(
@@ -253,11 +323,8 @@ class OpenAIApiProvider:
                     input=messages,
                     stream=True,
                     store=False,
-                    reasoning=(
-                        {"effort": EFFORT_BY_PURPOSE[request.purpose]}
-                        if supports_reasoning(model)
-                        else omit
-                    ),
+                    reasoning={"effort": effort} if supports_reasoning(model) else omit,
+                    # The billed output budget, reasoning included: never raised here.
                     max_output_tokens=request.max_output_tokens,
                     prompt_cache_key=f"agentic-os-chatgpt-{request.purpose}",
                 ),
@@ -276,16 +343,41 @@ class OpenAIApiProvider:
                             ttft_ms = int((time.monotonic() - started) * 1000)
                         parts.append(event.delta)
                         yield TextDelta(event.delta)
+                    elif event.type == "response.refusal.delta":
+                        refused = True
+                        refusal.append(event.delta)
+                    elif event.type == "response.refusal.done":
+                        refused, refusal = True, [event.refusal]
                     elif event.type in ("response.completed", "response.incomplete"):
-                        # incomplete (e.g. max_output_tokens): keep the partial answer.
                         response = event.response
                         final_model = response.model or model
+                        usage = usage_from_response(response.usage)
+                        declined = _refusal_in_output(response.output)
+                        if refused or declined is not None:
+                            # Text streamed before a refusal is never an answer.
+                            explanation = "".join(refusal) or declined or ""
+                            raise refusal_error(explanation, usage, final_model)
+                        text = "".join(parts)
+                        truncated = event.type == "response.incomplete"
+                        finish_reason: str | None = None
+                        if truncated:
+                            details = response.incomplete_details
+                            reason = details.reason if details is not None else None
+                            if not text.strip():
+                                raise incomplete_error(
+                                    reason, request.max_output_tokens, usage, final_model
+                                )
+                            finish_reason = (
+                                FINISH_REASONS.get(reason, reason) if reason else "incomplete"
+                            )
                         yield GenerationResult(
-                            text="".join(parts),
-                            usage=usage_from_response(response.usage),
+                            text=text,
+                            usage=usage,
                             model=final_model,
                             latency_ms=int((time.monotonic() - started) * 1000),
                             ttft_ms=ttft_ms,
+                            truncated=truncated,
+                            finish_reason=finish_reason,
                         )
                         return
                     elif event.type == "response.failed":

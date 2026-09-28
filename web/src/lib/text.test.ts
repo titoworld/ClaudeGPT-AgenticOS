@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize, wsErrorText } from './text';
+import { dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize, truncationReason, wsErrorText } from './text';
 import { DEFAULT_SETTINGS, validateSettings } from './settings';
 import type { ConversationSummary } from './protocol';
 
@@ -87,5 +87,23 @@ describe('wsErrorText', () => {
     expect(wsErrorText('too_large', '  ')).toBe('El missatge és massa llarg.');
     expect(wsErrorText('nou-codi', '')).toBe('Error del servidor.');
     expect(wsErrorText(undefined, undefined)).toBe('Error del servidor.');
+  });
+});
+
+describe('truncationReason', () => {
+  it('explains in Catalan why an answer was cut off', () => {
+    expect(truncationReason('max_tokens')).toBe("s'ha arribat al límit de sortida");
+    expect(truncationReason('max_output_tokens')).toBe("s'ha arribat al límit de sortida");
+    expect(truncationReason('content_filter')).toBe('tallada pel filtre de contingut');
+    expect(truncationReason('interrupted')).toBe('interrompuda');
+    expect(truncationReason('incomplete')).toBe('interrompuda');
+  });
+
+  it('falls back to a generic reason, keeping an unknown provider code', () => {
+    // The live stream.completed only says `truncated`: the reason arrives with the stored meta.
+    expect(truncationReason(null)).toBe("s'ha tallat abans d'acabar");
+    expect(truncationReason('  ')).toBe("s'ha tallat abans d'acabar");
+    expect(truncationReason('pause_turn')).toBe("s'ha tallat abans d'acabar (motiu: pause_turn)");
+    expect(truncationReason('x'.repeat(200))).toBe(`s'ha tallat abans d'acabar (motiu: ${'x'.repeat(40)}…)`);
   });
 });

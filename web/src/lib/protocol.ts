@@ -156,6 +156,15 @@ export interface MessageMeta {
   critique?: string;
   agreement?: number | null;
   unchanged?: boolean;
+  /** Revision kept unchanged: the short note the model wrote after UNCHANGED, if any. */
+  unchanged_note?: string;
+  /** Present only when the answer was cut off: a usable partial answer, never a complete one. */
+  truncated?: true;
+  /**
+   * Why the answer stopped: "max_tokens", "content_filter", "incomplete",
+   * "interrupted" or a provider-specific string. Set when relevant (a truncated answer).
+   */
+  finish_reason?: string;
   [key: string]: unknown;
 }
 
@@ -267,6 +276,12 @@ export type TurnEvent =
       agreement: number | null;
       unchanged: boolean;
       cost_basis?: 'api' | 'equivalent' | null;
+      /** True when the answer was cut off (omitted when false). */
+      truncated?: boolean;
+      /** Why a truncated answer stopped (e.g. "max_tokens"), as the stored `meta.finish_reason`. */
+      finish_reason?: string;
+      /** Unchanged revision: the model's short note, as the stored `meta.unchanged_note`. */
+      unchanged_note?: string;
     })
   | (TurnEventBase & { type: 'stream.failed'; stream_id: string; error: ErrorInfo })
   | (TurnEventBase & {

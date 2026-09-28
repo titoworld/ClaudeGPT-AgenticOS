@@ -30,9 +30,13 @@ from agentic_os.providers.base import (
 logger = logging.getLogger(__name__)
 
 SUMMARY_MAX_OUTPUT_TOKENS = 2000
+"""Default billed output budget of a summary call (``EngineConfig`` passes its own)."""
 SUMMARY_PREFERENCE: tuple[AgentName, ...] = ("claude", "chatgpt")
 EMPTY_SUMMARY_ERROR = "invalid: El resum és buit."
 """Usage-record error of a summary call that returned no text (billed all the same)."""
+TRUNCATED_SUMMARY_ERROR = "invalid: El resum ha quedat tallat."
+"""Usage-record error of a summary that was cut off: it would replace the older messages
+for good, so it is never used (billed all the same)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,10 +145,12 @@ async def compact(
     """Summarize ``context.messages[:cut]`` (plus the previous summary) with a fast model.
 
     Claude is preferred, ChatGPT is the fallback. ``models`` picks the fast model per
-    agent (the provider's own when missing). Every attempt is recorded as usage, priced
-    with ``price_overrides`` over the default prices: an empty summary keeps its real
-    model and billed tokens. The result's ``context`` is None when no provider could
-    write the summary; its ``usage`` adds up every attempt that reached a model.
+    agent (the provider's own when missing). Each call gets exactly ``max_output_tokens``
+    of billed output and reasoning "off". Every attempt is recorded as usage, priced
+    with ``price_overrides`` over the default prices: an empty or cut-off summary keeps
+    its real model and billed tokens, and the next provider is tried. The result's
+    ``context`` is None when no provider could write the summary; its ``usage`` adds up
+    every attempt that reached a model.
     """
     upto_message_id = context.messages[cut - 1].id
     spent = Usage()
@@ -159,7 +165,8 @@ async def compact(
             purpose="summary",
             fast=True,
             model=(models or {}).get(agent),
-            max_output_tokens=min(max_output_tokens, SUMMARY_MAX_OUTPUT_TOKENS),
+            max_output_tokens=max_output_tokens,
+            reasoning="off",
         )
         started = time.monotonic()
         try:
@@ -198,8 +205,13 @@ async def compact(
         spent += usage
         billed = True
         summary = result.text.strip()
+        failure: str | None = None
         if not summary:
+            failure = EMPTY_SUMMARY_ERROR
             logger.warning("Compaction summary by %s came back empty", agent)
+        elif result.truncated:
+            failure = TRUNCATED_SUMMARY_ERROR
+            logger.warning("Compaction summary by %s was cut off (%s)", agent, result.finish_reason)
         await store.record_usage(
             UsageRecord(
                 conversation_id=conversation_id,
@@ -211,11 +223,11 @@ async def compact(
                 usage=usage,
                 latency_ms=result.latency_ms,
                 ttft_ms=result.ttft_ms,
-                ok=bool(summary),
-                error=None if summary else EMPTY_SUMMARY_ERROR,
+                ok=failure is None,
+                error=failure,
             )
         )
-        if not summary:
+        if failure is not None:
             continue
         await store.set_summary(conversation_id, summary, upto_message_id)
         compacted = build_context(summary, context.messages[cut:])

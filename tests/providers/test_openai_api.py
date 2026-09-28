@@ -15,10 +15,12 @@ import pytest
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
 from agentic_os.providers.base import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     ChatTurn,
     GenerationRequest,
     GenerationResult,
     ProviderError,
+    RefusalError,
     TextDelta,
 )
 from agentic_os.providers.openai_api import (
@@ -27,6 +29,7 @@ from agentic_os.providers.openai_api import (
     TIMEOUT,
     OpenAIApiProvider,
     is_chat_model,
+    lowest_effort,
     supports_reasoning,
     usage_from_response,
 )
@@ -286,24 +289,184 @@ async def test_non_reasoning_models_get_no_reasoning_effort(tmp_path: Path, mode
     _, result = await collect(provider, make_request(model=model, purpose="synthesis"))
     [body] = recorder.bodies
     assert body["model"] == model and "reasoning" not in body
-    assert body["max_output_tokens"] == 8000 and result.text == "Hola"
+    assert body["max_output_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS and result.text == "Hola"
 
 
-async def test_incomplete_response_keeps_the_partial_text(tmp_path: Path) -> None:
-    incomplete = {
+def incomplete(reason: str | None, output_tokens: int = 5, reasoning: int = 0) -> dict[str, Any]:
+    return {
         "type": "response.incomplete",
         "sequence_number": 3,
         "response": response(
             "incomplete",
-            incomplete_details={"reason": "max_output_tokens"},
-            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            incomplete_details=None if reason is None else {"reason": reason},
+            usage={
+                "input_tokens": 10,
+                "output_tokens": output_tokens,
+                "output_tokens_details": {"reasoning_tokens": reasoning},
+                "total_tokens": 10 + output_tokens,
+            },
         ),
     }
-    provider = make_provider(tmp_path, lambda _: streaming(sse(delta("Mig "), incomplete)))
-    _, result = await collect(provider, make_request())
-    assert result.text == "Mig "
-    # Missing details (None at runtime despite the int typing) count as 0.
+
+
+@pytest.mark.parametrize(
+    ("reason", "finish_reason"),
+    [
+        ("max_output_tokens", "max_tokens"),
+        ("content_filter", "content_filter"),
+        (None, "incomplete"),
+    ],
+)
+async def test_an_incomplete_response_is_a_truncated_result(
+    tmp_path: Path, reason: str | None, finish_reason: str
+) -> None:
+    provider = make_provider(tmp_path, lambda _: streaming(sse(delta("Mig "), incomplete(reason))))
+    deltas, result = await collect(provider, make_request())
+    assert deltas == ["Mig "] and result.text == "Mig "
+    # A usable partial answer, never a complete one.
+    assert result.truncated is True and result.finish_reason == finish_reason
     assert result.usage == Usage(input_tokens=10, output_tokens=5)
+
+
+async def test_a_complete_response_is_not_truncated(tmp_path: Path) -> None:
+    provider = make_provider(tmp_path, lambda _: streaming(sse(delta("Tot"), completed())))
+    _, result = await collect(provider, make_request())
+    assert result.truncated is False and result.finish_reason is None
+
+
+async def test_an_output_limit_spent_on_reasoning_fails_with_its_billed_usage(
+    tmp_path: Path,
+) -> None:
+    # The budget includes reasoning: a model that spends it all thinking writes nothing.
+    event = incomplete("max_output_tokens", output_tokens=16_000, reasoning=16_000)
+    provider = make_provider(tmp_path, lambda _: streaming(sse(event)))
+    error = await failure(provider, make_request(max_output_tokens=16_000))
+    assert error.kind == "invalid" and not error.retryable
+    assert "límit de sortida" in error.message and "16000" in error.message
+    assert error.usage == Usage(input_tokens=10, output_tokens=16_000, reasoning_tokens=16_000)
+    assert error.model == "gpt-6-astra-2026-09-03"
+
+
+async def test_content_filter_before_any_text_fails(tmp_path: Path) -> None:
+    provider = make_provider(tmp_path, lambda _: streaming(sse(incomplete("content_filter", 0))))
+    error = await failure(provider, make_request())
+    assert error.kind == "invalid" and "filtre de contingut" in error.message
+
+
+def refusal_events(text: str) -> list[dict[str, Any]]:
+    added = {
+        "type": "response.content_part.added",
+        "sequence_number": 2,
+        "item_id": "msg_1",
+        "output_index": 0,
+        "content_index": 0,
+        "part": {"type": "refusal", "refusal": ""},
+    }
+    half = len(text) // 2
+    parts = [
+        {
+            "type": "response.refusal.delta",
+            "sequence_number": 3 + i,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": piece,
+        }
+        for i, piece in enumerate((text[:half], text[half:]))
+    ]
+    done = {
+        "type": "response.refusal.done",
+        "sequence_number": 6,
+        "item_id": "msg_1",
+        "output_index": 0,
+        "content_index": 0,
+        "refusal": text,
+    }
+    return [added, *parts, done]
+
+
+def refused_output(text: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "refusal", "refusal": text}],
+        }
+    ]
+
+
+@pytest.mark.parametrize("prefix", [[], ["Segur, ", "aquí "]])
+async def test_a_refusal_raises_with_its_billed_usage(tmp_path: Path, prefix: list[str]) -> None:
+    events = [
+        *(delta(text) for text in prefix),
+        *refusal_events("I can't help with that."),
+        completed(output=refused_output("I can't help with that.")),
+    ]
+    provider = make_provider(tmp_path, lambda _: streaming(sse(*events)))
+    deltas: list[str] = []
+    with pytest.raises(RefusalError) as caught:
+        async for event in provider.stream(make_request()):
+            assert isinstance(event, TextDelta)  # never a GenerationResult
+            deltas.append(event.text)
+    error = caught.value
+    assert deltas == prefix
+    assert (error.kind, error.retryable) == ("invalid", False)
+    assert error.model == "gpt-6-astra-2026-09-03"
+    assert error.usage == Usage(
+        input_tokens=300,
+        output_tokens=50,
+        cache_read_tokens=600,
+        cache_write_tokens=100,
+        reasoning_tokens=10,
+    )
+    assert error.refusal == "I can't help with that."
+    assert "declinat" in error.message and "I can't help with that." in error.message
+
+
+async def test_a_refusal_only_in_the_final_output_is_found(tmp_path: Path) -> None:
+    events = [completed(output=refused_output("Not\u0000 this.\n\n  Sorry."))]
+    provider = make_provider(tmp_path, lambda _: streaming(sse(*events)))
+    with pytest.raises(RefusalError) as caught:
+        await collect(provider, make_request())
+    assert caught.value.refusal == "Not this. Sorry."
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("gpt-6-luna", "none"),
+        ("gpt-6-sol", "none"),
+        ("gpt-6-astra", "low"),
+        ("gpt-5", "minimal"),
+        ("gpt-5-mini", "minimal"),
+        ("gpt-5-nano-2025-08-07", "minimal"),
+        ("gpt-5.2", "low"),
+        ("o4-mini", "low"),
+        ("gpt-7-preview", "low"),
+    ],
+)
+def test_lowest_effort(model: str, effort: str) -> None:
+    assert lowest_effort(model) == effort
+
+
+async def test_reasoning_off_uses_the_lowest_effort_and_the_exact_budget(tmp_path: Path) -> None:
+    recorder = Recorder(lambda: streaming(sse(delta("Resum"), completed())))
+    provider = make_provider(tmp_path, recorder)
+    summary = make_request(purpose="summary", fast=True, reasoning="off", max_output_tokens=2000)
+    await collect(provider, summary)
+    await collect(provider, make_request(model="gpt-6-astra", reasoning="off"))
+    await collect(provider, make_request(model="gpt-4o", reasoning="off"))
+    luna, astra, plain = recorder.bodies
+    assert (luna["model"], luna["reasoning"], luna["max_output_tokens"]) == (
+        "gpt-6-luna",
+        {"effort": "none"},
+        2000,
+    )
+    assert astra["reasoning"] == {"effort": "low"}
+    assert astra["max_output_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
+    assert "reasoning" not in plain
 
 
 async def test_missing_usage_has_no_cost(tmp_path: Path) -> None:

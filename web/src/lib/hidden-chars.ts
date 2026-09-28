@@ -1,6 +1,7 @@
 // Hidden characters in model output (Trojan Source, CVE-2021-42574, and Unicode
 // tag smuggling): which ones are revealed, and the ⟨U+XXXX⟩ marks that reveal
-// them, both on screen (renderMarkdown) and on the clipboard (copy buttons).
+// them, both on screen (renderMarkdown, and PlainText.svelte for model text shown
+// outside Markdown) and on the clipboard (copy buttons).
 //
 // - Inside code every bidi control and invisible character is revealed. In prose
 //   they are too, except what legitimate text needs: the directional marks
@@ -70,18 +71,21 @@ export const MAX_MARKS = 2000;
 const codePoint = (char: string): string =>
   `U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`;
 
-interface Mark {
+/** A mark that reveals hidden characters: one ⟨U+XXXX⟩, or the count of a collapsed block. */
+export interface HiddenMark {
   text: string;
+  /** Explanation for the tooltip. */
   title: string;
+  /** Stands in for all the hidden characters of a block that had too many. */
   collapsed: boolean;
 }
 
-function markFor(char: string): Mark {
+function markFor(char: string): HiddenMark {
   const cp = codePoint(char);
   return { text: `⟨${cp}⟩`, title: `Caràcter invisible o de control de direcció (${cp})`, collapsed: false };
 }
 
-function collapsedMark(count: number): Mark {
+function collapsedMark(count: number): HiddenMark {
   const what = count === 1 ? '1 caràcter invisible eliminat' : `${count} caràcters invisibles eliminats`;
   return {
     text: `⟨${what}⟩`,
@@ -144,9 +148,9 @@ function planBlocks<B>(pieces: readonly Piece<B>[]): Map<B, BlockPlan> {
 }
 
 /** The text of a piece split around its marks, or null when nothing in it changes. */
-function revealParts(text: string, code: boolean, plan: BlockPlan | undefined): (string | Mark)[] | null {
+function revealParts(text: string, code: boolean, plan: BlockPlan | undefined): (string | HiddenMark)[] | null {
   if (!plan || !MAYBE_HIDDEN.test(text)) return null;
-  const parts: (string | Mark)[] = [];
+  const parts: (string | HiddenMark)[] = [];
   let last = 0;
   for (const m of text.matchAll(HIDDEN)) {
     const hidden = hiddenOf(text, m, code);
@@ -193,6 +197,17 @@ function revealPieces(pieces: readonly Piece<number>[]): Revealed {
 export function revealHidden(text: string): Revealed {
   if (!MAYBE_HIDDEN.test(text)) return { text, revealed: 0, removed: 0 };
   return revealPieces([{ text, code: true, block: 0 }]);
+}
+
+/**
+ * Model text shown as plain text, outside Markdown (the note of an unchanged
+ * revision): the text split around the marks that reveal its hidden characters,
+ * with the rules of prose, as the same words would show in a rendered answer.
+ */
+export function revealHiddenParts(text: string): (string | HiddenMark)[] {
+  if (!MAYBE_HIDDEN.test(text)) return [text];
+  const plans = planBlocks([{ text, code: false, block: 0 }]);
+  return revealParts(text, false, plans.get(0)) ?? [text];
 }
 
 /**

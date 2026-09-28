@@ -27,9 +27,9 @@ from agentic_os.providers.base import (
     GenerationResult,
     ProviderError,
     ProviderEvent,
+    RefusalError,
     TextDelta,
 )
-from agentic_os.providers.claude_api import RefusalError
 from agentic_os.providers.fake import FakeProvider
 
 PRICE = ModelPrice(input=4.0, output=20.0, cache_read=0.2, cache_write=5.0)

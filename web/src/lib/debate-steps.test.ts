@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { debateSteps } from './debate-steps';
-import { cancelledDebateEvents, cancelledDebateMessages, debateEvents, debateMessages } from './test-fixtures';
+import type { TurnEvent } from './protocol';
+import {
+  cancelledDebateEvents,
+  cancelledDebateMessages,
+  debateEvents,
+  debateMessages,
+  degradedSynthesisEvents,
+  fallbackSynthesisEvents,
+  QUICK_DEBATE,
+  quickDebateMessages,
+} from './test-fixtures';
 import { applyTurnEvent, createLiveTurn, turnsFromMessages, type TurnView } from './turns.svelte';
 
 const states = (turn: TurnView, plannedRounds = 2) =>
@@ -51,5 +61,41 @@ describe('debateSteps', () => {
     const live = createLiveTurn({ requestId: 'req-x', question: 'q', mode: 'debate' });
     for (const ev of cancelledDebateEvents().slice(0, 9)) applyTurnEvent(live, ev);
     expect(states(live)).toEqual(['Respostes: fet', 'Revisió 1: en curs', 'Revisió 2: pendent', 'Síntesi: pendent']);
+  });
+
+  describe('the synthesis step follows its last attempt (A1)', () => {
+    const liveDebate = (events: TurnEvent[]): TurnView => {
+      const t = createLiveTurn({ requestId: events[0]!.request_id, question: 'q', mode: 'debate', options: QUICK_DEBATE });
+      for (const ev of events) applyTurnEvent(t, ev);
+      return t;
+    };
+    const upTo = (events: TurnEvent[], match: (e: TurnEvent) => boolean) => events.slice(0, events.findIndex(match));
+    const synthesisStep = (t: TurnView) => debateSteps(t, 0).at(-1)!;
+
+    it('a failed attempt is no progress while the other agent synthesizes', () => {
+      const events = fallbackSynthesisEvents();
+      const failed = liveDebate(upTo(events, (e) => e.type === 'stream.started' && e.stream_id === 's2'));
+      expect(synthesisStep(failed)).toMatchObject({ label: 'Síntesi', state: 'active', progress: 0 });
+      const streaming = liveDebate(upTo(events, (e) => e.type === 'stream.completed' && e.stream_id === 's2'));
+      expect(synthesisStep(streaming)).toMatchObject({ state: 'active', progress: 0 });
+      const done = liveDebate(upTo(events, (e) => e.type === 'turn.completed'));
+      expect(synthesisStep(done)).toMatchObject({ state: 'active', progress: 1 });
+    });
+
+    it('reads the same live and after a reload', () => {
+      const fallback = liveDebate(fallbackSynthesisEvents());
+      const [stored] = turnsFromMessages(quickDebateMessages({ agent: 'chatgpt', content: 'Síntesi de ChatGPT' }));
+      expect(states(fallback, 0)).toEqual(['Respostes: fet', 'Síntesi: fet']);
+      expect(states(stored!, 0)).toEqual(states(fallback, 0));
+      expect(debateSteps(stored!, 0).map((s) => s.progress)).toEqual(debateSteps(fallback, 0).map((s) => s.progress));
+
+      const degraded = liveDebate(degradedSynthesisEvents());
+      const [storedDegraded] = turnsFromMessages(quickDebateMessages({ agent: 'claude', content: 'Resposta de Claude', degraded: true }));
+      expect(debateSteps(degraded, 0).map((s) => [s.stateLabel, s.progress])).toEqual([
+        ['fet', 1],
+        ['fet', 1],
+      ]);
+      expect(debateSteps(storedDegraded!, 0)).toEqual(debateSteps(degraded, 0));
+    });
   });
 });

@@ -24,10 +24,11 @@ def failed_call_usage(
 ) -> tuple[str, Usage]:
     """Model and priced usage of a failed call.
 
-    A provider error may say what the call billed (a Claude API refusal carries
-    ``usage`` and ``model``, see ``RefusalError``): those tokens are priced with the
-    turn's prices so the failed call keeps its cost. Otherwise nothing was billed and
-    the usage is empty (``fallback_model`` is the model the call asked for)."""
+    A provider error may say what the call billed (``ProviderError.usage`` and
+    ``model``: a refusal, see ``RefusalError``, or an output budget spent before any
+    text): those tokens are priced with the turn's prices so the failed call keeps its
+    cost. Otherwise nothing was billed and the usage is empty (``fallback_model`` is the
+    model the call asked for). The attributes are read defensively (any exception)."""
     model = getattr(error, "model", None)
     if not isinstance(model, str) or not model:
         model = fallback_model

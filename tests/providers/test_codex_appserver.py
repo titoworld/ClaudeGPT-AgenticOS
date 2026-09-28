@@ -18,6 +18,7 @@ import pytest
 
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
+from agentic_os.orchestrator.tokens import estimate_tokens
 from agentic_os.providers.base import (
     ChatTurn,
     GenerationRequest,
@@ -234,6 +235,14 @@ async def test_models_and_effort_follow_the_request(fake: FakeCodex) -> None:
     assert [p["effort"] for p in fake.params("turn/start")] == ["medium", "low", "low"]
 
 
+async def test_reasoning_off_uses_the_lowest_effort(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    await collect(provider, make_request("[echo] a", purpose="synthesis", reasoning="off"))
+    [turn] = fake.params("turn/start")
+    assert turn["effort"] == "low"
+
+
 async def test_fast_requests_default_to_luna(provider: CodexAppServerProvider) -> None:
     _, result = await collect(provider, make_request("[echo] x", fast=True))
     assert result.model == "gpt-6-luna"
@@ -298,6 +307,49 @@ async def test_non_final_errors_and_commentary_are_ignored(
 async def test_an_interrupted_turn_is_a_cancellation(provider: CodexAppServerProvider) -> None:
     with pytest.raises(asyncio.CancelledError):
         await collect(provider, make_request("[interrupted]"))
+
+
+async def test_a_retry_after_partial_output_fails_instead_of_duplicating(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    deltas: list[str] = []
+    with pytest.raises(ProviderError) as caught:
+        async for event in provider.stream(make_request("[midstream-retry]")):
+            assert isinstance(event, TextDelta)  # never a result with the answer twice
+            deltas.append(event.text)
+    assert deltas == ["La resposta ", "completa comen"]
+    error = caught.value
+    assert (error.kind, error.retryable) == ("unavailable", True)
+    assert error.message == "La resposta de ChatGPT s'ha interromput."
+    await wait_until(lambda: fake.received("thread/unsubscribe"))
+
+    _, result = await collect(provider, make_request("[echo] de nou"))
+    assert result.text.strip() == "de nou"
+
+
+async def test_only_completed_items_make_the_final_text(provider: CodexAppServerProvider) -> None:
+    _, result = await collect(provider, make_request("[orphan]"))
+    assert result.text == "Resposta final."
+    assert not result.truncated
+
+
+async def test_the_output_budget_is_enforced_locally(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    deltas, result = await collect(provider, make_request("[long]", max_output_tokens=10))
+    assert result.truncated is True and result.finish_reason == "max_tokens"
+    assert result.text == "".join(deltas)
+    # Approximate (about 4 characters per token): it stops at the delta that passes it.
+    assert 10 < estimate_tokens(result.text) <= 10 + estimate_tokens("paraula ")
+    # The usage is the one Codex reports, never an estimate of the text.
+    assert result.usage == Usage(input_tokens=700, output_tokens=90, reasoning_tokens=60)
+    assert fake.entries("long_interrupted")
+    await wait_until(lambda: fake.received("thread/unsubscribe"))
+    assert len(fake.received("turn/interrupt")) == 1  # our stop only, not a second one
+
+    _, complete = await collect(provider, make_request("[echo] encara aquí"))
+    assert complete.text.strip() == "encara aquí" and not complete.truncated
+    assert len(set(fake.pids())) == 1
 
 
 async def test_crash_mid_turn_then_recovery(

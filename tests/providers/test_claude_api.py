@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +15,13 @@ import pytest
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
 from agentic_os.providers.base import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     ChatTurn,
     GenerationRequest,
     GenerationResult,
     Provider,
     ProviderError,
+    RefusalError,
     TextDelta,
 )
 from agentic_os.providers.claude_api import (
@@ -27,7 +29,6 @@ from agentic_os.providers.claude_api import (
     STATIC_MODELS,
     ClaudeApiProvider,
     ModelSupport,
-    RefusalError,
     model_support,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
@@ -333,7 +334,7 @@ async def test_haiku_runs_without_thinking_effort_or_fallbacks(tmp_path: Path) -
     await run(api, request("summary", fast=True), make_settings(tmp_path))
     body = api.body
     assert body["model"] == "claude-haiku-4-5"
-    assert body["max_tokens"] == 8000
+    assert body["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
     assert not {"thinking", "output_config", "fallbacks"} & set(body)
     assert "anthropic-beta" not in api.requests[0].headers
 
@@ -400,7 +401,7 @@ def test_model_support_by_id(model: str, support: ModelSupport) -> None:
         ("claude-sonnet-4-5", "answer", {"type": "enabled", "budget_tokens": 8000}, 16_000),
         ("claude-opus-4-1", "revision", {"type": "enabled", "budget_tokens": 4096}, 16_000),
         ("claude-opus-4-5", "summary", {"type": "enabled", "budget_tokens": 2048}, 16_000),
-        ("claude-3-5-sonnet-20241022", "answer", None, 8000),
+        ("claude-3-5-sonnet-20241022", "answer", None, 16_000),
     ],
 )
 async def test_models_without_adaptive_thinking_get_neither_it_nor_effort(
@@ -419,6 +420,140 @@ async def test_models_without_adaptive_thinking_get_neither_it_nor_effort(
 # -- model list ------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("model", "thinking"),
+    [
+        ("claude-opus-5", {"type": "adaptive", "display": "omitted"}),
+        ("claude-sonnet-4-5", None),  # a 1000-token thinking budget is below the minimum
+        ("claude-haiku-4-5", None),
+    ],
+)
+async def test_the_budget_is_sent_exactly(
+    tmp_path: Path, model: str, thinking: dict[str, Any] | None
+) -> None:
+    # max_output_tokens is the billed output of the call, thinking included: never raised.
+    api = MockApi(replying(answer(model, ["ok"])))
+    await run(api, request(model=model, max_output_tokens=2000), make_settings(tmp_path))
+    assert api.body["max_tokens"] == 2000
+    assert api.body.get("thinking") == thinking
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking"),
+    [
+        ("claude-opus-5", {"type": "disabled"}),
+        ("claude-sonnet-4-5", {"type": "disabled"}),
+        ("claude-haiku-4-5", None),
+    ],
+)
+async def test_reasoning_off_disables_thinking(
+    tmp_path: Path, model: str, thinking: dict[str, Any] | None
+) -> None:
+    api = MockApi(replying(answer(model, ["Resum"])))
+    req = request("summary", model=model, reasoning="off", max_output_tokens=2000)
+    await run(api, req, make_settings(tmp_path))
+    assert api.body.get("thinking") == thinking
+    assert api.body["max_tokens"] == 2000
+
+
+async def test_max_tokens_is_a_truncated_result(tmp_path: Path) -> None:
+    body = sse(
+        [
+            message_start("claude-opus-5"),
+            *thinking_block(0),
+            *text_block(1, ["Primera ", "meitat"]),
+            *message_end("max_tokens", 16_000),
+        ]
+    )
+    deltas, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert deltas == ["Primera ", "meitat"] and result.text == "Primera meitat"
+    assert result.truncated is True and result.finish_reason == "max_tokens"
+    assert result.usage.output_tokens == 16_000
+
+
+async def test_end_turn_is_not_truncated(tmp_path: Path) -> None:
+    api = MockApi(replying(answer("claude-opus-5", ["Tot"])))
+    _, result = await run(api, request(), make_settings(tmp_path))
+    assert result.truncated is False and result.finish_reason is None
+
+
+async def test_max_tokens_spent_thinking_fails_with_its_billed_usage(tmp_path: Path) -> None:
+    body = sse(
+        [message_start("claude-opus-5"), *thinking_block(0), *message_end("max_tokens", 2000)]
+    )
+    error = await run_error(
+        MockApi(replying(body)), request(max_output_tokens=2000), make_settings(tmp_path)
+    )
+    assert error.kind == "invalid" and not error.retryable
+    assert "límit de sortida" in error.message and "2000" in error.message
+    assert error.usage is not None and error.usage.output_tokens == 2000
+    assert error.model == "claude-opus-5"
+
+
+INTERRUPTED = "La resposta de Claude s'ha interromput."
+
+
+async def test_a_stream_that_ends_without_its_final_events_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    # A clean end of the body before message_delta/message_stop: stop_reason is None.
+    body = sse([message_start("claude-opus-5"), *text_block(0, ["Primera meitat de la resp"])[:2]])
+    error = await run_error(MockApi(replying(body)), request(), make_settings(tmp_path))
+    assert (error.kind, error.retryable, error.message) == ("unavailable", True, INTERRUPTED)
+
+
+async def test_an_empty_stream_is_interrupted(tmp_path: Path) -> None:
+    error = await run_error(MockApi(replying(b"")), request(), make_settings(tmp_path))
+    assert (error.kind, error.retryable, error.message) == ("unavailable", True, INTERRUPTED)
+
+
+class DropStream(httpx2.AsyncByteStream):
+    """Sends ``head`` and then fails as a dropped connection does."""
+
+    def __init__(self, head: bytes, error: Exception) -> None:
+        self.head = head
+        self.error = error
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.head
+        raise self.error
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx2.RemoteProtocolError("peer closed connection without sending complete message body"),
+        httpx2.ReadError("connection reset"),
+    ],
+)
+@pytest.mark.parametrize("with_text", [False, True])
+async def test_a_connection_dropped_mid_stream_is_a_retryable_provider_error(
+    tmp_path: Path, error: Exception, with_text: bool
+) -> None:
+    head_events = [message_start("claude-opus-5"), *thinking_block(0)]
+    if with_text:
+        head_events += text_block(1, ["parcial"])[:2]
+
+    async def handler(sent: httpx2.Request) -> httpx2.Response:
+        stream = DropStream(sse(head_events), error)
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    api = MockApi(handler)
+    exc = await run_error(api, request(), make_settings(tmp_path))
+    assert type(exc) is ProviderError
+    assert (exc.kind, exc.retryable, exc.message) == ("unavailable", True, INTERRUPTED)
+    assert len(api.requests) == 1
+
+
+def test_the_refusal_error_carries_its_category() -> None:
+    error = RefusalError("x", usage=Usage(), model="m", category="cyber")
+    assert error.category == "cyber" and error.refusal == ""
+    assert (error.kind, error.retryable) == ("invalid", False)
+
+
 # -- refusals and errors ------------------------------------------------------------------------
 
 
@@ -434,6 +569,7 @@ async def test_refusal_is_invalid(tmp_path: Path) -> None:
     error = await run_error(MockApi(replying(body)), request(), make_settings(tmp_path))
     assert error.kind == "invalid" and not error.retryable
     assert "cyber" in error.message
+    assert isinstance(error, RefusalError) and error.category == "cyber"
 
 
 @pytest.mark.parametrize(

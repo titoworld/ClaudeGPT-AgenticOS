@@ -24,6 +24,17 @@ ran any is replaced as soon as no call uses it: their memory is never given back
 Codex's SQLite state, whose log records every prompt, lives in a private directory
 outside ``CODEX_HOME``; the log databases are deleted before every start, so prompts do
 not outlive the process and a full state tmpfs cannot prevent a restart.
+
+Integrity of the reply: the text is kept per ``agentMessage`` item and the final text is
+made only of the (non-commentary) items that completed. When Codex retries a dropped
+model stream after some text was already shown (an ``error`` with ``willRetry``), it
+samples the whole answer again in a new item and cannot take back what was streamed, so
+the call fails as interrupted instead of returning the answer twice. 0.157.1 has no
+protocol field for the output budget: the call stops the turn itself (``turn/interrupt``)
+once the visible text passes ``max_output_tokens`` by the usual estimate (about 4
+characters per token) and returns a truncated result. It is approximate: the reasoning
+is not counted and a few more tokens may be generated before the interrupt lands; the
+usage stays the one Codex reports.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ from typing import Any
 from agentic_os import __version__
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.orchestrator.tokens import tokens_for_chars
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
@@ -88,6 +100,9 @@ EFFORT_BY_PURPOSE: dict[Purpose, str] = {
     "synthesis": "medium",
     "summary": "low",
 }
+LOWEST_EFFORT = "low"
+"""Effort of a request with reasoning "off": the lowest level every model of the 0.157.1
+catalog accepts (none of them lists "none" or "minimal")."""
 
 _DISABLED_FEATURES: tuple[str, ...] = (
     "apps",
@@ -151,6 +166,7 @@ DETAIL_MAX_CHARS = 300
 MAX_SUB_AGENT_RUNS = 3
 """Sub-agent runs (spawns and follow-ups) one call tolerates; the next one stops it."""
 SUB_AGENT_LIMIT_MESSAGE = "ChatGPT ha intentat obrir massa subagents; s'ha aturat la resposta."
+INTERRUPTED_MESSAGE = "La resposta de ChatGPT s'ha interromput."
 _SUB_AGENT_RUN_KINDS = frozenset({"started", "interacted"})
 """``subAgentActivity`` kinds that start a turn on a sub-agent's thread."""
 _COLLAB_RUN_TOOLS = frozenset({"spawnAgent", "sendInput", "resumeAgent", "followupTask"})
@@ -773,7 +789,11 @@ class CodexAppServerProvider:
                                 "text_elements": [],
                             }
                         ],
-                        "effort": EFFORT_BY_PURPOSE[request.purpose],
+                        "effort": (
+                            LOWEST_EFFORT
+                            if request.reasoning == "off"
+                            else EFFORT_BY_PURPOSE[request.purpose]
+                        ),
                         "summary": "none",
                     },
                     CONTROL_TIMEOUT,
@@ -782,21 +802,46 @@ class CodexAppServerProvider:
             turn_id = _nested_id(await _until(deadline, asyncio.shield(turn_task)), "turn")
 
             parts: list[str] = []
+            """Everything streamed: the text of each item, with the separators."""
+            items: dict[Any, list[str]] = {}
+            """Text of each agentMessage item, in the order they started streaming."""
+            completed: set[Any] = set()
+            visible = 0
             usage = Usage()
             ttft_ms: int | None = None
             commentary: set[Any] = set()
             last_item: Any = None
+            stopped_at: float | None = None
+            """When the call interrupted the turn at the output budget."""
             while True:
-                event = await _until(deadline, events.get())
-                if event is None:
-                    raise ProcessGone("codex app-server exited during the turn")
+                if stopped_at is None:
+                    event = await _until(deadline, events.get())
+                    if event is None:
+                        raise ProcessGone("codex app-server exited during the turn")
+                else:
+                    # Stopped at the budget: wait a little for the turn to end (and for
+                    # the usage Codex reports), but the text is already final.
+                    try:
+                        event = await _until(
+                            min(deadline, stopped_at + CLEANUP_TIMEOUT), events.get()
+                        )
+                    except TimeoutError:
+                        event = None
+                    if event is None:
+                        yield self._truncated(parts, usage, model, started, ttft_ms)
+                        return
                 method, params = event
                 if params.get("turnId", turn_id) != turn_id:
                     continue
                 if method == "item/agentMessage/delta":
                     delta = params.get("delta")
                     item_id = params.get("itemId")
-                    if not isinstance(delta, str) or not delta or item_id in commentary:
+                    if (
+                        not isinstance(delta, str)
+                        or not delta
+                        or item_id in commentary
+                        or stopped_at is not None
+                    ):
                         continue
                     if parts and item_id != last_item:
                         # A second assistant message in the same turn: keep them apart.
@@ -806,11 +851,19 @@ class CodexAppServerProvider:
                     if ttft_ms is None:
                         ttft_ms = int((time.monotonic() - started) * 1000)
                     parts.append(delta)
+                    items.setdefault(item_id, []).append(delta)
+                    visible += len(delta)
                     yield TextDelta(delta)
+                    if tokens_for_chars(visible) > request.max_output_tokens:
+                        stopped_at = time.monotonic()
+                        await self._interrupt(conn, thread_id, turn_id)
                 elif method in ("item/started", "item/completed"):
                     item = _as_dict(params.get("item"))
-                    if item.get("type") == "agentMessage" and item.get("phase") == "commentary":
-                        commentary.add(item.get("id"))
+                    if item.get("type") == "agentMessage":
+                        if item.get("phase") == "commentary":
+                            commentary.add(item.get("id"))
+                        elif method == "item/completed":
+                            completed.add(item.get("id"))
                     run = sub_agent_run(item)
                     if run is not None:
                         conn.tainted = True
@@ -834,18 +887,30 @@ class CodexAppServerProvider:
                     if isinstance(params.get("toModel"), str):
                         model = params["toModel"]
                 elif method == "error":
+                    if stopped_at is not None:
+                        continue  # the turn is being stopped: its text is final
                     if not params.get("willRetry"):
                         raise turn_error(params.get("error"))
+                    if parts:
+                        # Codex samples the whole answer again in a new item, and what
+                        # was streamed cannot be taken back: fail instead of repeating.
+                        raise ProviderError(INTERRUPTED_MESSAGE, kind="unavailable", retryable=True)
                 elif method == "turn/completed":
                     turn = _as_dict(params.get("turn"))
                     if turn.get("id", turn_id) != turn_id:
                         continue
                     turn_done = True
                     status = turn.get("status")
+                    if stopped_at is not None:  # our own interrupt, at the output budget
+                        self._failures = 0
+                        yield self._truncated(parts, usage, model, started, ttft_ms)
+                        return
                     if status == "completed":
                         self._failures = 0
                         yield GenerationResult(
-                            text="".join(parts),
+                            text="\n\n".join(
+                                "".join(text) for item, text in items.items() if item in completed
+                            ),
                             usage=usage,
                             model=str(model),
                             latency_ms=int((time.monotonic() - started) * 1000),
@@ -881,6 +946,31 @@ class CodexAppServerProvider:
                         tuple(sorted(sub_agent_threads)),
                     )
                 )
+
+    @staticmethod
+    def _truncated(
+        parts: Sequence[str], usage: Usage, model: object, started: float, ttft_ms: int | None
+    ) -> GenerationResult:
+        """The result of a turn stopped at the output budget: everything streamed so far,
+        with the usage Codex reported (never an estimate of the text)."""
+        return GenerationResult(
+            text="".join(parts),
+            usage=usage,
+            model=str(model),
+            latency_ms=int((time.monotonic() - started) * 1000),
+            ttft_ms=ttft_ms,
+            truncated=True,
+            finish_reason="max_tokens",
+        )
+
+    @staticmethod
+    async def _interrupt(conn: _AppServerConnection, thread_id: str, turn_id: str) -> None:
+        """Stop a turn at the output budget (best effort: it may be over or the process
+        gone; the release of the thread interrupts it again if it never ends)."""
+        with contextlib.suppress(CodexRpcError, TimeoutError, ProcessGone):
+            await conn.request(
+                "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, CLEANUP_TIMEOUT
+            )
 
     def _requested_model(self, request: GenerationRequest) -> str | None:
         if request.model:

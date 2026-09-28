@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from agentic_os.domain import AgentName, TurnMode, TurnOptions
+from agentic_os.providers.base import DEFAULT_MAX_OUTPUT_TOKENS
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,5 +34,9 @@ class EngineConfig:
     keep_recent_messages: int = 6
     """Final messages kept verbatim after a compaction."""
     cache_ttl_seconds: int = 7 * 24 * 3600
-    max_output_tokens: int = 8000
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    """Billed output budget of answers, revisions and syntheses, reasoning included
+    (they run with the providers' default reasoning)."""
+    summary_max_output_tokens: int = 2000
+    """Billed output budget of the compaction summaries (they run with reasoning "off")."""
     max_question_chars: int = 100_000

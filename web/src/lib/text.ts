@@ -105,3 +105,26 @@ export const WS_ERROR_TEXT: Record<string, string> = {
 export function wsErrorText(code: string | undefined, message: string | undefined): string {
   return message?.trim() || (code ? WS_ERROR_TEXT[code] : undefined) || 'Error del servidor.';
 }
+
+/** Why a provider cut an answer off (`finish_reason`), for «Resposta incompleta: …». */
+const TRUNCATION_REASON: Record<string, string> = {
+  max_tokens: "s'ha arribat al límit de sortida",
+  max_output_tokens: "s'ha arribat al límit de sortida",
+  content_filter: 'tallada pel filtre de contingut',
+  incomplete: 'interrompuda',
+  interrupted: 'interrompuda',
+};
+
+/**
+ * Why an answer is incomplete, in Catalan. The live `stream.completed` only says
+ * `truncated`, so a missing reason gets a generic text; a provider code this
+ * client does not know is kept (shortened) so it can be looked up.
+ */
+export function truncationReason(finishReason: string | null | undefined): string {
+  const code = finishReason?.trim() ?? '';
+  if (Object.hasOwn(TRUNCATION_REASON, code)) return TRUNCATION_REASON[code]!;
+  const generic = "s'ha tallat abans d'acabar";
+  if (!code) return generic;
+  const chars = Array.from(code);
+  return `${generic} (motiu: ${chars.length > 40 ? `${chars.slice(0, 40).join('')}…` : code})`;
+}

@@ -6,6 +6,8 @@
 // proxy, `stream.text += delta` only re-renders the text that changed, instead
 // of rebuilding the whole conversation on every token.
 
+import { AGENT_LABEL } from './format';
+import { AGENTS } from './protocol';
 import type {
   Agent,
   Consensus,
@@ -47,6 +49,14 @@ export interface StreamView {
   cached: boolean;
   /** Meaning of `usage.cost_usd` (null when unknown). */
   costBasis: CostBasis | null;
+  /** Cut off before the end: a usable partial answer, never a complete one. */
+  truncated: boolean;
+  /** Why it stopped (`finish_reason`, from the live event or the stored message). */
+  finishReason: string | null;
+  /** Unchanged revision: the model's short note (live event or stored message). */
+  unchangedNote: string | null;
+  /** Synthesis stored without calling any model: an agent's latest answer kept as final. */
+  degraded: boolean;
 }
 
 export interface TurnView {
@@ -155,6 +165,10 @@ function newStream(id: string, agent: Agent, kind: StreamKind, round: number, mo
     unchanged: false,
     cached: false,
     costBasis: null,
+    truncated: false,
+    finishReason: null,
+    unchangedNote: null,
+    degraded: false,
   };
 }
 
@@ -209,6 +223,9 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       s.ttftMs = ev.ttft_ms;
       s.agreement = ev.agreement;
       s.unchanged = ev.unchanged;
+      s.truncated = ev.truncated === true;
+      s.finishReason = asText(ev.finish_reason);
+      s.unchangedNote = s.unchanged ? asText(ev.unchanged_note) : null;
       break;
     }
     case 'stream.failed': {
@@ -281,6 +298,83 @@ export function revisionRounds(turn: TurnView): RoundGroup[] {
   return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([round, streams]) => ({ round, streams }));
 }
 
+/** Synthesis attempts of a debate, in the order they started (one stream each). */
+export function synthesisAttempts(turn: TurnView): StreamView[] {
+  return turn.streams.filter((s) => s.kind === 'synthesis');
+}
+
+/**
+ * The synthesis a debate shows. The engine opens a stream for each attempt (the
+ * chosen synthesizer, then the other agent, then an answer kept as final when
+ * nobody could synthesize), so the first one is not necessarily the result: the
+ * turn's final message wins, else the latest attempt that finished, else the
+ * latest one (in progress, or the last that failed).
+ */
+export function shownSynthesis(turn: TurnView): StreamView | null {
+  const attempts = synthesisAttempts(turn);
+  const final = attempts.find((s) => s.messageId != null && turn.finalMessageIds.includes(s.messageId));
+  if (final) return final;
+  for (let i = attempts.length - 1; i >= 0; i--) if (attempts[i]!.status === 'done') return attempts[i]!;
+  return attempts.at(-1) ?? null;
+}
+
+/**
+ * Note for a synthesis that is not the chosen synthesizer's own (null when it
+ * is, or when there is none). A stored turn keeps only its final message, so
+ * the note relies on what the live and the stored view share: the `degraded`
+ * flag and the chosen synthesizer. Live, the failed attempts say it earlier.
+ */
+export function synthesisNote(turn: TurnView, shown: StreamView | null = shownSynthesis(turn)): string | null {
+  if (!shown) return null;
+  const attempts = synthesisAttempts(turn);
+  const failed = attempts.slice(0, attempts.indexOf(shown)).filter((s) => s.status !== 'done').map((s) => s.agent);
+  const who = AGENT_LABEL[shown.agent];
+  // Nobody synthesized and an answer was kept as final: the stored message says so;
+  // live, it follows a failed attempt of the same agent (both attempts failed) or a
+  // failed first answer (then the engine does not attempt any synthesis).
+  const degraded =
+    shown.degraded ||
+    failed.includes(shown.agent) ||
+    turn.streams.some((s) => s.kind === 'answer' && s.status === 'failed');
+  if (degraded) return `No s'ha pogut fer la síntesi: es mostra l'última resposta de ${who}.`;
+  const chosen = turn.options?.debate.synthesizer;
+  const missing = failed.find((agent) => agent !== shown.agent) ?? (chosen !== shown.agent ? chosen : undefined);
+  if (!missing) return null;
+  const lead = `${AGENT_LABEL[missing]} no ha pogut fer la síntesi`;
+  if (shown.status === 'done') return `${lead}; l'ha feta ${who}.`;
+  if (shown.status === 'streaming') return `${lead}; ara la fa ${who}.`;
+  return `${lead}; ho ha intentat ${who}.`;
+}
+
+/**
+ * Debate revisions that keep the agent's previous answer instead of writing a new
+ * one, each with the stream that wrote the answer it keeps (null when the turn
+ * does not have it). An unchanged revision keeps it, and so does a reply that
+ * brought no new answer, such as one cut off in its critique: its content is the
+ * previous answer again (PROTOCOL.md), so what was cut is the revision, not the
+ * answer it shows. Live, the engine streams that answer again as the revision's
+ * answer. Only finished calls count, as in the engine: a failed revision leaves
+ * the answer before it, and one still streaming may be a new answer that begins
+ * with the previous one.
+ */
+export function keptAnswers(turn: TurnView): Map<string, StreamView | null> {
+  const kept = new Map<string, StreamView | null>();
+  for (const agent of AGENTS) {
+    const own = turn.streams
+      .filter((s) => s.agent === agent && (s.kind === 'answer' || s.kind === 'revision'))
+      .sort((a, b) => a.round - b.round);
+    let origin: StreamView | null = null; // the stream that wrote the agent's latest answer
+    let latest = ''; // that answer, trimmed like the stored content
+    for (const s of own) {
+      if (s.status !== 'done') continue;
+      const text = s.text.trim();
+      if (s.kind === 'revision' && (s.unchanged || (latest !== '' && text === latest))) kept.set(s.id, origin);
+      else [origin, latest] = [s, text];
+    }
+  }
+  return kept;
+}
+
 /** Average agreement of the latest revision round that reported any (null if none). */
 export function latestAgreement(turn: TurnView): number | null {
   const rounds = revisionRounds(turn);
@@ -299,6 +393,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function asNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** A non-empty string without surrounding whitespace, else null. */
+function asText(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
 }
 
 function asUsage(v: unknown): Usage | null {
@@ -434,6 +533,10 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       s.unchanged = meta.unchanged === true;
       s.cached = meta.cached === true;
       s.costBasis = meta.cost_basis === 'api' || meta.cost_basis === 'equivalent' ? meta.cost_basis : null;
+      s.truncated = meta.truncated === true;
+      s.finishReason = asText(meta.finish_reason);
+      s.unchangedNote = s.unchanged ? asText(meta.unchanged_note) : null;
+      s.degraded = meta.degraded === true;
       streams.push(s);
       savings = asSavings(meta.savings) ?? savings;
       consensus = asConsensus(meta.consensus) ?? consensus;

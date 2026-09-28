@@ -9,6 +9,25 @@ exits after the turn.
 
 ``prewarm`` starts processes ahead of time (they wait on stdin without calling the
 API) to hide the CLI start-up time.
+
+Output budget: the CLI has no flag for it, only ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, which
+sets ``max_tokens`` (thinking included) of each API request it makes; the provider
+computes it from the request (it is never inherited) and a warm process only serves
+calls with the same budget and reasoning.
+
+Replies the CLI would go on with by itself. The CLI 2.1.283 does not accept two kinds of
+reply and, about 10 ms after their ``message_stop``, sends another API request with a
+message of its own (checked against a local mock of the Messages API): after
+``stop_reason: "max_tokens"`` a continuation ("Output token limit hit. Resume
+directly...", up to 3 times; the ``result`` then holds only the continuation's text), and
+after ``stop_reason: "refusal"`` one retry ("Your response above was stopped by a safety
+classifier..."). Each would bill the whole context again. So the provider SIGKILLs the
+process group as soon as it reads such a ``message_delta``, before reading on or yielding
+anything (SIGTERM is not enough: the CLI shuts down gracefully and still sends the
+request), and ends the call with that request's usage: a truncated result for
+``max_tokens``, a :class:`RefusalError` for a refusal (text streamed before it never
+becomes an answer). A ``result`` with ``is_error`` and ``stop_reason: "refusal"`` is a
+refusal as well.
 """
 
 from __future__ import annotations
@@ -36,6 +55,7 @@ from agentic_os.providers.base import (
     ProviderError,
     ProviderEvent,
     ProviderStatus,
+    RefusalError,
     TextDelta,
     UsageLimit,
 )
@@ -78,6 +98,10 @@ STREAM_LIMIT = 8 * 1024 * 1024
 STDERR_KEEP = 8 * 1024
 MAX_SYSTEM_PROMPT_BYTES = 120_000
 """The system prompt travels as one argv string (Linux caps those at 128 KiB)."""
+MAX_OUTPUT_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+"""Set by the provider from the request's budget (never inherited from the app)."""
+SELF_CONTINUING_STOPS = frozenset({"max_tokens", "refusal"})
+"""``stop_reason`` values after which the CLI sends another request on its own."""
 
 ENV_ALLOW_LIST = (
     "PATH",
@@ -112,7 +136,10 @@ class _Key(NamedTuple):
 
     model: str
     effort_args: tuple[str, ...]
+    """--effort and --thinking arguments (the reasoning policy)."""
     system: str
+    max_output_tokens: int
+    """The billed output budget (its environment's CLAUDE_CODE_MAX_OUTPUT_TOKENS)."""
 
 
 def is_haiku(model: str) -> bool:
@@ -130,8 +157,24 @@ def redact(text: str) -> str:
     return _SECRET_RE.sub(lambda m: f"{m.group(1) or m.group(2)}***", text)
 
 
+def refusal_error(usage: Usage, model: str, category: str | None) -> RefusalError:
+    """The error of a Claude reply that stopped with ``stop_reason: "refusal"`` (shared
+    with the api provider). ``usage`` is what the call billed."""
+    reason = f" (categoria: {category})" if category else ""
+    return RefusalError(
+        f"Claude ha declinat respondre aquesta petició{reason}.",
+        usage=usage,
+        model=model,
+        category=category,
+    )
+
+
 def _obj(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _int(value: object) -> int:
@@ -248,6 +291,11 @@ class _CliProcess:
         stdout = self.proc.stdout
         return await stdout.readline() if stdout is not None else b""
 
+    def kill(self) -> None:
+        """SIGKILL the whole process group now, with no graceful shutdown (it is reaped
+        later by :meth:`terminate`)."""
+        _signal_group(self.proc.pid, signal.SIGKILL)
+
     async def finish(self, grace: float) -> None:
         """Let a process whose turn is over exit on its own, then clean up."""
         with contextlib.suppress(TimeoutError):
@@ -288,6 +336,18 @@ class _CliProcess:
             self._terminated = True
 
 
+@dataclass(frozen=True, slots=True)
+class _Stop:
+    """A ``message_delta`` whose ``stop_reason`` is in :data:`SELF_CONTINUING_STOPS`."""
+
+    reason: str
+    usage: dict[str, Any]
+    """Usage of that API request."""
+    details: dict[str, Any]
+    """Its ``stop_details`` (a refusal's ``category``)."""
+    at: float
+
+
 @dataclass(slots=True)
 class _Turn:
     """What the event stream of one call has shown so far."""
@@ -303,6 +363,10 @@ class _Turn:
     assistant_error: str | None = None
     rate_limited: bool = False
     rate_resets_at: datetime | None = None
+    stop: _Stop | None = None
+    """A reply the CLI would go on with by itself: the call ends there."""
+    refusal_category: str | None = None
+    """Category of a refusal the CLI gave up on (``model_refusal_no_fallback``)."""
 
 
 class ClaudeCliProvider:
@@ -355,25 +419,47 @@ class ClaudeCliProvider:
         finished = False
         try:
             await self._with_deadline(worker.send(line), deadline)
-            while turn.result is None:
+            while turn.result is None and turn.stop is None:
                 raw = await self._with_deadline(worker.readline(), deadline)
                 if not raw:
                     raise await self._crash_error(worker)
                 text = self._handle_line(raw, turn)
-                if text:
+                if turn.stop is not None:
+                    # The CLI sends its own next request ~10 ms after this reply: kill it
+                    # before that, not after yielding (see the module docstring).
+                    worker.kill()
+                elif text:
                     yield TextDelta(text)
             finished = True
         finally:
-            if finished:
+            if finished and turn.stop is not None:
+                self._background(self._retire(worker))  # killed: only reap it
+            elif finished:
                 self._background(self._retire(worker, EXIT_GRACE_SECONDS))
             else:
                 await self._retire(worker)
 
+        if turn.model_reported and turn.model != key.model:
+            self._resolved[key.model] = turn.model
+        stop = turn.stop
+        if stop is not None:
+            usage = self._usage_from(stop.usage)
+            if stop.reason == "refusal":
+                category = _text(stop.details.get("category")) or None
+                raise refusal_error(usage, turn.model, category)
+            yield GenerationResult(
+                text="".join(turn.chunks),
+                usage=usage,
+                model=turn.model,
+                latency_ms=int((stop.at - started) * 1000),
+                ttft_ms=turn.ttft_ms,
+                truncated=True,
+                finish_reason="max_tokens",
+            )
+            return
         result = turn.result
         if result is None:  # pragma: no cover - the loop only ends with a result
             raise ProviderError("La CLI de Claude no ha enviat cap resultat.", kind="internal")
-        if turn.model_reported and turn.model != key.model:
-            self._resolved[key.model] = turn.model
         if result.get("is_error"):
             raise self._result_error(result, turn)
         text = "".join(turn.chunks)
@@ -382,12 +468,15 @@ class ClaudeCliProvider:
             text = result["result"]
             turn.ttft_ms = int((turn.result_at - started) * 1000)
             yield TextDelta(text)
+        truncated = result.get("stop_reason") == "max_tokens"
         yield GenerationResult(
             text=text,
-            usage=self._usage(result),
+            usage=self._usage_from(_obj(result.get("usage"))),
             model=turn.model,
             latency_ms=int((turn.result_at - started) * 1000),
             ttft_ms=turn.ttft_ms,
+            truncated=truncated,
+            finish_reason="max_tokens" if truncated else None,
         )
 
     async def prewarm(self, request: GenerationRequest) -> None:
@@ -481,6 +570,8 @@ class ClaudeCliProvider:
         if is_haiku(model):
             # Haiku ignores --effort; turning thinking off is its cost lever.
             effort_args: tuple[str, ...] = ("--thinking", "disabled")
+        elif request.reasoning == "off":
+            effort_args = ("--effort", EFFORT_BY_PURPOSE[request.purpose], "--thinking", "disabled")
         else:
             effort_args = ("--effort", EFFORT_BY_PURPOSE[request.purpose])
         system = request.system.replace("\x00", "")
@@ -488,7 +579,7 @@ class ClaudeCliProvider:
             raise ProviderError(
                 "El prompt de sistema és massa llarg per a la CLI de Claude.", kind="invalid"
             )
-        return _Key(model, effort_args, system)
+        return _Key(model, effort_args, system, max(1, request.max_output_tokens))
 
     def _command(self, key: _Key) -> list[str]:
         return [
@@ -524,9 +615,12 @@ class ClaudeCliProvider:
         return json.dumps(message).encode("utf-8") + b"\n"
 
     @staticmethod
-    def _env() -> dict[str, str]:
+    def _env(key: _Key | None = None) -> dict[str, str]:
+        """The allow-listed environment plus the values the provider computes itself."""
         env = {name: os.environ[name] for name in ENV_ALLOW_LIST if name in os.environ}
         env["DISABLE_AUTOUPDATER"] = "1"
+        if key is not None:
+            env[MAX_OUTPUT_ENV] = str(key.max_output_tokens)
         return env
 
     def _sandbox_dir(self) -> Path:
@@ -553,7 +647,7 @@ class ClaudeCliProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=self._env(),
+                env=self._env(key),
                 start_new_session=True,
                 limit=STREAM_LIMIT,
             )
@@ -644,11 +738,23 @@ class ClaudeCliProvider:
                         turn.ttft_ms = int((time.monotonic() - turn.started) * 1000)
                     turn.chunks.append(text)
                     return text
+            elif inner.get("type") == "message_delta":
+                delta = _obj(inner.get("delta"))
+                reason = _text(delta.get("stop_reason"))
+                if reason in SELF_CONTINUING_STOPS:
+                    turn.stop = _Stop(
+                        reason=reason,
+                        usage=_obj(inner.get("usage")),
+                        details=_obj(delta.get("stop_details")),
+                        at=time.monotonic(),
+                    )
         elif kind == "system" and event.get("subtype") == "init":
             model = event.get("model")
             if isinstance(model, str) and model:
                 turn.model = model
                 turn.model_reported = True
+        elif kind == "system" and event.get("subtype") == "model_refusal_no_fallback":
+            turn.refusal_category = _text(event.get("api_refusal_category")) or None
         elif kind == "rate_limit_event":
             info = _obj(event.get("rate_limit_info"))
             for limit in parse_limits(info):
@@ -666,10 +772,10 @@ class ClaudeCliProvider:
         return None
 
     @staticmethod
-    def _usage(result: Mapping[str, Any]) -> Usage:
-        # result.usage is per turn; modelUsage/total_cost_usd are cumulative list-price
-        # estimates, meaningless for a subscription, so no cost is reported.
-        usage = _obj(result.get("usage"))
+    def _usage_from(usage: Mapping[str, Any]) -> Usage:
+        """Usage of a ``result`` (per turn) or of a ``message_delta`` (per request).
+        modelUsage/total_cost_usd are cumulative list-price estimates, meaningless for a
+        subscription, so no cost is reported."""
         details = _obj(usage.get("output_tokens_details"))
         return Usage(
             input_tokens=_int(usage.get("input_tokens")),
@@ -680,9 +786,13 @@ class ClaudeCliProvider:
             cost_usd=None,
         )
 
-    @staticmethod
-    def _result_error(result: Mapping[str, Any], turn: _Turn) -> ProviderError:
+    @classmethod
+    def _result_error(cls, result: Mapping[str, Any], turn: _Turn) -> ProviderError:
         """Map a ``result`` with ``is_error`` (its ``subtype`` can still be "success")."""
+        if result.get("stop_reason") == "refusal":
+            # Its usage covers every request of the CLI's turn: all of them were billed.
+            usage = cls._usage_from(_obj(result.get("usage")))
+            return refusal_error(usage, turn.model, turn.refusal_category)
         status = _int(result.get("api_error_status"))
         detail = result.get("result")
         if not isinstance(detail, str) or not detail:

@@ -12,7 +12,7 @@ export interface DebateStep {
   state: StepState;
   /** State for screen readers ("fet", "omès per consens"...). */
   stateLabel: string;
-  /** Progress inside the step (0..1) from finished streams. */
+  /** Progress inside the step (0..1) from finished streams (the synthesis: its last attempt done). */
   progress: number;
 }
 
@@ -44,10 +44,15 @@ export function debateSteps(turn: TurnView, plannedRounds: number): DebateStep[]
 
   const list: DebateStep[] = [];
   for (let i = 0; i <= rounds + 1; i++) {
-    const label = i === 0 ? 'Respostes' : i === rounds + 1 ? 'Síntesi' : `Revisió ${i}`;
+    const synthesis = i === rounds + 1;
+    const label = i === 0 ? 'Respostes' : synthesis ? 'Síntesi' : `Revisió ${i}`;
     const own = streamsOf(i);
-    const expected = i === rounds + 1 ? 1 : 2;
-    const finished = own.filter((s) => s.status !== 'streaming').length;
+    const expected = synthesis ? 1 : 2;
+    // The synthesis follows its last attempt: each attempt has its own stream, and
+    // one that failed is followed by another (the other agent, or a kept answer).
+    const finished = synthesis
+      ? Number(own.at(-1)?.status === 'done')
+      : own.filter((s) => s.status !== 'streaming').length;
     let state: StepState;
     if (turn.status === 'done') {
       state = own.length ? 'done' : 'skipped';

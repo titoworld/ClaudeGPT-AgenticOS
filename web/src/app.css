@@ -598,8 +598,10 @@ dialog::backdrop {
   cursor: help;
 }
 
-/* Hidden characters shown as ⟨U+XXXX⟩ marks (lib/hidden-chars.ts). */
-.md .invisible-char {
+/* Hidden characters shown as ⟨U+XXXX⟩ marks (lib/hidden-chars.ts), in rendered
+   Markdown and in model text shown outside it (PlainText.svelte). */
+.md .invisible-char,
+.plain-text .invisible-char {
   padding: 0 0.2em;
   margin: 0 0.05em;
   border-radius: 4px;
@@ -621,7 +623,8 @@ dialog::backdrop {
 }
 
 /* One mark with the count of a block that had too many to show one by one. */
-.md .invisible-char.invisible-collapsed {
+.md .invisible-char.invisible-collapsed,
+.plain-text .invisible-char.invisible-collapsed {
   font-family: var(--font-sans);
   font-weight: 600;
   white-space: normal;

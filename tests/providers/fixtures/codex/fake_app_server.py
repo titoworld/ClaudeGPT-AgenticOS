@@ -14,6 +14,11 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
   [slow]          a delta every 50 ms until turn/interrupt (up to 20 s)
   [interrupted]   finish the turn with status "interrupted" on its own
   [retry-error]   a non-final error notification (willRetry: true) before the answer
+  [midstream-retry] part of an answer, then a stream error that Codex retries (willRetry:
+                  true) by sampling the whole answer again in a new item (as 0.157.1 does)
+  [orphan]        an item that streams but never completes, then the completed answer
+  [long]          a long answer, a word every 2 ms, until turn/interrupt (then the usage
+                  Codex reports and status "interrupted"; max 1000 words)
   [commentary]    a commentary message before the final answer
   [spawn]         like [echo], but the turn also starts a sub-agent thread (as Codex's
                   collaboration.spawn_agent does) that works until turn/interrupt
@@ -263,6 +268,9 @@ MARKERS = (
     "[slow]",
     "[interrupted]",
     "[retry-error]",
+    "[midstream-retry]",
+    "[orphan]",
+    "[long]",
     "[commentary]",
     "[spawn]",
     "[spawn-loop]",
@@ -349,6 +357,56 @@ def run_turn(thread_id: str, turn_id: str, text: str) -> None:
         turn.usage(breakdown(100, 0, 0, 10, 5), breakdown(100, 0, 0, 10, 5))
         turn.message("m2", ["Totes ", "declinades."])
         turn.usage(breakdown(200, 50, 10, 20, 2), breakdown(300, 50, 10, 30, 7))
+        turn.finish()
+        return
+    if "[midstream-retry]" in text:
+        item = {
+            "type": "agentMessage",
+            "id": "msg_a",
+            "text": "",
+            "phase": None,
+            "memoryCitation": None,
+            "delivery": None,
+            "questions": None,
+        }
+        notify("item/started", {"item": item, **turn.ids(), "startedAtMs": 0})
+        for chunk in ["La resposta ", "completa comen"]:
+            notify("item/agentMessage/delta", {**turn.ids(), "itemId": "msg_a", "delta": chunk})
+        error = {
+            "message": "Reconnecting... 1/5",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+            "additionalDetails": None,
+            "misalignment": None,
+        }
+        notify("error", {"error": error, "willRetry": True, **turn.ids()})
+        turn.message("msg_b", ["La resposta ", "completa comença ", "aquí i acaba bé."])
+        turn.usage(breakdown(1000, 0, 0, 50, 0), breakdown(1000, 0, 0, 50, 0))
+        turn.finish()
+        return
+    if "[orphan]" in text:
+        notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m0", "delta": "Esborrany "})
+        turn.message("m1", ["Resposta ", "final."])
+        turn.usage(breakdown(100, 0, 0, 10, 0), breakdown(100, 0, 0, 10, 0))
+        turn.finish()
+        return
+    if "[long]" in text:
+        item = {
+            "type": "agentMessage",
+            "id": "m1",
+            "text": "",
+            "phase": None,
+            "memoryCitation": None,
+            "delivery": None,
+            "questions": None,
+        }
+        notify("item/started", {"item": item, **turn.ids(), "startedAtMs": 0})
+        for _ in range(1000):
+            if interrupted.wait(0.002):
+                log({"long_interrupted": True})
+                turn.usage(breakdown(700, 0, 0, 90, 60), breakdown(700, 0, 0, 90, 60))
+                turn.finish("interrupted")
+                return
+            notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m1", "delta": "paraula "})
         turn.finish()
         return
     if "[retry-error]" in text:

@@ -20,13 +20,19 @@ import pytest
 
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
+from agentic_os.orchestrator.engine import Engine
+from agentic_os.orchestrator.events import StreamFailed, TurnFailed
+from agentic_os.orchestrator.memory_store import InMemoryStore
+from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.providers import claude_cli
 from agentic_os.providers.base import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     ChatTurn,
     GenerationRequest,
     GenerationResult,
     Provider,
     ProviderError,
+    RefusalError,
     TextDelta,
     UsageLimit,
 )
@@ -289,8 +295,11 @@ async def test_environment_is_allow_listed(
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-for-the-cli"
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert env["PATH"] == os.environ["PATH"]
+    # Computed by the provider (the request's budget), never inherited.
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(DEFAULT_MAX_OUTPUT_TOKENS)
     # LC_CTYPE may be added by the fake's own Python interpreter (PEP 538).
-    assert set(env) - {"LC_CTYPE"} <= {*ENV_ALLOW_LIST, "DISABLE_AUTOUPDATER"}
+    computed = {"DISABLE_AUTOUPDATER", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"}
+    assert set(env) - {"LC_CTYPE"} <= {*ENV_ALLOW_LIST, *computed}
 
 
 async def test_result_text_is_used_when_no_delta_arrives(
@@ -569,3 +578,149 @@ def test_parse_limits_status_and_fallback() -> None:
 def test_redact() -> None:
     text = redact("token sk-ant-oat01-abc_DEF-123 and Bearer eyJ.hbG-ci/Oi= end")
     assert text == "token sk-ant-*** and Bearer *** end"
+
+
+# -- output budget and reasoning (A10) ---------------------------------------------------------
+
+
+async def test_the_budget_is_passed_to_the_cli_and_never_inherited(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "999999")
+    await collect(provider, request("summary", fast=True, max_output_tokens=2000))
+    await collect(provider, request())
+    runs = {next(a for a in run["argv"] if a.startswith("--model=")): run for run in fake.runs()}
+    summary, answer = runs["--model=haiku"], runs["--model=opus"]
+    assert summary["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "2000"
+    assert answer["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(DEFAULT_MAX_OUTPUT_TOKENS)
+    await provider.status()
+    status = next(c for c in fake.calls() if c["phase"] == "status")
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in status["env"]
+
+
+async def test_reasoning_off_disables_thinking(fake: FakeCli, provider: ClaudeCliProvider) -> None:
+    await collect(provider, request("summary", reasoning="off"))
+    await collect(provider, request("summary", fast=True, reasoning="off"))
+    argvs = {
+        next(a for a in run["argv"] if a.startswith("--model=")): run["argv"] for run in fake.runs()
+    }
+    opus, haiku = argvs["--model=opus"], argvs["--model=haiku"]
+    assert "--model=opus" in opus
+    assert opus[opus.index("--thinking") + 1] == "disabled"
+    assert opus[opus.index("--effort") + 1] == "low"
+    assert haiku[haiku.index("--thinking") + 1] == "disabled" and "--effort" not in haiku
+
+
+async def test_warm_processes_only_serve_the_same_budget_and_reasoning(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    await provider.prewarm(request("revision", prompt=""))
+    (warm,) = await fake.wait_count(1)
+    await collect(provider, request("revision", max_output_tokens=4000))
+    await collect(provider, request("revision", reasoning="off"))
+    runs = fake.runs()
+    assert len(runs) == 3
+    served = [run for run in runs if "stdin" in run]
+    assert len(served) == 2 and warm["pid"] not in {run["pid"] for run in served}
+    await collect(provider, request("revision"))  # same key as the warm process
+    assert any(run["pid"] == warm["pid"] and "stdin" in run for run in fake.runs())
+
+
+# -- replies the CLI would go on with by itself (A10, A17) -------------------------------------
+
+GOES_ON = {"sigterm_grace": 1.0, "continue_delay": 0.3}
+"""Like the real CLI 2.1.283, the fake shuts down gracefully on SIGTERM (it still sends its
+next request) and goes on by itself after a max_tokens or refused reply; the real one does
+it about 10 ms after ``message_stop``, the fake gives the provider 0.3 s."""
+
+
+async def finished_run(fake: FakeCli) -> dict[str, Any]:
+    """The only run's last record, once its process is gone (killed and reaped)."""
+    (run,) = fake.runs()
+    await eventually(lambda: reaped(run["pid"]), timeout=3.0)
+    (run,) = fake.runs()
+    return run
+
+
+async def test_max_tokens_is_truncated_and_the_cli_never_continues_by_itself(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    fake.scenario(stream="stream_max_tokens.jsonl", **GOES_ON)
+    deltas, result = await collect(provider, request(max_output_tokens=2000))
+    assert deltas == ["Primera part", " tallada"]
+    assert result.text == "Primera part tallada"
+    assert result.truncated is True and result.finish_reason == "max_tokens"
+    # The usage of the request that stopped (the CLI's result would add its continuation).
+    assert result.usage == Usage(input_tokens=926, output_tokens=2000, reasoning_tokens=1990)
+    assert result.model == "claude-haiku-4-5-20251001"
+    run = await finished_run(fake)  # killed at once, not at aclose()
+    assert run["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "2000"
+    # SIGKILL as soon as the stream said max_tokens: no graceful shutdown during which the
+    # CLI would send its "Output token limit hit. Resume directly..." request.
+    assert not run.get("continued") and not run.get("sigterm")
+
+
+async def refusal(provider: ClaudeCliProvider) -> tuple[list[str], RefusalError]:
+    deltas: list[str] = []
+    with pytest.raises(RefusalError) as info:
+        async for event in provider.stream(request()):
+            assert isinstance(event, TextDelta)
+            deltas.append(event.text)
+    return deltas, info.value
+
+
+@pytest.mark.parametrize("stream", ["stream_refusal.jsonl", "stream_refusal_recovered.jsonl"])
+async def test_a_refusal_is_a_refusal_error_and_the_cli_never_retries_by_itself(
+    fake: FakeCli, provider: ClaudeCliProvider, stream: str
+) -> None:
+    # Refused twice, or answered by the CLI's own retry ("Your response above was stopped
+    # by a safety classifier..."): either way the call was refused, and the fragment
+    # streamed before the refusal never joins the retry's text.
+    fake.scenario(stream=stream, **GOES_ON)
+    deltas, error = await refusal(provider)
+    assert deltas == ["Aquí tens els passos: ", "primer"]
+    assert (error.kind, error.retryable, error.category) == ("invalid", False, "cyber")
+    assert error.message == "Claude ha declinat respondre aquesta petició (categoria: cyber)."
+    assert error.model == "claude-opus-5-5"
+    assert error.usage == Usage(input_tokens=926, output_tokens=12)  # the request that refused
+    run = await finished_run(fake)
+    assert not run.get("continued") and not run.get("sigterm")
+
+
+async def test_a_refusal_reported_only_by_the_result_is_a_refusal_error(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    fake.scenario(
+        result_override={
+            "is_error": True,
+            "stop_reason": "refusal",
+            "terminal_reason": "api_error",
+            "result": "API Error: Opus 5.5's safeguards flagged this message.",
+        }
+    )
+    error = await expect_error(provider, request())
+    assert isinstance(error, RefusalError) and not error.retryable
+    assert error.message == "Claude ha declinat respondre aquesta petició."
+    assert error.category is None and error.model == "claude-haiku-4-5-20251001"
+    # Everything the CLI's turn billed.
+    assert error.usage == Usage(input_tokens=926, output_tokens=48, reasoning_tokens=42)
+
+
+async def test_a_refusal_through_the_engine_is_never_stored_nor_cached(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    fake.scenario(stream="stream_refusal_recovered.jsonl", **GOES_ON)
+    store = InMemoryStore()
+    engine = Engine({"claude": provider}, store, retry_delay=0)
+    for request_id in ("a", "b"):  # the same question twice: asked again, never replayed
+        events = [e async for e in engine.run(TurnRequest(request_id, "Pregunta?", "solo"))]
+        (failed,) = [e for e in events if isinstance(e, StreamFailed)]
+        assert failed.error.kind == "invalid" and "declinat" in failed.error.message
+        assert isinstance(events[-1], TurnFailed)
+    assert [m.kind for m in store.messages] == ["question", "question"]
+    assert not store.cache
+    assert len(fake.runs()) == 2
+    assert [(r.ok, r.usage.input_tokens, r.usage.output_tokens) for r in store.usage] == [
+        (False, 926, 12),
+        (False, 926, 12),
+    ]

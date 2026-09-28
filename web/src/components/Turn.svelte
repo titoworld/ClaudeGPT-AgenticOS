@@ -8,8 +8,11 @@
     DEFAULT_CONSENSUS_THRESHOLD,
     INCOMPLETE_KIND,
     isTerminal,
+    keptAnswers,
     revisionRounds,
+    shownSynthesis,
     streamsByAgent,
+    synthesisNote,
     turnUsage,
     type TurnView,
   } from '../lib/turns.svelte';
@@ -30,8 +33,11 @@
   const active = $derived(!isTerminal(turn.status));
   const answers = $derived(streamsByAgent(turn, 'answer', 0));
   const rounds = $derived(revisionRounds(turn));
-  const synthesis = $derived(turn.streams.find((s) => s.kind === 'synthesis') ?? null);
+  const kept = $derived(keptAnswers(turn));
+  // Each synthesis attempt has its own stream: show the one that counts.
+  const synthesis = $derived(shownSynthesis(turn));
   const synthesizer = $derived(synthesis?.agent ?? turn.options?.debate.synthesizer ?? 'claude');
+  const fallbackNote = $derived(synthesisNote(turn, synthesis));
   const threshold = $derived(turn.options?.debate.consensus_threshold ?? DEFAULT_CONSENSUS_THRESHOLD);
   const soloAgent = $derived(answers.claude ? 'claude' : answers.chatgpt ? 'chatgpt' : (turn.target ?? 'claude'));
   const usage = $derived(isTerminal(turn.status) ? turnUsage(turn) : null);
@@ -105,10 +111,16 @@
 
   {#if turn.mode === 'debate'}
     {#each rounds as group (group.round)}
-      <RevisionRound round={group.round} streams={group.streams} {threshold} {active} />
+      <RevisionRound round={group.round} streams={group.streams} {threshold} {active} {kept} />
     {/each}
     {#if showSynthesisSlot}
-      <AnswerCard agent={synthesizer} stream={synthesis} {active} variant="synthesis" badge={consensusBadge} />
+      <AnswerCard
+        agent={synthesizer}
+        stream={synthesis}
+        {active}
+        variant="synthesis"
+        badge={consensusBadge}
+        note={fallbackNote} />
     {/if}
   {/if}
 

@@ -17,6 +17,7 @@ from agentic_os.providers.base import (
     GenerationResult,
     Provider,
     ProviderError,
+    RefusalError,
     TextDelta,
 )
 from agentic_os.providers.fake import FakeProvider
@@ -179,3 +180,40 @@ async def test_fake_agreement_sequence_restarts_for_a_new_question() -> None:
         return parser.final().agreement
 
     assert [await agreement("Q1"), await agreement("Q1"), await agreement("Q2")] == [30, 90, 30]
+
+
+async def test_fake_honours_the_output_budget() -> None:
+    provider = FakeProvider("claude", chunk_delay=0)
+    request = GenerationRequest(system="s", prompt="Com aprenc Python?", max_output_tokens=10)
+    text, result = await run_fake(provider, request)
+    assert result.truncated is True and result.finish_reason == "max_tokens"
+    assert text == result.text and 0 < len(text) <= 40
+    assert result.usage.output_tokens <= 10
+    whole, complete = await run_fake(provider, GenerationRequest(system="s", prompt="Com?"))
+    assert not complete.truncated and complete.finish_reason is None and len(whole) > 40
+
+
+async def test_fake_truncates_and_refuses_on_demand() -> None:
+    provider = FakeProvider("chatgpt", chunk_delay=0, truncate={"answer"}, refuse={"synthesis"})
+    full, _ = await run_fake(FakeProvider("chatgpt", chunk_delay=0), GenerationRequest("s", "Q"))
+    text, result = await run_fake(provider, GenerationRequest("s", "Q"))
+    assert result.truncated and result.finish_reason == "max_tokens"
+    assert full.startswith(text) and len(text) < len(full)
+
+    with pytest.raises(RefusalError) as refused:
+        await run_fake(provider, GenerationRequest("s", "Q", purpose="synthesis"))
+    error = refused.value
+    assert error.kind == "invalid" and not error.retryable
+    assert error.model == "fake-chatgpt" and error.usage.input_tokens > 0
+    assert "declinat" in error.message and error.refusal
+
+
+async def test_fake_can_refuse_after_streaming_part_of_the_answer() -> None:
+    provider = FakeProvider("claude", chunk_delay=0, refuse={"answer"}, refuse_after=2)
+    deltas: list[str] = []
+    with pytest.raises(RefusalError) as refused:
+        async for event in provider.stream(GenerationRequest("s", "Q")):
+            assert isinstance(event, TextDelta)
+            deltas.append(event.text)
+    assert len(deltas) == 2
+    assert refused.value.usage.output_tokens > 0

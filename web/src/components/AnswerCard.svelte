@@ -9,6 +9,7 @@
   import Icon from './Icon.svelte';
   import Markdown from './Markdown.svelte';
   import StreamStatus from './StreamStatus.svelte';
+  import TruncationNote from './TruncationNote.svelte';
 
   interface Props {
     agent: Agent;
@@ -19,11 +20,14 @@
     variant?: 'answer' | 'synthesis';
     title?: string;
     badge?: Snippet;
+    /** Short note under the header (who made a synthesis instead of the chosen agent). */
+    note?: string | null;
   }
 
-  let { agent, stream, active, variant = 'answer', title, badge }: Props = $props();
+  let { agent, stream, active, variant = 'answer', title, badge, note = null }: Props = $props();
 
-  const status = $derived(stream ? stream.status : active ? 'waiting' : null);
+  const truncated = $derived(stream?.status === 'done' && stream.truncated);
+  const status = $derived(stream ? (truncated ? 'truncated' : stream.status) : active ? 'waiting' : null);
   const streaming = $derived(stream?.status === 'streaming');
 </script>
 
@@ -47,6 +51,10 @@
     </div>
   </header>
 
+  {#if note}
+    <p class="card-note" role="note"><Icon name="info" size={14} /><span>{note}</span></p>
+  {/if}
+
   <div class="body">
     {#if stream?.text}
       <Markdown text={stream.text} {streaming} />
@@ -63,6 +71,8 @@
       </div>
     {:else if stream?.status === 'interrupted'}
       <p class="note">Resposta interrompuda.</p>
+    {:else if stream?.status === 'done' && stream.truncated}
+      <TruncationNote reason={stream.finishReason} />
     {/if}
   </div>
 
@@ -180,6 +190,21 @@
 
   .note {
     margin-top: 0.5rem;
+  }
+
+  .card-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    margin-top: -0.25rem;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .card-note :global(.icon) {
+    flex: none;
+    margin-top: 0.15rem;
+    color: var(--text-muted);
   }
 
   .problem {

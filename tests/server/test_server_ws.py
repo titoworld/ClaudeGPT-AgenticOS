@@ -633,6 +633,43 @@ def test_owner_prices_reach_the_engine(tmp_path: Path) -> None:
         assert meta["cost_basis"] == "equivalent"
 
 
+def test_a_truncated_answer_and_a_refusal_through_the_socket(tmp_path: Path) -> None:
+    """Response integrity end to end (ADR 0005): a cut-off answer is flagged live and in the
+    stored meta and never replayed from the cache; a refusal fails with its own message."""
+    providers: dict[AgentName, Provider] = {
+        "claude": FakeProvider("claude", chunk_delay=0, truncate={"answer"}),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0, refuse={"answer"}),
+    }
+    with app_client(tmp_path, providers) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        for request_id in ("t1", "t2"):  # the same question twice: never from the cache
+            ws.send_json(start(request_id))
+            events = receive_until(ws, is_type("turn.completed", request_id))
+            [completed] = [e for e in events if e["type"] == "stream.completed"]
+            assert completed["truncated"] is True and completed["finish_reason"] == "max_tokens"
+            assert events[-1]["cached"] is False
+            [meta] = answers_meta(client, state, events[0]["conversation_id"])
+            assert meta["truncated"] is True and meta["finish_reason"] == "max_tokens"
+
+        ws.send_json(start("r1", target="chatgpt"))
+        events = receive_until(ws, is_type("turn.failed", "r1"))
+        [failed] = [e for e in events if e["type"] == "stream.failed"]
+        assert failed["error"]["kind"] == "invalid"
+        assert "declinat" in failed["error"]["message"]
+        assert not answers_meta(client, state, events[0]["conversation_id"])
+
+
+def test_a_complete_answer_has_no_truncated_field(tmp_path: Path) -> None:
+    with app_client(tmp_path) as (client, state, token), connect(client, token) as ws:
+        ws.receive_json()
+        ws.send_json(start("c1"))
+        events = receive_until(ws, is_type("turn.completed"))
+        [completed] = [e for e in events if e["type"] == "stream.completed"]
+        assert not {"truncated", "finish_reason", "unchanged_note"} & set(completed)
+        [meta] = answers_meta(client, state, events[0]["conversation_id"])
+        assert "truncated" not in meta and "finish_reason" not in meta
+
+
 def test_invalid_models_are_rejected_with_the_request_id(tmp_path: Path) -> None:
     with app_client(tmp_path) as (client, _state, token), connect(client, token) as ws:
         ws.receive_json()

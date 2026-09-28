@@ -17,7 +17,38 @@ Scenario keys (all optional):
   exit_code        exit code of a crash (default 3)
   spawn_child      start a sleeping child process in the same process group
   ignore_sigterm   ignore SIGTERM (the provider must escalate to SIGKILL)
+  sigterm_grace    shut down gracefully on SIGTERM, like the real CLI: record it, go on
+                   replaying and exit only this many seconds later
+  continue_delay   seconds before the CLI's own follow-up message (default ``delay``)
   status           {"json": {...}, "exit_code": 0} for ``auth status --json``
+
+The CLI going on by itself: with no tools, a ``user`` event in the stream is always the
+CLI's own follow-up message after a reply it did not accept (the continuation after
+``stop_reason: "max_tokens"``, the retry after a refusal...), and the real CLI sends its
+next API request right after it. The fake records that as phase "continued" and keeps
+``continued: true`` in every later record, so a test can check it never happened.
+
+Fixtures: ``stream_success.jsonl``, ``stream_auth_error.jsonl`` and
+``stream_rate_limited.jsonl`` were recorded from the real CLI 2.1.283 and the real API.
+``stream_max_tokens.jsonl``, ``stream_refusal.jsonl`` and ``stream_refusal_recovered.jsonl``
+keep the event order the real CLI 2.1.283 printed against a local mock of the Messages
+API (no real model), with the ids and fields of ``stream_success.jsonl``:
+
+- max_tokens: ``message_delta`` with ``stop_reason: "max_tokens"``, ``message_stop``, then
+  at once the CLI's own ``user`` message ("Output token limit hit. Resume directly...")
+  and a second API request, about 10 ms after ``message_stop`` (up to 3 of them); the
+  ``result`` has ``is_error: false`` and only the continuation's text;
+- refusal: ``message_delta`` with ``stop_reason: "refusal"``, ``message_stop``, a
+  ``system``/``informational`` notice and the CLI's own ``user`` message ("Your response
+  above was stopped by a safety classifier...") with a second API request. When that one
+  refuses too, the CLI prints ``system``/``model_refusal_no_fallback``, a synthetic
+  "API Error" message and a ``result`` with ``is_error: true`` and
+  ``stop_reason: "refusal"`` (``stream_refusal.jsonl``); when it answers, the ``result``
+  has ``is_error: false`` and only the follow-up's text (``stream_refusal_recovered.jsonl``).
+
+On SIGTERM the real CLI shuts down gracefully: it still printed the ``user`` follow-up
+and ``system``/``status`` events and exited about 20 ms later, usually after its next
+request had left (``sigterm_grace`` models that). SIGKILL stops it at once.
 """
 
 from __future__ import annotations
@@ -27,6 +58,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -119,6 +151,15 @@ def main() -> None:
     check_argv(argv)
     if scenario.get("ignore_sigterm"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    elif scenario.get("sigterm_grace") is not None:
+        grace = float(scenario["sigterm_grace"])
+
+        def graceful_shutdown(signum: int, frame: object) -> None:
+            entry["sigterm"] = True
+            record({**entry, "phase": "sigterm"})
+            threading.Timer(grace, os._exit, (128 + signum,)).start()
+
+        signal.signal(signal.SIGTERM, graceful_shutdown)
     if scenario.get("spawn_child"):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
         entry["child_pid"] = child.pid
@@ -157,7 +198,13 @@ def main() -> None:
         while True:
             time.sleep(1)
 
+    continue_delay = float(scenario.get("continue_delay", delay))
     for event in events:
+        if event.get("type") == "user":
+            # The CLI goes on by itself: its next API request leaves right after this.
+            time.sleep(max(0.0, continue_delay - delay))
+            entry["continued"] = True
+            record({**entry, "phase": "continued"})
         if event.get("type") == "result":
             event.update(scenario.get("result_override", {}))
         emit(event)

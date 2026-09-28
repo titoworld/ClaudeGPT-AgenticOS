@@ -91,9 +91,9 @@ describe('styles of the hidden-character marks (K15)', () => {
   const dir = (import.meta as ImportMeta & { dirname: string }).dirname;
   const css = node.process.getBuiltinModule('node:fs').readFileSync(`${dir}/../app.css`, 'utf8');
 
-  /** The declarations of a global rule in app.css. */
+  /** The declarations of a global rule in app.css (its selector on a line of its own, or of a list). */
   const rule = (selector: string): string => {
-    const at = css.indexOf(`\n${selector} {`);
+    const at = css.search(new RegExp(`\\n${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[{,]`));
     expect(at, `${selector} is styled`).toBeGreaterThanOrEqual(0);
     return css.slice(at, css.indexOf('}', at));
   };
@@ -105,10 +105,13 @@ describe('styles of the hidden-character marks (K15)', () => {
   });
 
   it('shows the marks as warnings, isolated from the text direction around them', () => {
-    const marks = rule('.md .invisible-char');
-    expect(marks).toMatch(/color: var\(--warning\)/);
-    expect(marks).toMatch(/unicode-bidi: isolate/);
-    expect(marks).toMatch(/direction: ltr/);
-    expect(rule('.md .invisible-char.invisible-collapsed')).toMatch(/white-space: normal/);
+    // In rendered Markdown and in model text shown outside it (PlainText.svelte).
+    for (const scope of ['.md', '.plain-text']) {
+      const marks = rule(`${scope} .invisible-char`);
+      expect(marks).toMatch(/color: var\(--warning\)/);
+      expect(marks).toMatch(/unicode-bidi: isolate/);
+      expect(marks).toMatch(/direction: ltr/);
+      expect(rule(`${scope} .invisible-char.invisible-collapsed`)).toMatch(/white-space: normal/);
+    }
   });
 });

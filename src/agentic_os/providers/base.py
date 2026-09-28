@@ -2,18 +2,39 @@
 
 A provider turns a :class:`GenerationRequest` into a stream of events:
 zero or more :class:`TextDelta` followed by exactly one :class:`GenerationResult`.
-Failures raise :class:`ProviderError`. Cancellation (``asyncio.CancelledError``)
-must release every resource (kill subprocesses, close HTTP streams).
+Failures raise :class:`ProviderError` (a refusal raises :class:`RefusalError`).
+Cancellation (``asyncio.CancelledError``) must release every resource (kill
+subprocesses, close HTTP streams).
+
+Integrity of a reply (docs/adr/0005-integritat-de-les-respostes.md): a result says
+whether the reply is complete or was cut off (``truncated``, ``finish_reason``); a
+refusal is never a result, even when some text streamed before it; a stream that ends
+without the vendor's final event is an error, never a complete answer.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+
+DEFAULT_MAX_OUTPUT_TOKENS = 16_000
+"""Billed output budget of answers, revisions and syntheses (reasoning included)."""
+
+Reasoning = Literal["off", "default"]
+"""Reasoning (thinking) policy of a call: ``"default"`` is the provider's effort for the
+call's purpose; ``"off"`` is as little as the model accepts (summaries)."""
+
+FinishReason = str
+"""Why a reply stopped before its end: ``"max_tokens"`` (output budget),
+``"content_filter"``, ``"incomplete"`` (the vendor gave no reason), ``"interrupted"``, or
+a provider-specific string."""
+
+REFUSAL_TEXT_MAX_CHARS = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +61,13 @@ class GenerationRequest:
     """Use the provider's fast/cheap model (e.g. for summaries)."""
     model: str | None = None
     """Explicit model override; None means the provider's configured default."""
-    max_output_tokens: int = 8000
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    """Maximum BILLED output tokens of the call, reasoning (thinking) included. Adapters
+    send it to the vendor as it is and never raise it; where the vendor has no such
+    limit, the adapter enforces it as well as it can (Codex: an approximate local stop).
+    It is not a length for the visible text, and counting text is never billing."""
+    reasoning: Reasoning = "default"
+    """Reasoning policy, separate from the budget: ``"off"`` for summaries."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +85,12 @@ class GenerationResult:
     """Wall time from call start to completion."""
     ttft_ms: int | None = None
     """Time to first text delta."""
+    truncated: bool = False
+    """The reply was cut off before its end (output budget, content filter, a stream the
+    provider had to stop...): ``text`` is a usable partial answer, never a complete one.
+    The engine stores it as such and never caches the turn."""
+    finish_reason: FinishReason | None = None
+    """Why a truncated reply stopped (None for a complete one)."""
 
 
 ProviderEvent = TextDelta | GenerationResult
@@ -66,11 +99,65 @@ ProviderErrorKind = Literal["auth", "rate_limit", "timeout", "unavailable", "inv
 
 
 class ProviderError(Exception):
-    def __init__(self, message: str, *, kind: ProviderErrorKind, retryable: bool = False) -> None:
+    """A call that failed. ``usage`` and ``model`` say what it billed when the vendor
+    reported it (a refusal, an output budget spent before any text...), so the engine
+    records its cost; None when nothing is known to be billed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: ProviderErrorKind,
+        retryable: bool = False,
+        usage: Usage | None = None,
+        model: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.kind: ProviderErrorKind = kind
         self.retryable = retryable
+        self.usage = usage
+        self.model = model
+
+
+def clean_refusal(text: str) -> str:
+    """A model's refusal explanation fit for messages and logs: control and invisible
+    format characters removed, whitespace collapsed, at most REFUSAL_TEXT_MAX_CHARS."""
+    visible = "".join(
+        char if unicodedata.category(char) not in ("Cc", "Cf", "Co", "Cs") or char.isspace() else ""
+        for char in text
+    )
+    cleaned = " ".join(visible.split())
+    if len(cleaned) > REFUSAL_TEXT_MAX_CHARS:
+        cleaned = cleaned[: REFUSAL_TEXT_MAX_CHARS - 1].rstrip() + "…"
+    return cleaned
+
+
+class RefusalError(ProviderError):
+    """The model declined the request (Anthropic ``stop_reason: "refusal"``, an OpenAI
+    ``refusal`` part). Not retryable: asking again gets the same answer, and any text
+    streamed before the refusal is never an answer.
+
+    The vendor may still bill it: ``usage`` holds the billed tokens (all zero when
+    nothing is billed) and ``model`` the model that declined, so the call's cost is
+    recorded. ``category`` is the vendor's refusal category when it gives one and
+    ``refusal`` the model's own explanation (cleaned with :func:`clean_refusal`)."""
+
+    usage: Usage
+    model: str
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: Usage,
+        model: str,
+        category: str | None = None,
+        refusal: str = "",
+    ) -> None:
+        super().__init__(message, kind="invalid", usage=usage, model=model)
+        self.category = category
+        self.refusal = clean_refusal(refusal)
 
 
 @dataclass(frozen=True, slots=True)

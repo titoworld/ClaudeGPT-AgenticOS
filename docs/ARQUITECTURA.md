@@ -43,7 +43,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 - **Duel:** tots dos responen en paral·lel i es mostren costat a costat.
 - **Debat:**
   1. *Respostes inicials* en paral·lel.
-  2. *Rondes de revisió* (per defecte fins a 2): cada agent rep la pregunta, la seva resposta i la de l'altre, i retorna una crítica breu, la seva resposta millorada (o `UNCHANGED` si no cal canviar-la) i un grau d'acord 0–100.
+  2. *Rondes de revisió* (per defecte fins a 2): cada agent rep la pregunta, la seva resposta i la de l'altre, i retorna una crítica breu, la seva resposta millorada (o `UNCHANGED`, amb una nota curta opcional, si no cal canviar-la) i un grau d'acord 0–100.
   3. *Parada per consens:* si tots dos superen el llindar (per defecte 85), no es fan més rondes.
   4. *Síntesi:* l'agent sintetitzador combina les dues respostes finals i els punts de desacord en la resposta definitiva.
 
@@ -56,7 +56,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | Historial canònic | A l'historial de la conversa només hi van la pregunta i la resposta final (la síntesi), no les rondes intermèdies | – |
 | Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | tokens de l'historial original − tokens del context compactat |
 | Parada per consens | S'ometen les rondes que queden | tokens mitjans d'una ronda × rondes omeses |
-| `UNCHANGED` | Un agent d'acord no reescriu la resposta | longitud de la resposta no reescrita |
+| `UNCHANGED` | Un agent d'acord no reescriu la resposta (com a molt hi afegeix una nota curta) | longitud de la resposta no reescrita |
 | Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents i context) es respon sense cridar cap model | tokens del torn original |
 | Memòria cau del proveïdor | Prefixos estables (prompt de sistema primer) perquè Anthropic i OpenAI reaprofitin el càlcul | `cache_read_tokens` |
 
@@ -73,6 +73,31 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 - **Models:** cada agent té un model per defecte i un de ràpid (per als resums), configurables des de la interfície. La llista es demana en directe al proveïdor (API de models d'Anthropic i d'OpenAI, `model/list` de Codex; a la CLI de Claude, els àlies `opus`, `sonnet`, `haiku` i `fable`, que sempre apunten a l'última versió). També s'accepta qualsevol identificador, per fer servir un model nou el mateix dia que surt.
 - **Cost:** el motor calcula el cost de cada crida amb la taula de preus (USD per milió de tokens, editable). En mode API és el cost real; en mode subscripció és el *valor equivalent* a preus d'API. La interfície ho mostra en euros amb el tipus del BCE.
 - **Percentatge usat:** en mode subscripció, les finestres de 5 hores i setmanal que informen Anthropic i OpenAI; en mode API, el pressupost mensual en euros; i, si indiques el preu del pla, quant valor n'has tret aquest mes.
+
+## Integritat de les respostes
+
+Una resposta pot ser completa, pot estar tallada o pot ser una negativa, i el sistema no les confon mai ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
+
+- **Resposta tallada:** és una resposta parcial útil, però mai completa. Es desa amb `truncated` i el motiu (`finish_reason`) i la interfície la mostra com a incompleta. El torn no entra a la memòria cau. En un debat continua alimentant les revisions i la síntesi, però el prompt la marca com a incompleta. Si no hi ha cap text, la crida falla dient que s'ha esgotat el límit de sortida, i el cost es registra igualment. Un resum de compactació tallat no es fa servir mai.
+- **Negativa:** és un error propi (`RefusalError`), no reintentable, amb el seu missatge i el seu cost. El text emès abans de la negativa no es desa mai. La CLI de Claude, davant d'una negativa, torna a preguntar pel seu compte una vegada; el proveïdor l'atura abans (vegeu la taula de sota).
+- **Flux interromput:** és un error reintentable, mai una resposta completa. Passa quan la connexió cau a mig flux, quan el flux acaba sense l'esdeveniment final o quan Codex reintenta una resposta que ja s'estava mostrant. El motor només el reintenta si encara no ha mostrat res.
+- **Revisions:** l'analitzador tracta com a text les etiquetes escrites dins de codi i les etiquetes d'obertura de la mateixa secció. Un bloc de codi que no es tanca mai no era codi. Si una etiqueta de tancament va seguida de text, es decideix amb la següent etiqueta: si torna a aparèixer la mateixa, la primera era text; si comença una altra secció o s'acaba la resposta, tancava la secció, i el text del mig (un encapçalament, una salutació) es descarta. `UNCHANGED` sol conserva la resposta anterior; en majúscules, a més, pot anar seguit d'una nota curta a la mateixa línia, que es desa a part.
+
+### Pressupost de sortida
+
+`max_output_tokens` és el màxim de tokens de sortida **facturats** d'una crida, amb el raonament inclòs. Cap adaptador no l'apuja. El raonament es tria a part, amb `reasoning`:
+
+- respostes, revisions i síntesis: 16.000 tokens, amb el raonament per defecte;
+- resums: 2.000 tokens, amb el raonament `off`.
+
+Cada proveïdor ho aplica així:
+
+| Proveïdor | Límit de sortida | Raonament `off` |
+| --- | --- | --- |
+| API de Claude | `max_tokens` exacte. Si no hi cap el pressupost mínim de pensament (1.024), no pensa. `stop_reason: "max_tokens"` dona una resposta tallada. | Pensament desactivat |
+| API d'OpenAI | `max_output_tokens` exacte. `response.incomplete` dona una resposta tallada. | L'esforç més baix que accepta el model: `none` a GPT-6 Sol i Luna, `minimal` als primers GPT-5 i `low` a la resta |
+| CLI de Claude | `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, calculat pel proveïdor, forma part de la clau dels processos calents. La CLI l'aplica a cada petició que fa. Quan una resposta s'atura per `max_tokens`, la CLI 2.1.283 la reprèn pel seu compte (fins a 3 vegades) amb una petició nova uns 10 ms després; després d'una negativa, torna a preguntar una vegada. Cada petició d'aquestes tornaria a facturar tot el context. Per això el proveïdor mata el grup de processos amb SIGKILL tan bon punt llegeix aquest `stop_reason` i acaba la crida amb l'ús d'aquella petició: una resposta tallada o una negativa. Amb SIGTERM no n'hi ha prou, perquè la CLI s'atura ordenadament i envia la petició igualment. Comprovat amb la CLI real contra una API simulada en local. | `--thinking disabled` |
+| Codex (app-server 0.157.1) | El protocol no té cap camp per al límit. La crida atura el torn (`turn/interrupt`) quan el text visible estimat (caràcters / 4) supera el pressupost. És aproximat: no compta el raonament, i l'ús és el que informa Codex. | `low`, el nivell més baix del catàleg |
 
 ## Seguretat (un sol usuari)
 

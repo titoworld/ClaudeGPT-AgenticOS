@@ -113,9 +113,17 @@ class StreamCompleted:
     """Debate revisions only: the agent kept its previous answer."""
     cost_basis: str | None = None
     """"api" (real cost), "equivalent" (subscription value at API prices) or None."""
+    truncated: bool = False
+    """The reply was cut off: a usable partial answer. On the wire only when true."""
+    finish_reason: str | None = None
+    """Why a truncated reply stopped, as the message's ``meta.finish_reason`` (e.g.
+    "max_tokens"). On the wire only when set."""
+    unchanged_note: str | None = None
+    """Debate revisions only: the short note written after UNCHANGED, as the message's
+    ``meta.unchanged_note``. On the wire only when set."""
 
     def to_wire(self) -> Wire:
-        return {
+        wire: Wire = {
             "type": "stream.completed",
             "request_id": self.request_id,
             "stream_id": self.stream_id,
@@ -127,6 +135,13 @@ class StreamCompleted:
             "unchanged": self.unchanged,
             "cost_basis": self.cost_basis,
         }
+        if self.truncated:
+            wire["truncated"] = True
+        if self.finish_reason:
+            wire["finish_reason"] = self.finish_reason
+        if self.unchanged_note:
+            wire["unchanged_note"] = self.unchanged_note
+        return wire
 
 
 @dataclass(frozen=True, slots=True)

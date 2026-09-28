@@ -3,6 +3,7 @@
 import re
 import unicodedata
 
+from agentic_os.domain import AgentName
 from agentic_os.orchestrator import prompts
 from agentic_os.orchestrator.prompts import (
     debate_answer_prompt,
@@ -101,3 +102,23 @@ def test_tags_split_by_invisible_characters_are_neutralized() -> None:
         assert seen.count(f"</{tag}>") == 1, tag
     assert "&lt;/clau\u200bde_answer>" in prompt
     assert prompt.endswith("&lt;\ufeffclaude_answer>\n</claude_answer>")
+
+
+def test_incomplete_answers_are_marked_in_the_revision_prompt() -> None:
+    complete = revision_prompt("claude", "Q?", "La meva", "La de ChatGPT")
+    assert prompts.INCOMPLETE_NOTE not in complete and prompts.OWN_INCOMPLETE_NOTE not in complete
+    marked = revision_prompt(
+        "claude", "Q?", "La meva", "La de ChatGPT", own_incomplete=True, other_incomplete=True
+    )
+    own = marked.split("<your_previous_answer>", 1)[1].split("</your_previous_answer>", 1)[0]
+    other = marked.split("<chatgpt_answer>", 1)[1].split("</chatgpt_answer>", 1)[0]
+    assert own == f"\nLa meva\n\n{prompts.OWN_INCOMPLETE_NOTE}\n"
+    assert other == f"\nLa de ChatGPT\n\n{prompts.INCOMPLETE_NOTE}\n"
+
+
+def test_incomplete_answers_are_marked_in_the_synthesis_prompt() -> None:
+    answers: dict[AgentName, str] = {"claude": "A1", "chatgpt": "A2"}
+    assert prompts.INCOMPLETE_NOTE not in synthesis_prompt("Q", answers, {})
+    marked = synthesis_prompt("Q", answers, {}, incomplete={"chatgpt"})
+    assert f'<answer from="ChatGPT">\nA2\n\n{prompts.INCOMPLETE_NOTE}\n</answer>' in marked
+    assert '<answer from="Claude">\nA1\n</answer>' in marked

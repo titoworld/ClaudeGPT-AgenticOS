@@ -172,9 +172,10 @@ interface Stats {
 
 - Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha) i `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut).
 - Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
-- Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`), `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva; també la conté (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
+- Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
+- Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`) i `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva, i `unchanged_note` (opcional) és la nota curta que el model va escriure després d'`UNCHANGED`, a la mateixa línia (com a molt 200 caràcters). `content` també conté la resposta anterior (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
 - Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
-- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). L'últim missatge final porta també `unstored_usage` (`Usage`) si hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, refusades).
+- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). L'últim missatge final porta també `unstored_usage` (`Usage`) si hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, negatives, límit de sortida esgotat sense text).
 - Total d'un torn recarregat: la suma dels `usage` dels seus missatges, més `compaction_usage` i `unstored_usage`. És igual al `usage` de `turn.completed`, llevat que en un duel una crida fallida acabi després que l'altre agent hagi desat la seva resposta.
 
 ## WebSocket `/api/ws`
@@ -215,8 +216,8 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`) |
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
 | `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
-| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis` | Resposta acabada i desada |
-| `stream.failed` | `stream_id`, `error: {kind, message}` | Aquell model ha fallat (el torn pot continuar amb l'altre) |
+| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason` i `unchanged_note` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. Tots tres valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
+| `stream.failed` | `stream_id`, `error: {kind, message}` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa |
 | `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached` | Torn acabat |
 | `turn.failed` | `error: {kind, message}` | Torn avortat |
 | `turn.cancelled` | – | Cancel·lat per l'usuari |

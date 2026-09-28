@@ -37,7 +37,7 @@ Abans de cada commit han de passar totes aquestes comprovacions: és el mateix q
 - Python >= 3.12, layout `src/`, tipat complet (mypy estricte), asyncio. `CancelledError` sempre es propaga i allibera recursos.
 - Dependències només amb `uv add` / `npm install --save-exact`; mai editis `uv.lock` a mà. Justifica cada dependència nova.
 - **Els tests no criden APIs reals ni fan login** (costen diners i requereixen xarxa). Fes servir `FakeProvider`, les CLI falses de `tests/providers/fixtures/` o transports simulats.
-- Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica; revisa visualment els canvis d'interfície.
+- Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica i per als components, que es munten a jsdom amb `web/src/lib/test-render.ts` (en mode test, `web/vite.config.ts` resol la condició `browser` de Svelte); revisa visualment els canvis d'interfície.
 
 ## Seguretat (no negociable)
 

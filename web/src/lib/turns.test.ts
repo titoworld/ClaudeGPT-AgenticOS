@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   applyTurnEvent,
   createLiveTurn,
+  keptAnswers,
   latestAgreement,
   mergeTurns,
   revisionRounds,
+  shownSynthesis,
   streamsByAgent,
+  synthesisAttempts,
+  synthesisNote,
   turnUsage,
   turnsFromMessages,
   INCOMPLETE_KIND,
+  type StreamView,
   type TurnView,
 } from './turns.svelte';
 import { turnCost } from './costs';
@@ -19,14 +24,21 @@ import {
   compactedDuelMessages,
   debateEvents,
   debateMessages,
+  degradedSynthesisEvents,
+  fallbackSynthesisEvents,
+  keptRevisionEvents,
+  keptRevisionMessages,
   message,
+  oneSurvivorDebateEvents,
   priced,
+  QUICK_DEBATE,
+  quickDebateMessages,
   retriedDuelEvents,
   retriedDuelMessages,
   sequence,
   usage,
 } from './test-fixtures';
-import type { Savings, TurnEvent } from './protocol';
+import type { Message, MessageMeta, Savings, TurnEvent } from './protocol';
 
 const live = (requestId = 'req-1'): TurnView =>
   createLiveTurn({ requestId, question: 'Pregunta?', mode: 'debate', conversationId: null });
@@ -413,5 +425,287 @@ describe('mergeTurns', () => {
     const pending = createLiveTurn({ requestId: 'y', question: 'c', mode: 'solo', conversationId: 1 });
     const merged = mergeTurns(stored, [pending, liveOld]);
     expect(merged.map((t) => t.key)).toEqual(['t1', 'x', 'y']);
+  });
+});
+
+// ------------------------------------------------ synthesis attempts (A1)
+
+/** A debate without revision rounds (synthesizer: Claude), as the live events build it. */
+function liveDebate(events: TurnEvent[]): TurnView {
+  const t = createLiveTurn({ requestId: events[0]!.request_id, question: 'Pregunta?', mode: 'debate', options: QUICK_DEBATE, conversationId: 8 });
+  applyAll(t, events);
+  return t;
+}
+
+describe('shownSynthesis: the synthesis a debate shows (A1)', () => {
+  const upTo = (events: TurnEvent[], match: (e: TurnEvent) => boolean): TurnEvent[] => events.slice(0, events.findIndex(match));
+  const view = (s: StreamView | null) => (s ? { id: s.id, agent: s.agent, status: s.status, messageId: s.messageId, text: s.text } : null);
+  const same = (s: StreamView | null) => (s ? [s.agent, s.kind, s.round, s.status, s.messageId, s.text] : null);
+
+  it("fallback: the other agent's synthesis (the final message), not the failed first attempt", () => {
+    const t = liveDebate(fallbackSynthesisEvents());
+    expect(synthesisAttempts(t).map((s) => `${s.id}:${s.agent}:${s.status}`)).toEqual(['s1:claude:failed', 's2:chatgpt:done']);
+    expect(t.finalMessageIds).toEqual([63]);
+    expect(view(shownSynthesis(t))).toEqual({ id: 's2', agent: 'chatgpt', status: 'done', messageId: 63, text: 'Síntesi de ChatGPT' });
+  });
+
+  it('degraded: the answer stored as final after both attempts failed', () => {
+    const t = liveDebate(degradedSynthesisEvents());
+    expect(synthesisAttempts(t)).toHaveLength(3);
+    expect(view(shownSynthesis(t))).toEqual({ id: 's3', agent: 'claude', status: 'done', messageId: 63, text: 'Resposta de Claude' });
+  });
+
+  it('while the fallback attempt runs, the attempt in progress', () => {
+    const events = fallbackSynthesisEvents();
+    const streaming = liveDebate(upTo(events, (e) => e.type === 'stream.completed' && e.stream_id === 's2'));
+    expect(view(shownSynthesis(streaming))).toEqual({ id: 's2', agent: 'chatgpt', status: 'streaming', messageId: null, text: 'Síntesi de ChatGPT' });
+    // Done but before turn.completed (no final ids yet): the latest finished attempt.
+    const done = liveDebate(upTo(events, (e) => e.type === 'turn.completed'));
+    expect(done.finalMessageIds).toEqual([]);
+    expect(shownSynthesis(done)?.id).toBe('s2');
+    // Right after the first attempt failed, it is the only one there is.
+    const failed = liveDebate(upTo(events, (e) => e.type === 'stream.started' && e.stream_id === 's2'));
+    expect(shownSynthesis(failed)?.id).toBe('s1');
+  });
+
+  it('prefers the final message over any later attempt', () => {
+    const t = liveDebate(fallbackSynthesisEvents());
+    t.streams.push({ ...t.streams.at(-1)!, id: 'late', messageId: 99, text: 'Una altra' });
+    expect(shownSynthesis(t)?.id).toBe('s2');
+  });
+
+  it('a debate without synthesis shows none; a normal one shows its only attempt', () => {
+    expect(shownSynthesis(liveDebate(upTo(fallbackSynthesisEvents(), (e) => e.type === 'stream.started' && e.stream_id === 's1')))).toBeNull();
+    const t = live();
+    applyAll(t, debateEvents());
+    expect(view(shownSynthesis(t))).toMatchObject({ agent: 'claude', status: 'done', messageId: 47, text: 'Síntesi final' });
+  });
+
+  it('shows the same synthesis live and after a reload', () => {
+    const cases: [TurnEvent[], Message[]][] = [
+      [fallbackSynthesisEvents(), quickDebateMessages({ agent: 'chatgpt', content: 'Síntesi de ChatGPT' })],
+      [degradedSynthesisEvents(), quickDebateMessages({ agent: 'claude', content: 'Resposta de Claude', degraded: true })],
+      [oneSurvivorDebateEvents(), quickDebateMessages({ agent: 'chatgpt', content: 'Resposta de ChatGPT', degraded: true }, ['chatgpt'])],
+    ];
+    for (const [events, messages] of cases) {
+      const l = liveDebate(events);
+      const [stored] = turnsFromMessages(messages, 8);
+      expect(same(shownSynthesis(stored!))).toEqual(same(shownSynthesis(l)));
+      expect(synthesisNote(stored!)).toBe(synthesisNote(l));
+      expect(stored!.status).toBe(l.status);
+    }
+  });
+});
+
+describe("synthesisNote: when the synthesis is not the chosen synthesizer's (A1)", () => {
+
+  it('says who made it after the synthesizer failed', () => {
+    const events = fallbackSynthesisEvents();
+    expect(synthesisNote(liveDebate(events))).toBe("Claude no ha pogut fer la síntesi; l'ha feta ChatGPT.");
+    const streaming = events.slice(0, events.findIndex((e) => e.type === 'stream.completed' && e.stream_id === 's2'));
+    expect(synthesisNote(liveDebate(streaming))).toBe('Claude no ha pogut fer la síntesi; ara la fa ChatGPT.');
+    const [stored] = turnsFromMessages(quickDebateMessages({ agent: 'chatgpt', content: 'Síntesi de ChatGPT' }));
+    expect(synthesisNote(stored!)).toBe("Claude no ha pogut fer la síntesi; l'ha feta ChatGPT.");
+  });
+
+  it('says that nobody could synthesize when an answer was kept instead', () => {
+    expect(synthesisNote(liveDebate(degradedSynthesisEvents()))).toBe(
+      "No s'ha pogut fer la síntesi: es mostra l'última resposta de Claude.",
+    );
+    // An agent failed its first answer: the partner's answer is final, no synthesis is attempted.
+    expect(synthesisNote(liveDebate(oneSurvivorDebateEvents()))).toBe(
+      "No s'ha pogut fer la síntesi: es mostra l'última resposta de ChatGPT.",
+    );
+    const [stored] = turnsFromMessages(quickDebateMessages({ agent: 'claude', content: 'Resposta de Claude', degraded: true }));
+    expect(stored!.streams.at(-1)?.degraded).toBe(true);
+    expect(synthesisNote(stored!)).toBe("No s'ha pogut fer la síntesi: es mostra l'última resposta de Claude.");
+  });
+
+  it('says nothing when the chosen synthesizer made it', () => {
+    const t = live();
+    applyAll(t, debateEvents());
+    expect(synthesisNote(t)).toBeNull();
+    expect(synthesisNote(turnsFromMessages(debateMessages())[0]!)).toBeNull();
+    const [byChatgpt] = turnsFromMessages(
+      quickDebateMessages({ agent: 'chatgpt', content: 'Síntesi' }).map((m) =>
+        m.kind === 'question' ? { ...m, meta: { ...m.meta, options: { ...QUICK_DEBATE, debate: { ...QUICK_DEBATE.debate, synthesizer: 'chatgpt' as const } } } } : m,
+      ),
+    );
+    expect(synthesisNote(byChatgpt!)).toBeNull();
+  });
+});
+
+// ------------------------------------------- truncated answers (N4, N14, A10)
+
+describe('truncated answers', () => {
+  const soloEvents = (completed: Record<string, unknown>) =>
+    sequence('t', [
+      { type: 'turn.started', conversation_id: 1, turn_id: 70, mode: 'solo', new_conversation: false },
+      { type: 'stream.started', stream_id: 'x', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+      { type: 'stream.delta', stream_id: 'x', section: 'text', text: 'Resposta a mitja' },
+      {
+        type: 'stream.completed', stream_id: 'x', message_id: 71, usage: usage(10, 8000), latency_ms: 9, ttft_ms: 1,
+        agreement: null, unchanged: false, ...completed,
+      },
+    ]);
+
+  it('flags the stream the live event marks as truncated', () => {
+    const t = createLiveTurn({ requestId: 't', question: 'q', mode: 'solo', target: 'claude' });
+    applyAll(t, soloEvents({ truncated: true }));
+    expect(t.streams[0]).toMatchObject({ status: 'done', truncated: true, finishReason: null, text: 'Resposta a mitja' });
+
+    const complete = createLiveTurn({ requestId: 't', question: 'q', mode: 'solo', target: 'claude' });
+    applyAll(complete, soloEvents({})); // omitted when false
+    expect(complete.streams[0]?.truncated).toBe(false);
+  });
+
+  it('takes the reason from the live event, as a reload takes it from the meta', () => {
+    const t = createLiveTurn({ requestId: 't', question: 'q', mode: 'solo', target: 'claude' });
+    applyAll(t, soloEvents({ truncated: true, finish_reason: ' max_tokens ' }));
+    expect(t.streams[0]).toMatchObject({ truncated: true, finishReason: 'max_tokens' });
+
+    const odd = createLiveTurn({ requestId: 't', question: 'q', mode: 'solo', target: 'claude' });
+    applyAll(odd, soloEvents({ truncated: true, finish_reason: 7 }));
+    expect(odd.streams[0]?.finishReason).toBeNull();
+  });
+
+  it('keeps the note of an unchanged revision from the live event', () => {
+    const revision = (fields: Record<string, unknown>) =>
+      sequence('u', [
+        { type: 'turn.started', conversation_id: 1, turn_id: 80, mode: 'debate', new_conversation: false },
+        { type: 'stream.started', stream_id: 'r', agent: 'chatgpt', kind: 'revision', round: 1, model: 'm' },
+        {
+          type: 'stream.completed', stream_id: 'r', message_id: 81, usage: usage(5, 5), latency_ms: 1, ttft_ms: 1,
+          agreement: 90, unchanged: false, ...fields,
+        },
+      ]);
+    const kept = createLiveTurn({ requestId: 'u', question: 'q', mode: 'debate' });
+    applyAll(kept, revision({ unchanged: true, unchanged_note: ' ja ho cobria ' }));
+    expect(kept.streams[0]).toMatchObject({ unchanged: true, unchangedNote: 'ja ho cobria' });
+
+    const rewritten = createLiveTurn({ requestId: 'u', question: 'q', mode: 'debate' });
+    applyAll(rewritten, revision({ unchanged: false, unchanged_note: 'nota' }));
+    expect(rewritten.streams[0]?.unchangedNote).toBeNull();
+  });
+
+  it('reads the flag and the reason from the stored meta after a reload', () => {
+    const [t] = turnsFromMessages([
+      message({ id: 70, turn_id: 70, kind: 'question', content: 'q', final: true, meta: { mode: 'solo', target: 'claude' } }),
+      message({
+        id: 71, turn_id: 70, kind: 'answer', agent: 'claude', content: 'Resposta a mitja', final: true,
+        meta: { model: 'm', usage: usage(10, 8000), truncated: true, finish_reason: 'max_tokens' },
+      }),
+    ]);
+    expect(t!.streams[0]).toMatchObject({ truncated: true, finishReason: 'max_tokens' });
+  });
+
+  it('takes only a real true as truncated', () => {
+    const malformed = { truncated: 'yes', finish_reason: 7 } as unknown as MessageMeta;
+    const [t] = turnsFromMessages([
+      message({ id: 1, turn_id: 1, kind: 'answer', agent: 'claude', content: 'a', final: true, meta: malformed }),
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'chatgpt', content: 'b', final: true, meta: {} }),
+    ]);
+    expect(t!.streams.map((s) => [s.truncated, s.finishReason])).toEqual([
+      [false, null],
+      [false, null],
+    ]);
+  });
+});
+
+describe('unchanged revisions with a note (N2)', () => {
+  it('keeps the note of an unchanged revision from the stored meta', () => {
+    const msgs = debateMessages().map((m) =>
+      m.id === 44 ? { ...m, meta: { ...m.meta, unchanged_note: '  my previous answer already covers this ' } } : m,
+    );
+    const [t] = turnsFromMessages(msgs);
+    const r1 = streamsByAgent(t!, 'revision', 1);
+    expect(r1.chatgpt).toMatchObject({ unchanged: true, unchangedNote: 'my previous answer already covers this' });
+    expect(r1.claude?.unchangedNote).toBeNull();
+  });
+
+  it('ignores a note on a revision that changed, and empty notes', () => {
+    const msgs = debateMessages().map((m) =>
+      m.id === 43 ? { ...m, meta: { ...m.meta, unchanged_note: 'nota' } } : m.id === 45 ? { ...m, meta: { ...m.meta, unchanged_note: '  ' } } : m,
+    );
+    const [t] = turnsFromMessages(msgs);
+    expect(streamsByAgent(t!, 'revision', 1).claude?.unchangedNote).toBeNull();
+    expect(streamsByAgent(t!, 'revision', 2).claude?.unchangedNote).toBeNull();
+  });
+});
+
+// -------------------------- revisions that keep the previous answer (review)
+
+describe('keptAnswers: revisions that keep the previous answer', () => {
+  /** The map as "agent round" of each revision -> "agent round" of the stream that wrote its answer. */
+  function describeKept(turn: TurnView): Record<string, string | null> {
+    const name = (s: StreamView) => `${s.agent} ${s.round}`;
+    const byId = new Map(turn.streams.map((s) => [s.id, s]));
+    return Object.fromEntries([...keptAnswers(turn)].map(([id, from]) => [name(byId.get(id)!), from && name(from)]));
+  }
+
+  const liveTurn = (events: TurnEvent[]): TurnView => {
+    const t = live(events[0]!.request_id);
+    applyAll(t, events);
+    return t;
+  };
+
+  it('maps each unchanged revision to the stream that wrote the answer it keeps', () => {
+    const [stored] = turnsFromMessages(debateMessages());
+    // Claude revised in round 1 and kept that revision in round 2; ChatGPT kept its first answer twice.
+    const expected = { 'chatgpt 1': 'chatgpt 0', 'claude 2': 'claude 1', 'chatgpt 2': 'chatgpt 0' };
+    expect(describeKept(stored!)).toEqual(expected);
+    expect(describeKept(liveTurn(debateEvents()))).toEqual(expected);
+  });
+
+  it('includes a revision cut off before its answer, which stores the previous answer again', () => {
+    const [stored] = turnsFromMessages(keptRevisionMessages());
+    const expected = { 'claude 1': 'claude 0', 'chatgpt 1': 'chatgpt 0' };
+    expect(describeKept(stored!)).toEqual(expected);
+    expect(streamsByAgent(stored!, 'revision', 1).claude).toMatchObject({ unchanged: false, truncated: true });
+    // Live, the engine streams the kept answer again (without the first answer's final line break).
+    expect(describeKept(liveTurn(keptRevisionEvents()))).toEqual(expected);
+  });
+
+  it('leaves out revisions that wrote a new answer, even one that was cut off', () => {
+    const msgs = keptRevisionMessages().map((m) => (m.id === 83 ? { ...m, content: 'Hola món, amb més con' } : m));
+    const [t] = turnsFromMessages(msgs);
+    expect(describeKept(t!)).toEqual({ 'chatgpt 1': 'chatgpt 0' });
+  });
+
+  it('skips a failed revision: the next one keeps the answer from before it', () => {
+    const events = sequence('kf', [
+      { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'debate', new_conversation: false },
+      { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+      { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'Primera' },
+      { type: 'stream.completed', stream_id: 'c0', message_id: 2, usage: usage(1, 1), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+      { type: 'stream.started', stream_id: 'c1', agent: 'claude', kind: 'revision', round: 1, model: 'm' },
+      { type: 'stream.delta', stream_id: 'c1', section: 'answer', text: 'Primera' },
+      { type: 'stream.failed', stream_id: 'c1', error: { kind: 'timeout', message: 'Temps esgotat' } },
+      { type: 'stream.started', stream_id: 'c2', agent: 'claude', kind: 'revision', round: 2, model: 'm' },
+      { type: 'stream.delta', stream_id: 'c2', section: 'answer', text: 'Primera' },
+      { type: 'stream.completed', stream_id: 'c2', message_id: 3, usage: usage(1, 1), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
+    ]);
+    expect(describeKept(liveTurn(events))).toEqual({ 'claude 2': 'claude 0' });
+  });
+
+  it('waits for a revision to finish: a new answer may begin with the previous one', () => {
+    const events = sequence('kw', [
+      { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'debate', new_conversation: false },
+      { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+      { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'Primera' },
+      { type: 'stream.completed', stream_id: 'c0', message_id: 2, usage: usage(1, 1), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+      { type: 'stream.started', stream_id: 'c1', agent: 'claude', kind: 'revision', round: 1, model: 'm' },
+      { type: 'stream.delta', stream_id: 'c1', section: 'answer', text: 'Primera\n\n' },
+      { type: 'stream.delta', stream_id: 'c1', section: 'answer', text: 'I una millora.' },
+      { type: 'stream.completed', stream_id: 'c1', message_id: 3, usage: usage(1, 1), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
+    ]);
+    // While it streams, its text is the previous answer for a moment.
+    expect(describeKept(liveTurn(events.slice(0, 6)))).toEqual({});
+    expect(describeKept(liveTurn(events))).toEqual({});
+  });
+
+  it('is empty for turns without revisions', () => {
+    expect(keptAnswers(liveTurn(fallbackSynthesisEvents())).size).toBe(0);
+    expect(keptAnswers(turnsFromMessages(compactedDuelMessages())[0]!).size).toBe(0);
   });
 });

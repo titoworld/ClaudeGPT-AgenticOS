@@ -17,9 +17,14 @@ MESSAGE_OVERHEAD_TOKENS = 4
 
 def estimate_tokens(text: str) -> int:
     """Approximate token count of ``text``: ceil(chars / 4), at least 1 if not empty."""
-    if not text:
+    return tokens_for_chars(len(text))
+
+
+def tokens_for_chars(chars: int) -> int:
+    """:func:`estimate_tokens` of a text of ``chars`` characters (for running counts)."""
+    if chars <= 0:
         return 0
-    return max(1, -(-len(text) // CHARS_PER_TOKEN))
+    return max(1, -(-chars // CHARS_PER_TOKEN))
 
 
 def estimate_turns_tokens(turns: Iterable[ChatTurn]) -> int:

@@ -132,6 +132,29 @@ class _Outcome:
     critique: str | None = None
     agreement: int | None = None
     error: ProviderError | None = None
+    truncated: bool = False
+    """The reply was cut off (its message carries ``truncated`` in its meta)."""
+    finish_reason: str | None = None
+    kept: bool = False
+    """A revision whose content is the previous answer (UNCHANGED, or cut off before
+    its answer): the previous answer's completeness still applies."""
+
+
+@dataclass(slots=True)
+class _Answers:
+    """The latest answer of each agent in a debate and whether it was cut off."""
+
+    text: dict[AgentName, str]
+    cut: dict[AgentName, str | None]
+    """Agents whose latest answer is incomplete, with the finish reason (may be None)."""
+
+    def take(self, outcome: _Outcome) -> None:
+        self.text[outcome.agent] = outcome.content
+        if not outcome.kept:
+            if outcome.truncated:
+                self.cut[outcome.agent] = outcome.finish_reason
+            else:
+                self.cut.pop(outcome.agent, None)
 
 
 @dataclass(slots=True)
@@ -160,6 +183,8 @@ class _Turn:
     final_ids: list[int] = field(default_factory=list)
     failed_agents: set[AgentName] = field(default_factory=set)
     degraded: bool = False
+    truncated: bool = False
+    """A stored message of the turn was cut off: the turn is never cached."""
     background: set[asyncio.Task[None]] = field(default_factory=set)
 
     @property
@@ -198,6 +223,30 @@ def _set_unstored(meta: dict[str, JsonValue], accounting: TurnAccounting) -> Non
     (a billed failure after the last final message of a duel is on none)."""
     if is_billed(accounting.unstored):
         meta["unstored_usage"] = _usage_json(accounting.unstored)
+
+
+def _meta_text(meta: Mapping[str, JsonValue], key: str) -> str | None:
+    """A non-empty string field of a stored message's meta, else None."""
+    value = meta.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _set_truncated(meta: dict[str, JsonValue], finish_reason: str | None) -> None:
+    """Meta of a message whose reply was cut off: a usable partial answer."""
+    meta["truncated"] = True
+    if finish_reason:
+        meta["finish_reason"] = finish_reason
+
+
+def _empty_reply_message(result: GenerationResult) -> str:
+    """Error message of a billed reply that left nothing to store."""
+    if not result.truncated:
+        return "El model ha retornat una resposta buida."
+    if result.finish_reason == "max_tokens":
+        return "El model ha esgotat el límit de sortida abans d'escriure cap resposta."
+    if result.finish_reason == "content_filter":
+        return "El filtre de contingut ha aturat la resposta abans que el model escrivís res."
+    return "La resposta del model s'ha interromput abans d'escriure res."
 
 
 def _cost_basis(mode: ProviderMode, usage: Usage) -> str | None:
@@ -488,7 +537,7 @@ class Engine:
             conversation_id=turn.conversation_id,
             providers=self._providers,
             store=self._store,
-            max_output_tokens=self._config.max_output_tokens,
+            max_output_tokens=self._config.summary_max_output_tokens,
             models=turn.request.fast_models,
             price_overrides=turn.prices,
         )
@@ -504,7 +553,9 @@ class Engine:
     async def _finish(self, turn: _Turn, consensus: Consensus | None, cache_key: str) -> None:
         accounting = turn.accounting
         await self._record_savings(turn)
-        if not turn.degraded and not turn.failed_agents and turn.stored:
+        # Only whole, complete turns are replayed: never one with a failed, degraded or
+        # cut-off message.
+        if not turn.degraded and not turn.failed_agents and not turn.truncated and turn.stored:
             try:
                 await self._store.cache_put(
                     cache_key,
@@ -606,16 +657,16 @@ class Engine:
         if not survivors:
             self._fail_all(turn, outcomes)
             return None
+        answers = _Answers(text={}, cut={})
+        for agent in survivors:
+            answers.take(outcomes[agent])
         if len(survivors) == 1:
             # One agent is down: its partner's answer becomes the final one, no more calls.
             consensus = Consensus(reached=False, round=0, scores={})
             turn.emit(PhaseChanged(turn.request_id, "synthesis", 0))
-            await self._store_degraded_synthesis(
-                turn, survivors[0], outcomes[survivors[0]].content, 0, consensus
-            )
+            await self._store_degraded_synthesis(turn, survivors[0], answers, 0, consensus)
             return consensus
 
-        answers: dict[AgentName, str] = {agent: outcomes[agent].content for agent in AGENTS}
         critiques: dict[AgentName, str | None] = dict.fromkeys(AGENTS)
         scores: dict[AgentName, int] = {}
         reached = False
@@ -623,7 +674,7 @@ class Engine:
         for round_ in range(1, rounds + 1):
             turn.emit(PhaseChanged(turn.request_id, "revision", round_))
             self._prewarm_next(turn, revision=round_ < rounds)
-            previous = dict(answers)
+            previous = _Answers(text=dict(answers.text), cut=dict(answers.cut))
             outcomes = await self._parallel(
                 {
                     agent: self._call(
@@ -633,7 +684,7 @@ class Engine:
                         round_=round_,
                         request=self._revision_request(turn, agent, previous),
                         final=False,
-                        previous=previous[agent],
+                        previous=previous.text[agent],
                     )
                     for agent in AGENTS
                 }
@@ -643,7 +694,7 @@ class Engine:
             for agent, outcome in outcomes.items():
                 if not outcome.ok:
                     continue  # keep that agent's last answer
-                answers[agent] = outcome.content
+                answers.take(outcome)
                 critiques[agent] = outcome.critique
                 if outcome.agreement is not None:
                     round_scores[agent] = outcome.agreement
@@ -665,7 +716,7 @@ class Engine:
     async def _synthesize(
         self,
         turn: _Turn,
-        answers: Mapping[AgentName, str],
+        answers: _Answers,
         critiques: Mapping[AgentName, str | None],
         round_: int,
         consensus: Consensus,
@@ -674,7 +725,7 @@ class Engine:
         order = [synthesizer, other_agent(synthesizer)]
         if synthesizer in turn.failed_agents:
             order.reverse()  # it already failed in this turn: try the other one first
-        prompt = synthesis_prompt(turn.question, answers, critiques)
+        prompt = synthesis_prompt(turn.question, answers.text, critiques, answers.cut)
         extra: dict[str, JsonValue] = {"consensus": _consensus_json(consensus)}
         for agent in order:
             outcome = await self._call(
@@ -689,7 +740,7 @@ class Engine:
             if outcome.ok:
                 return
         # Nobody could synthesize: the latest answer of the healthier agent is final.
-        await self._store_degraded_synthesis(turn, order[0], answers[order[0]], round_, consensus)
+        await self._store_degraded_synthesis(turn, order[0], answers, round_, consensus)
 
     def _fail_all(self, turn: _Turn, outcomes: Mapping[AgentName, _Outcome]) -> None:
         kinds = {outcome.error.kind for outcome in outcomes.values() if outcome.error}
@@ -702,12 +753,15 @@ class Engine:
         self,
         turn: _Turn,
         agent: AgentName,
-        content: str,
+        answers: _Answers,
         round_: int,
         consensus: Consensus,
     ) -> None:
-        """Store an existing answer as the final one, without calling any model."""
+        """Store an existing answer as the final one, without calling any model (it keeps
+        the mark of an answer that was cut off)."""
         turn.degraded = True
+        content = answers.text[agent]
+        truncated = agent in answers.cut
         stream_id = uuid.uuid4().hex
         model = self._model_name(turn, agent)
         turn.emit(StreamStarted(turn.request_id, stream_id, agent, "synthesis", round_, model))
@@ -722,6 +776,9 @@ class Engine:
             "consensus": _consensus_json(consensus),
             "savings": _savings_json(turn.accounting.savings()),
         }
+        if truncated:
+            _set_truncated(meta, answers.cut[agent])
+            turn.truncated = True
         _set_unstored(meta, turn.accounting)
         message_id = await self._store.add_message(
             NewMessage(
@@ -736,7 +793,18 @@ class Engine:
             )
         )
         turn.final_ids.append(message_id)
-        turn.emit(StreamCompleted(turn.request_id, stream_id, message_id, Usage(), 0, None))
+        turn.emit(
+            StreamCompleted(
+                turn.request_id,
+                stream_id,
+                message_id,
+                Usage(),
+                0,
+                None,
+                truncated=truncated,
+                finish_reason=answers.cut[agent] if truncated else None,
+            )
+        )
 
     # -- cache replay ------------------------------------------------------------------
 
@@ -798,6 +866,9 @@ class Engine:
                         else None
                     ),
                     unchanged=meta.get("unchanged") is True,
+                    truncated=meta.get("truncated") is True,
+                    finish_reason=_meta_text(meta, "finish_reason"),
+                    unchanged_note=_meta_text(meta, "unchanged_note"),
                 )
             )
         if turn.request.mode == "debate" and consensus is None:
@@ -830,20 +901,29 @@ class Engine:
             purpose=purpose,
             model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
+            reasoning="default",
         )
 
     def _revision_request(
-        self, turn: _Turn, agent: AgentName, answers: Mapping[AgentName, str]
+        self, turn: _Turn, agent: AgentName, answers: _Answers
     ) -> GenerationRequest:
-        """Self-contained revision request: question + both answers, no history."""
+        """Self-contained revision request: question + both answers (marked when cut
+        off), no history."""
+        other = other_agent(agent)
         return GenerationRequest(
             system=system_prompt(agent),
             prompt=revision_prompt(
-                agent, turn.question, answers[agent], answers[other_agent(agent)]
+                agent,
+                turn.question,
+                answers.text[agent],
+                answers.text[other],
+                own_incomplete=agent in answers.cut,
+                other_incomplete=other in answers.cut,
             ),
             purpose="revision",
             model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
+            reasoning="default",
         )
 
     def _prewarm_next(self, turn: _Turn, *, revision: bool) -> None:
@@ -856,6 +936,7 @@ class Engine:
                     purpose="revision",
                     model=turn.request.models.get(agent),
                     max_output_tokens=self._config.max_output_tokens,
+                    reasoning="default",
                 )
                 self._prewarm(turn, agent, request)
         else:
@@ -962,6 +1043,8 @@ class Engine:
         critique: str | None = None
         agreement: int | None = None
         unchanged = False
+        note: str | None = None
+        kept = False
         if parser is not None:
             for section, text in parser.close():
                 turn.emit(StreamDelta(turn.request_id, stream_id, section, text))
@@ -975,12 +1058,14 @@ class Engine:
                 # UNCHANGED keeps the answer on purpose; a reply cut off before its
                 # answer (or without one) keeps it too, so the debate goes on, but it is
                 # not reported as unchanged. Show it again so the live view matches.
-                unchanged = parsed.unchanged
+                unchanged, note, kept = parsed.unchanged, parsed.unchanged_note, True
                 content = previous or ""
                 if content:
                     turn.emit(StreamDelta(turn.request_id, stream_id, "answer", content))
         else:
             content = result.text.strip()
+        if result.truncated:
+            logger.info("The reply of %s (%s) was cut off: %s", agent, kind, result.finish_reason)
 
         usage = replace(
             result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, turn.prices)
@@ -988,7 +1073,7 @@ class Engine:
         if not content:
             # Billed all the same: it counts in the turn's usage (not in its savings).
             turn.accounting.add_unstored(usage)
-            error = ProviderError("El model ha retornat una resposta buida.", kind="invalid")
+            error = ProviderError(_empty_reply_message(result), kind="invalid")
             await self._record_usage(
                 turn,
                 agent,
@@ -1026,8 +1111,14 @@ class Engine:
         }
         if basis := _cost_basis(provider.mode, usage):
             meta["cost_basis"] = basis
+        if result.truncated:
+            # A usable partial answer, never a complete one: shown as such, never cached.
+            _set_truncated(meta, result.finish_reason)
+            turn.truncated = True
         if kind == "revision":
             meta.update(critique=critique or "", agreement=agreement, unchanged=unchanged)
+            if note:
+                meta["unchanged_note"] = note
         if extra_meta:
             meta.update(extra_meta)
         if final:
@@ -1060,10 +1151,20 @@ class Engine:
                 agreement=agreement,
                 unchanged=unchanged,
                 cost_basis=_cost_basis(provider.mode, usage),
+                truncated=result.truncated,
+                finish_reason=result.finish_reason if result.truncated else None,
+                unchanged_note=note,
             )
         )
         return _Outcome(
-            agent=agent, ok=True, content=content, critique=critique, agreement=agreement
+            agent=agent,
+            ok=True,
+            content=content,
+            critique=critique,
+            agreement=agreement,
+            truncated=result.truncated,
+            finish_reason=result.finish_reason if result.truncated else None,
+            kept=kept,
         )
 
     async def _stream(

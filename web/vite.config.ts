@@ -18,8 +18,10 @@ const CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [svelte()],
+  // Component tests mount Svelte in jsdom, which needs its browser build (Vitest runs in mode "test").
+  resolve: mode === 'test' ? { conditions: ['browser'] } : undefined,
   build: {
     target: 'es2022',
     // The three.js chunk (~540 kB) is lazy-loaded after the first paint.
@@ -44,4 +46,4 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     passWithNoTests: true,
   },
-});
+}));

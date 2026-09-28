@@ -40,6 +40,10 @@ function stream(partial: Partial<StreamView>): StreamView {
     unchanged: false,
     cached: false,
     costBasis: null,
+    truncated: false,
+    finishReason: null,
+    unchangedNote: null,
+    degraded: false,
     ...partial,
   };
 }

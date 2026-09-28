@@ -157,9 +157,11 @@ def test_calls_without_a_message_count_in_the_usage_only() -> None:
 
 
 def test_a_failed_call_keeps_the_usage_it_says_it_billed() -> None:
-    class Billed(ProviderError):
+    class Billed(Exception):
+        """Any exception that says what it billed (read defensively: it may be malformed)."""
+
         def __init__(self, usage: object, model: object) -> None:
-            super().__init__("declined", kind="invalid")
+            super().__init__("declined")
             self.usage = usage
             self.model = model
 
@@ -197,3 +199,11 @@ def test_cache_key_keeps_newlines_and_indentation() -> None:
     assert key("- a\n- b") != key("- a - b")
     assert key(outside) == key("\n  " + outside.replace("\n", "\r\n") + "  \n")
     assert normalize_question("a\r\n  b\rc") == "a\n  b\nc"
+
+
+def test_a_provider_error_can_carry_its_billed_usage() -> None:
+    billed = Usage(input_tokens=10, output_tokens=16_000, reasoning_tokens=16_000)
+    error = ProviderError("límit", kind="invalid", usage=billed, model="opus")
+    model, usage = failed_call_usage(error, "asked", PRICES)
+    assert model == "opus"
+    assert usage == replace(billed, cost_usd=estimate_cost_usd("opus", billed, PRICES))

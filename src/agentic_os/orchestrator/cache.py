@@ -13,9 +13,11 @@ from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 
-CACHE_KEY_VERSION = 2
+CACHE_KEY_VERSION = 3
 """Bump when prompts, the replay format or the key itself change, to invalidate old
-entries (2: the question keeps its inner whitespace)."""
+entries (2: the question keeps its inner whitespace; 3: earlier entries may hold replies
+that were cut off, duplicated by a Codex retry or mangled by the revision parser, which
+are no longer stored as complete or cached)."""
 
 
 def _digest(payload: object) -> str:

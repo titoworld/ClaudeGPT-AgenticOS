@@ -6,12 +6,19 @@ so each call re-reads the prefix the previous one wrote. Models of the 4.6 gener
 on run with adaptive thinking (text omitted) and an effort per call purpose; older
 Claude 4 / 3.7 models get a thinking budget instead, and Haiku or unknown ids run
 without thinking (what each model accepts comes from the Models API when it says so).
-Opus 5 / Opus 5.5 / Fable requests opt into server-side refusal fallbacks.
+A request with reasoning "off" disables thinking. ``max_tokens`` is the request's billed
+output budget exactly (thinking included), never raised. Opus 5 / Opus 5.5 / Fable
+requests opt into server-side refusal fallbacks.
 
 Usage is what Anthropic bills: a refusal still bills its input and any streamed output
 (and, before any output, the categories in ``BILLED_BEFORE_OUTPUT``), so a refusal
 raises :class:`RefusalError` carrying that usage, and a turn served by a fallback model
 also counts the billed attempts of the models that declined before it.
+
+A reply cut at ``max_tokens`` is a truncated result (an error with its billed usage when
+no text came at all). A stream that drops (anthropic does not wrap the httpx2 errors it
+meets while reading the body) or ends without its final events is a retryable
+"interrupted" error, never a complete answer.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import anthropic
+import httpx2
 from anthropic import Omit, omit
 from anthropic.types import ModelCapabilities
 from anthropic.types.beta import (
@@ -52,6 +60,7 @@ from agentic_os.providers.claude_cli import (
     family_description,
     is_haiku,
     redact,
+    refusal_error,
 )
 from agentic_os.providers.prompt_format import to_chat_messages
 
@@ -59,10 +68,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_FAST_MODEL = "claude-haiku-4-5"
-MIN_THINKING_MAX_TOKENS = 16_000
-"""max_tokens caps thinking and visible text together on thinking models."""
 THINKING_BUDGET_BY_EFFORT: dict[Effort, int] = {"low": 2_048, "medium": 4_096, "high": 8_192}
-"""budget_tokens for models without adaptive thinking (at least 1024, below max_tokens)."""
+"""budget_tokens for models without adaptive thinking (at most half of max_tokens, which
+caps thinking and visible text together)."""
+MIN_THINKING_BUDGET = 1_024
+"""The smallest budget_tokens Anthropic accepts: a smaller output budget runs without
+thinking rather than being raised."""
+INTERRUPTED_MESSAGE = "La resposta de Claude s'ha interromput."
+COMPLETE_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
+"""Stop reasons of a complete reply; any other one (but a refusal) is a truncated one."""
 
 FALLBACK_MODELS = frozenset(
     {"claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1"}
@@ -148,20 +162,6 @@ def support_from_capabilities(
     return ModelSupport(mode, effort=takes_effort)
 
 
-class RefusalError(ProviderError):
-    """Claude declined the request (``stop_reason: "refusal"``).
-
-    Anthropic may still bill it: ``usage`` holds the billed tokens (all zero when
-    nothing is billed) and ``model`` the model that returned the refusal, so the call's
-    cost can be recorded (read them with ``getattr(exc, "usage", None)``).
-    """
-
-    def __init__(self, message: str, *, usage: Usage, model: str) -> None:
-        super().__init__(message, kind="invalid")
-        self.usage = usage
-        self.model = model
-
-
 def _attempt_billed(output_tokens: int, category: str | None) -> bool:
     return output_tokens > 0 or category in BILLED_BEFORE_OUTPUT
 
@@ -229,6 +229,10 @@ def billed_usage(message: BetaMessage) -> Usage:
                 cache_write_tokens=_tokens(entry, "cache_creation_input_tokens"),
             )
     return billed
+
+
+def _interrupted() -> ProviderError:
+    return ProviderError(INTERRUPTED_MESSAGE, kind="unavailable", retryable=True)
 
 
 def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...]:
@@ -358,17 +362,17 @@ class ClaudeApiProvider:
         model = self._model(request)
         support = self.support(model)
         effort = EFFORT_BY_PURPOSE[request.purpose]
-        max_tokens = (
-            max(request.max_output_tokens, MIN_THINKING_MAX_TOKENS)
-            if support.thinking != "none"
-            else request.max_output_tokens
-        )
+        # The billed output budget, thinking included: sent as it is, never raised.
+        max_tokens = request.max_output_tokens
         thinking: BetaThinkingConfigParam | Omit = omit
-        if support.thinking == "adaptive":
+        if support.thinking != "none" and request.reasoning == "off":
+            thinking = {"type": "disabled"}
+        elif support.thinking == "adaptive":
             thinking = {"type": "adaptive", "display": "omitted"}
         elif support.thinking == "budget":
             budget = min(THINKING_BUDGET_BY_EFFORT[effort], max_tokens // 2)
-            thinking = {"type": "enabled", "budget_tokens": budget}
+            if budget >= MIN_THINKING_BUDGET:
+                thinking = {"type": "enabled", "budget_tokens": budget}
         fallbacks = model in FALLBACK_MODELS
         system: list[BetaTextBlockParam] = []
         if request.system:
@@ -411,27 +415,51 @@ class ClaudeApiProvider:
                             ttft_ms = int((time.monotonic() - started) * 1000)
                         chunks.append(event.text)
                         yield TextDelta(event.text)
-                final = await self._with_deadline(stream.get_final_message(), deadline)
+                try:
+                    final = await self._with_deadline(stream.get_final_message(), deadline)
+                except AssertionError:  # the body ended before message_start
+                    raise _interrupted() from None
         except anthropic.APIError as exc:
             raise map_api_error(exc) from exc
+        except httpx2.TimeoutException:
+            seconds = self._settings.provider_timeout_seconds
+            raise ProviderError(
+                f"Claude no ha respost a temps ({seconds:g} s).", kind="timeout"
+            ) from None
+        except httpx2.RequestError as exc:
+            # anthropic does not wrap what httpx2 raises while reading the body
+            # (RemoteProtocolError, ReadError...): the connection dropped mid-reply.
+            raise _interrupted() from exc
         latency_ms = int((time.monotonic() - started) * 1000)
 
+        stop_reason = final.stop_reason
+        if stop_reason is None:
+            # The body ended cleanly but without message_delta/message_stop.
+            raise _interrupted()
         # No cost here: the engine prices every call (owner price overrides included).
         usage = billed_usage(final)
-        if final.stop_reason == "refusal":
-            category = _category(final.stop_details)
-            reason = f" (categoria: {category})" if category else ""
-            raise RefusalError(
-                f"Claude ha declinat respondre aquesta petició{reason}.",
+        if stop_reason == "refusal":
+            raise refusal_error(usage, final.model, _category(final.stop_details))
+        text = "".join(chunks)
+        truncated = stop_reason not in COMPLETE_STOP_REASONS
+        if truncated and not text.strip():
+            raise ProviderError(
+                f"Claude ha esgotat el límit de sortida de {max_tokens} tokens (raonament "
+                "inclòs) abans d'escriure cap resposta."
+                if stop_reason == "max_tokens"
+                else f"La resposta de Claude s'ha aturat abans d'escriure res ({stop_reason}).",
+                kind="invalid",
                 usage=usage,
                 model=final.model,
             )
         yield GenerationResult(
-            text="".join(chunks),
+            text=text,
             usage=usage,
             model=final.model,
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,
+            truncated=truncated,
+            finish_reason=stop_reason if truncated else None,
         )
 
     async def _with_deadline[T](self, operation: Awaitable[T], deadline: float) -> T:

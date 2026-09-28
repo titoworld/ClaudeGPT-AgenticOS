@@ -73,6 +73,8 @@ Amb `AOS_CLAUDE_MODE=cli` fa servir la CLI `claude` que tinguis instal·lada i a
 | Frontend: comprovació, tests, build | `cd web && npm run check && npm test && npm run build` |
 | Frontend amb recàrrega | `cd web && npm run dev`, amb el backend a `uv run agentic-os serve --dev` i `AOS_EXTRA_ORIGINS='["http://localhost:5173"]'` |
 
+Els tests del frontend (vitest) cobreixen la lògica i també els components, que es munten a jsdom amb `web/src/lib/test-render.ts`.
+
 La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les del frontend i la construcció de la imatge Docker a cada pull request.
 
 ## Estructura

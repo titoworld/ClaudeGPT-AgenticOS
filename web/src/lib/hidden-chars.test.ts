@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_MARKS, MAX_MARKS_PER_BLOCK, revealHidden, revealHiddenMarkdown } from './hidden-chars';
+import { MAX_MARKS, MAX_MARKS_PER_BLOCK, revealHidden, revealHiddenMarkdown, revealHiddenParts } from './hidden-chars';
 
 // Trojan Source (CVE-2021-42574) and tag smuggling: the characters the listed set covers.
 const LISTED_HIDDEN = [
@@ -152,5 +152,34 @@ describe('whole-answer copy where the source scanner and marked disagree', () =>
   it('keeps a joiner inside a word and marks a run used to smuggle data', () => {
     expect(revealHiddenMarkdown('می‌خواهم').text).toBe('می‌خواهم');
     expect(revealHiddenMarkdown('a‌‍‌‍b').text).toBe('a‌⟨U+200D⟩⟨U+200C⟩‍b');
+  });
+});
+
+describe('revealHiddenParts (model text shown outside Markdown)', () => {
+  const title = (cp: string) => `Caràcter invisible o de control de direcció (${cp})`;
+
+  it('splits the text around one mark per hidden character, with the rules of prose', () => {
+    expect(revealHiddenParts('ja hi és\u202E exe.txt\u200B!')).toEqual([
+      'ja hi és',
+      { text: '⟨U+202E⟩', title: title('U+202E'), collapsed: false },
+      ' exe.txt',
+      { text: '⟨U+200B⟩', title: title('U+200B'), collapsed: false },
+      '!',
+    ]);
+  });
+
+  it('leaves plain text, directional marks and joiners inside words alone', () => {
+    expect(revealHiddenParts('sense canvis')).toEqual(['sense canvis']);
+    const legit = 'می\u200Cخواهم שלום\u200F 👩\u200D💻';
+    expect(revealHiddenParts(legit)).toEqual([legit]);
+  });
+
+  it('collapses a smuggled payload into one mark with the count', () => {
+    const payload = String.fromCodePoint(0xe0041).repeat(MAX_MARKS_PER_BLOCK + 1);
+    expect(revealHiddenParts(`a${payload}b`)).toEqual([
+      'a',
+      expect.objectContaining({ text: `⟨${MAX_MARKS_PER_BLOCK + 1} caràcters invisibles eliminats⟩`, collapsed: true }),
+      'b',
+    ]);
   });
 });

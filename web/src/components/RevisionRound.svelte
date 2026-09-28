@@ -8,7 +8,9 @@
   import AgreementMeter from './AgreementMeter.svelte';
   import Icon from './Icon.svelte';
   import Markdown from './Markdown.svelte';
+  import PlainText from './PlainText.svelte';
   import StreamStatus from './StreamStatus.svelte';
+  import TruncationNote from './TruncationNote.svelte';
 
   interface Props {
     round: number;
@@ -16,9 +18,15 @@
     threshold: number;
     /** Whether the turn is still running. */
     active: boolean;
+    /**
+     * Revisions of the turn that keep the previous answer (`keptAnswers`), with the
+     * stream that wrote it: their content is that answer, not a revised one, so a
+     * cut-off reply marks the revision, and the answer only if it was cut before.
+     */
+    kept: ReadonlyMap<string, StreamView | null>;
   }
 
-  let { round, streams, threshold, active }: Props = $props();
+  let { round, streams, threshold, active, kept }: Props = $props();
 
   const byAgent = $derived(
     Object.fromEntries(streams.map((s) => [s.agent, s])) as Partial<Record<Agent, StreamView>>,
@@ -47,13 +55,24 @@
   <div class="cols">
     {#each AGENTS as agent (agent)}
       {@const s = byAgent[agent]}
+      {@const keeps = !!s && (s.unchanged || kept.has(s.id))}
+      {@const from = s ? kept.get(s.id) : undefined}
+      {@const cut = s?.status === 'done' && s.truncated}
       <section class="col {agent}" aria-label="Revisió de {AGENT_LABEL[agent]}">
         <header>
           <AgentLabel {agent} size={16} />
           {#if s?.unchanged}
             <span class="chip good"><Icon name="check" size={12} />Sense canvis</span>
+            {#if s.unchangedNote}
+              <span class="unchanged-note"
+                ><span class="sr-only">Nota del model:</span> «<PlainText text={s.unchangedNote} />»</span>
+            {/if}
           {/if}
-          {#if s && s.status !== 'done'}<StreamStatus status={s.status} />{/if}
+          {#if cut}
+            <StreamStatus status="truncated" />
+          {:else if s && s.status !== 'done'}
+            <StreamStatus status={s.status} />
+          {/if}
           {#if !s && active}<StreamStatus status="waiting" />{/if}
         </header>
         <AgreementMeter {agent} value={s?.agreement ?? null} {threshold} />
@@ -66,11 +85,26 @@
         {#if s?.status === 'failed'}
           <p class="problem"><Icon name="alert" size={14} />{s.error?.message ?? 'Error'}</p>
         {/if}
-        {#if s?.text && !s.unchanged}
+        {#if s?.text && !keeps}
           <details class="revised" open={s.status === 'streaming'}>
             <summary>Resposta revisada</summary>
             <Markdown text={s.text} streaming={s.status === 'streaming'} />
           </details>
+        {/if}
+        {#if cut && keeps}
+          <!-- What was cut is the critique or the new answer: the answer kept is not. -->
+          <TruncationNote
+            lead="Revisió incompleta"
+            reason={s.finishReason}
+            detail="Es manté la resposta anterior."
+            compact />
+        {:else if cut}
+          <TruncationNote reason={s.finishReason} compact />
+        {:else if keeps && !s.unchanged}
+          <p class="kept-note"><Icon name="info" size={14} />Es manté la resposta anterior.</p>
+        {/if}
+        {#if s?.status === 'done' && keeps && from?.truncated}
+          <TruncationNote lead="La resposta que es manté és incompleta" reason={from.finishReason} compact />
         {/if}
       </section>
     {/each}
@@ -184,6 +218,14 @@
     gap: 0.5rem;
   }
 
+  .unchanged-note {
+    min-width: 0;
+    font-size: var(--text-xs);
+    font-style: italic;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+
   h4 {
     margin: 0 0 0.3rem;
     font-size: var(--text-xs);
@@ -218,6 +260,14 @@
     gap: 0.4rem;
     font-size: var(--text-sm);
     color: #ffb3ba;
+  }
+
+  .kept-note {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
 
   @media (max-width: 720px) {

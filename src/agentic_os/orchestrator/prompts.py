@@ -9,11 +9,14 @@ The embedded texts (the question, the answers, the critiques) go through
 ``neutralize_tags``: another model's answer, or a page the owner pasted, cannot close
 a section and pass itself off as the owner's instructions. Every tag used here must be
 in ``RESERVED_TAGS`` (a test checks it).
+
+An answer that was cut off (a truncated reply) can still feed the revisions and the
+synthesis, but it is marked as incomplete after its text (:data:`INCOMPLETE_NOTE`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from agentic_os.domain import AGENTS, AgentName, other_agent
 from agentic_os.providers.prompt_format import AGENT_LABELS, neutralize_tags
@@ -107,6 +110,21 @@ preferences stated by the user and open questions.
 Reply with the summary only."""
 
 
+INCOMPLETE_NOTE = "[Note: this answer was cut off before its end, so it is incomplete.]"
+"""Appended to an answer whose reply was cut off (output limit, content filter...)."""
+
+OWN_INCOMPLETE_NOTE = (
+    "[Note: your previous answer was cut off before its end, so it is incomplete: write "
+    "your complete improved answer instead of UNCHANGED.]"
+)
+"""Appended to the reviewing agent's own previous answer when it was cut off."""
+
+
+def _marked(text: str, incomplete: bool, note: str = INCOMPLETE_NOTE) -> str:
+    """``text`` (already neutralized) with ``note`` after it when it is incomplete."""
+    return f"{text}\n\n{note}" if incomplete else text
+
+
 def system_prompt(agent: AgentName) -> str:
     """The agent's system prompt, identical for every purpose (best cache reuse)."""
     return SYSTEM_PROMPTS[agent]
@@ -119,15 +137,24 @@ def debate_answer_prompt(agent: AgentName, question: str) -> str:
     )
 
 
-def revision_prompt(agent: AgentName, question: str, own_answer: str, other_answer: str) -> str:
-    """Self-contained revision prompt: the question and the two latest answers, no history."""
+def revision_prompt(
+    agent: AgentName,
+    question: str,
+    own_answer: str,
+    other_answer: str,
+    *,
+    own_incomplete: bool = False,
+    other_incomplete: bool = False,
+) -> str:
+    """Self-contained revision prompt: the question and the two latest answers, no history
+    (an answer that was cut off is marked as incomplete)."""
     other = other_agent(agent)
     return REVISION_TEMPLATE.format(
         other=AGENT_LABELS[other],
         other_tag=other,
         question=neutralize_tags(question),
-        own_answer=neutralize_tags(own_answer),
-        other_answer=neutralize_tags(other_answer),
+        own_answer=_marked(neutralize_tags(own_answer), own_incomplete, OWN_INCOMPLETE_NOTE),
+        other_answer=_marked(neutralize_tags(other_answer), other_incomplete),
     )
 
 
@@ -135,11 +162,13 @@ def synthesis_prompt(
     question: str,
     answers: Mapping[AgentName, str],
     critiques: Mapping[AgentName, str | None],
+    incomplete: Collection[AgentName] = (),
 ) -> str:
-    """Synthesis prompt: the question, both final answers and the last critiques
-    (empty or "None" critiques are left out)."""
+    """Synthesis prompt: the question, both final answers (the ones in ``incomplete``
+    marked as cut off) and the last critiques (empty or "None" critiques are left out)."""
     parts = [
-        f'<answer from="{AGENT_LABELS[agent]}">\n{neutralize_tags(answers[agent])}\n</answer>'
+        f'<answer from="{AGENT_LABELS[agent]}">\n'
+        f"{_marked(neutralize_tags(answers[agent]), agent in incomplete)}\n</answer>"
         for agent in AGENTS
         if agent in answers
     ]

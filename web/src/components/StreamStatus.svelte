@@ -4,7 +4,8 @@
   import Icon from './Icon.svelte';
 
   interface Props {
-    status: StreamStatus | 'waiting';
+    /** "truncated": finished, but cut off before the end. */
+    status: StreamStatus | 'waiting' | 'truncated';
   }
 
   let { status }: Props = $props();
@@ -19,6 +20,8 @@
     <Icon name="check" size={13} />Fet
   {:else if status === 'failed'}
     <Icon name="alert" size={13} />Error
+  {:else if status === 'truncated'}
+    <Icon name="alert" size={13} />Incompleta
   {:else}
     <Icon name="x" size={13} />Interromput
   {/if}
@@ -46,6 +49,10 @@
 
   .failed {
     color: #ffb3ba;
+  }
+
+  .truncated {
+    color: #ffd99a;
   }
 
   .bars {

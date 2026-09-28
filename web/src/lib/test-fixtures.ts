@@ -1,5 +1,5 @@
 // Shared fixtures for unit tests (never imported by application code).
-import type { Message, TurnEvent, Usage } from './protocol';
+import type { Agent, Message, MessageMeta, TurnEvent, TurnOptions, Usage } from './protocol';
 import { addUsage } from './turns.svelte';
 
 export const usage = (input: number, output: number, cacheRead = 0): Usage => ({
@@ -238,5 +238,179 @@ export function cancelledDebateMessages(): Message[] {
     message({ id: 22, turn_id: t, kind: 'answer', agent: 'chatgpt', meta: { model: 'm', usage: usage(10, 5) } }),
     message({ id: 23, turn_id: t, kind: 'revision', agent: 'claude', round: 1, meta: { model: 'm', usage: usage(20, 5), agreement: 60 } }),
     message({ id: 24, turn_id: t, kind: 'revision', agent: 'chatgpt', round: 1, meta: { model: 'm', usage: usage(20, 5), agreement: 60 } }),
+  ];
+}
+
+// Debates whose synthesis is not the first attempt, with the events the real
+// engine emits (engine.py `_synthesize`, `_store_degraded_synthesis`): every
+// attempt opens its own stream (the chosen synthesizer, then the other agent,
+// then a copy of an answer when nobody could synthesize, stored as `degraded`)
+// and only the stored synthesis is in final_message_ids. The store keeps that
+// one alone: failed attempts leave no message.
+export const QUICK_DEBATE: TurnOptions = {
+  debate: { rounds: 0, consensus_threshold: 85, synthesizer: 'claude' },
+  use_cache: false,
+};
+const NO_CONSENSUS = { reached: false, round: 0, scores: {} };
+const NO_SAVINGS = { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null };
+
+/** Both answers of a debate without revision rounds, up to the synthesis phase. */
+function quickDebateAnswers(): Draft[] {
+  return [
+    { type: 'turn.started', conversation_id: 8, turn_id: 60, mode: 'debate', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.started', stream_id: 'g0', agent: 'chatgpt', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'Resposta de Claude' },
+    { type: 'stream.delta', stream_id: 'g0', section: 'text', text: 'Resposta de ChatGPT' },
+    { type: 'stream.completed', stream_id: 'c0', message_id: 61, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    { type: 'stream.completed', stream_id: 'g0', message_id: 62, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    { type: 'phase', phase: 'synthesis', round: 0 },
+  ];
+}
+
+const quickDebateCompleted = (finalId: number): Draft => ({
+  type: 'turn.completed', conversation_id: 8, turn_id: 60, final_message_ids: [finalId], usage: usage(40, 20),
+  savings: NO_SAVINGS, consensus: NO_CONSENSUS, cached: false,
+});
+
+/** Claude's synthesis is cut off midway; ChatGPT's (message 63) is the final one. */
+export function fallbackSynthesisEvents(requestId = 'req-f'): TurnEvent[] {
+  return sequence(requestId, [
+    ...quickDebateAnswers(),
+    { type: 'stream.started', stream_id: 's1', agent: 'claude', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 's1', section: 'text', text: 'Síntesi a mig' },
+    { type: 'stream.failed', stream_id: 's1', error: { kind: 'unavailable', message: 'Connexió tallada.' } },
+    { type: 'stream.started', stream_id: 's2', agent: 'chatgpt', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 's2', section: 'text', text: 'Síntesi de ChatGPT' },
+    { type: 'stream.completed', stream_id: 's2', message_id: 63, usage: usage(20, 10), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    quickDebateCompleted(63),
+  ]);
+}
+
+/** Both syntheses fail: Claude's answer is stored as the final one (message 63). */
+export function degradedSynthesisEvents(requestId = 'req-d'): TurnEvent[] {
+  return sequence(requestId, [
+    ...quickDebateAnswers(),
+    { type: 'stream.started', stream_id: 's1', agent: 'claude', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.failed', stream_id: 's1', error: { kind: 'unavailable', message: 'Error de Claude.' } },
+    { type: 'stream.started', stream_id: 's2', agent: 'chatgpt', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.failed', stream_id: 's2', error: { kind: 'unavailable', message: 'Error de ChatGPT.' } },
+    { type: 'stream.started', stream_id: 's3', agent: 'claude', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 's3', section: 'text', text: 'Resposta de Claude' },
+    { type: 'stream.completed', stream_id: 's3', message_id: 63, usage: usage(0, 0), latency_ms: 0, ttft_ms: null, agreement: null, unchanged: false },
+    quickDebateCompleted(63),
+  ]);
+}
+
+/** Claude fails its first answer: ChatGPT's answer becomes the final one at once (message 63). */
+export function oneSurvivorDebateEvents(requestId = 'req-o'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 8, turn_id: 60, mode: 'debate', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.started', stream_id: 'g0', agent: 'chatgpt', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.failed', stream_id: 'c0', error: { kind: 'timeout', message: 'Temps esgotat.' } },
+    { type: 'stream.delta', stream_id: 'g0', section: 'text', text: 'Resposta de ChatGPT' },
+    { type: 'stream.completed', stream_id: 'g0', message_id: 62, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+    { type: 'phase', phase: 'synthesis', round: 0 },
+    { type: 'stream.started', stream_id: 's1', agent: 'chatgpt', kind: 'synthesis', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 's1', section: 'text', text: 'Resposta de ChatGPT' },
+    { type: 'stream.completed', stream_id: 's1', message_id: 63, usage: usage(0, 0), latency_ms: 0, ttft_ms: null, agreement: null, unchanged: false },
+    quickDebateCompleted(63),
+  ]);
+}
+
+/** Stored messages of those debates: the question, the answers and the final synthesis (id 63). */
+export function quickDebateMessages(synthesis: { agent: Agent; content: string; degraded?: boolean }, answers: Agent[] = ['claude', 'chatgpt']): Message[] {
+  const t = 60;
+  const answer = (agent: Agent, id: number) =>
+    message({ id, turn_id: t, kind: 'answer', agent, content: `Resposta de ${agent === 'claude' ? 'Claude' : 'ChatGPT'}`, meta: { model: 'm', usage: usage(10, 5), latency_ms: 1, ttft_ms: 1 } });
+  const called = !synthesis.degraded;
+  return [
+    message({ id: 60, turn_id: t, kind: 'question', content: 'Pregunta?', final: true, meta: { mode: 'debate', options: QUICK_DEBATE } }),
+    ...(answers.includes('claude') ? [answer('claude', 61)] : []),
+    ...(answers.includes('chatgpt') ? [answer('chatgpt', 62)] : []),
+    message({
+      id: 63, turn_id: t, kind: 'synthesis', agent: synthesis.agent, content: synthesis.content, final: true,
+      meta: {
+        model: 'm', usage: called ? usage(20, 10) : usage(0, 0), latency_ms: called ? 1 : 0, ttft_ms: called ? 1 : null,
+        consensus: NO_CONSENSUS, savings: NO_SAVINGS, ...(synthesis.degraded ? { degraded: true } : {}),
+      },
+    }),
+  ];
+}
+
+// A one-round debate whose revisions both keep the previous answer, with the
+// events the real engine emits (engine.py `_call`): the kept answer is streamed
+// again as the revision's answer section and stored as its content. Claude's
+// reply is cut off in its critique (max_tokens), before any answer, so it is not
+// reported as unchanged; ChatGPT answers UNCHANGED with a note, keeping a first
+// answer that had been cut off itself (content filter). Live, Claude's first
+// answer ends with a line break the stored content does not keep.
+const KEPT_DEBATE: TurnOptions = {
+  debate: { rounds: 1, consensus_threshold: 85, synthesizer: 'claude' },
+  use_cache: false,
+};
+
+type CompletedDraft = Extract<Draft, { type: 'stream.completed' }>;
+
+export function keptRevisionEvents(requestId = 'req-k'): TurnEvent[] {
+  const done = (streamId: string, messageId: number, extra: Partial<CompletedDraft> = {}): Draft => ({
+    type: 'stream.completed', stream_id: streamId, message_id: messageId, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1,
+    agreement: null, unchanged: false, ...extra,
+  });
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 9, turn_id: 80, mode: 'debate', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.started', stream_id: 'g0', agent: 'chatgpt', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'Hola ' },
+    { type: 'stream.delta', stream_id: 'g0', section: 'text', text: 'Bon dia' },
+    { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'món\n' },
+    done('c0', 81),
+    done('g0', 82, { truncated: true }),
+    { type: 'phase', phase: 'revision', round: 1 },
+    { type: 'stream.started', stream_id: 'c1', agent: 'claude', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.started', stream_id: 'g1', agent: 'chatgpt', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.delta', stream_id: 'c1', section: 'critique', text: '- Falta cont' },
+    { type: 'stream.delta', stream_id: 'g1', section: 'critique', text: '- Correcte' },
+    { type: 'stream.delta', stream_id: 'c1', section: 'answer', text: 'Hola món' },
+    done('c1', 83, { truncated: true }),
+    { type: 'stream.delta', stream_id: 'g1', section: 'answer', text: 'Bon dia' },
+    done('g1', 84, { agreement: 90, unchanged: true }),
+    { type: 'phase', phase: 'synthesis', round: 1 },
+    { type: 'stream.started', stream_id: 's', agent: 'claude', kind: 'synthesis', round: 1, model: 'm' },
+    { type: 'stream.delta', stream_id: 's', section: 'text', text: 'Síntesi' },
+    done('s', 85),
+    {
+      type: 'turn.completed', conversation_id: 9, turn_id: 80, final_message_ids: [85], usage: usage(50, 25),
+      savings: NO_SAVINGS, consensus: { reached: false, round: 1, scores: { chatgpt: 90 } }, cached: false,
+    },
+  ]);
+}
+
+export function keptRevisionMessages(): Message[] {
+  const t = 80;
+  const meta = (extra: MessageMeta = {}): MessageMeta => ({ model: 'm', usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, ...extra });
+  return [
+    message({ id: 80, turn_id: t, kind: 'question', content: 'Pregunta?', final: true, meta: { mode: 'debate', options: KEPT_DEBATE } }),
+    message({ id: 81, turn_id: t, kind: 'answer', agent: 'claude', content: 'Hola món', meta: meta() }),
+    message({
+      id: 82, turn_id: t, kind: 'answer', agent: 'chatgpt', content: 'Bon dia',
+      meta: meta({ truncated: true, finish_reason: 'content_filter' }),
+    }),
+    message({
+      id: 83, turn_id: t, kind: 'revision', agent: 'claude', round: 1, content: 'Hola món',
+      meta: meta({ critique: '- Falta cont', agreement: null, unchanged: false, truncated: true, finish_reason: 'max_tokens' }),
+    }),
+    message({
+      id: 84, turn_id: t, kind: 'revision', agent: 'chatgpt', round: 1, content: 'Bon dia',
+      meta: meta({ critique: '- Correcte', agreement: 90, unchanged: true, unchanged_note: 'ja ho cobreix' }),
+    }),
+    message({
+      id: 85, turn_id: t, kind: 'synthesis', agent: 'claude', round: 1, content: 'Síntesi', final: true,
+      meta: meta({ consensus: { reached: false, round: 1, scores: { chatgpt: 90 } }, savings: NO_SAVINGS }),
+    }),
   ];
 }
