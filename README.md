@@ -88,7 +88,7 @@ La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les d
 │   ├── pricing.py      preus per model i cost estimat
 │   └── fx.py           canvi USD→EUR del BCE
 ├── web/                Svelte 5 + three.js (interfície i tauler)
-├── deploy/             Caddyfile i script de preparació del VPS
+├── deploy/             Caddyfile, preparació del VPS i scripts de còpia i restauració
 ├── docs/               arquitectura, protocol, desplegament i decisions (ADR)
 ├── Dockerfile, docker-compose.yml
 └── CLAUDE.md           instruccions per a les sessions de Claude Code

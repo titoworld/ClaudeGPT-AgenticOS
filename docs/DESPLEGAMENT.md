@@ -243,6 +243,7 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 - Si tens còpies a `/opt/claudegpt/backups`, descarrega-les i esborra-les del servidor (`rm -rf /opt/claudegpt/backups`): ara es desen fora del repositori (vegeu [Còpies de seguretat](#còpies-de-seguretat)).
 - Torna a executar `bash deploy/harden.sh`: treu el límit de 3 intents de l'SSH, que podia deixar fora qui té diverses claus a l'agent.
 - Caddy ja no corre com a root: el servei `caddy-init` passa els seus volums al nou usuari tot sol.
+- Les còpies ara es fan amb `bash deploy/backup.sh` i es restauren amb `bash deploy/restore.sh` (vegeu [Còpies de seguretat](#còpies-de-seguretat)): no facis servir els blocs d'ordres antics, que podien esborrar la còpia anterior del mateix dia o deixar l'aplicació aturada. Les còpies fetes amb els blocs antics també es restauren amb `deploy/restore.sh`.
 - Si has fet alguna còpia amb les ordres antigues, comprova-la: si `tar` fallava, en quedava un fitxer incomplet que semblava bo. Al teu ordinador, `age -d -i claudegpt-backup.key claudegpt-AAAA-MM-DD.tar.gz.age | tar tzf - > /dev/null && echo Correcta` (sense xifrar, `tar tzf claudegpt-AAAA-MM-DD.tar.gz > /dev/null && echo Correcta`).
 
 ## Còpies de seguretat
@@ -254,66 +255,80 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 | `claudegpt_caddy_data` | Certificats i compte de Let's Encrypt | Caddy els torna a demanar sol |
 | `claudegpt_caddy_config` | Configuració interna de Caddy | Res; es regenera |
 
-A més, **desa el fitxer `.env`**: té el token de Claude i les claus d'API.
+Després d'una restauració, els dos primers tenen un nom nou, com `claudegpt_app_data_r20260928-101500`: `deploy/restore.sh` sempre restaura en volums nous i n'escriu els noms a `.env` (`APP_DATA_VOLUME` i `APP_HOME_VOLUME`).
+
+A més, **desa el fitxer `.env`**: té el token de Claude i les claus d'API. L'script de còpia el desa al costat de les dades.
 
 > Les còpies contenen secrets (el secret TOTP, els tokens de les subscripcions i les claus d'API). Es desen a `/var/backups/claudegpt`, un directori amb permisos 700 (només el teu usuari i root) que és **fora del repositori** (així un `git add` no les pot pujar mai). Xifra-les, descarrega-les i esborra-les del servidor.
 
 **Xifratge (recomanat, un sol cop).** Al teu ordinador, instal·la [age](https://github.com/FiloSottile/age) i crea una clau: `age-keygen -o claudegpt-backup.key`. Mostra la clau pública (`age1...`): és la que faràs servir al servidor. La clau privada (el fitxer) no surt mai del teu ordinador; guarda'n una còpia en un lloc segur, perquè sense ella no podràs restaurar. Al servidor: `apt-get install -y age`.
 
-**Fer una còpia** al servidor, com a root (`sudo -i`, com al pas 2). L'aplicació s'atura uns segons perquè la base de dades quedi coherent:
+> **Fes-ho dins de `tmux`.** Si la connexió SSH es talla a mitja còpia o a mitja restauració, els scripts ho deixen tot en un estat segur, però s'aturen. Dins de `tmux` continuen fins al final: obre'l amb `tmux new -s copia` abans de començar i, si la connexió es talla, torna-hi amb `tmux attach -t copia`. (Si no el tens: `apt-get install -y tmux`. `screen` també serveix.)
+
+**Fer una còpia** al servidor, com a root (`sudo -i`, com al pas 2):
 
 ```bash
 cd /opt/claudegpt
-AGE_KEY=age1...        # la teva clau pública
-DEST="/var/backups/claudegpt/claudegpt-$(date +%F).tar.gz.age"
-umask 077
-set -o pipefail        # si falla qualsevol pas de la còpia, falla tota
-install -d -m 700 /var/backups/claudegpt
-docker compose stop app
-if docker run --rm -v claudegpt_app_data:/data:ro -v claudegpt_app_home:/home/app:ro \
-     claudegpt-os:latest tar czf - -C / data home/app \
-   | age -r "$AGE_KEY" > "$DEST"
-then echo "Còpia feta: $DEST"
-else rm -f "$DEST"; echo "ERROR: la còpia ha fallat i s'ha esborrat; mira el missatge de sobre." >&2
-fi
-docker compose start app
-age -r "$AGE_KEY" -o "/var/backups/claudegpt/env-$(date +%F).age" .env
-chown -R "${SUDO_USER:-root}" /var/backups/claudegpt   # perquè la puguis descarregar
+bash deploy/backup.sh age1...        # la teva clau pública
 ```
 
-- Si `tar` o `age` fallen (per exemple, perquè Docker no troba la imatge o la clau està mal copiada), no queda cap fitxer a mitges que sembli una còpia bona: surt `ERROR` i l'aplicació torna a arrencar igualment.
-- L'última línia dona els fitxers a l'usuari amb què has entrat al VPS; el directori continua sent privat.
-- Sense xifrar (només si no pots instal·lar age): treu `| age -r "$AGE_KEY"` i l'extensió `.age` de `DEST`, i canvia la penúltima línia per `cp .env "/var/backups/claudegpt/env-$(date +%F)"`.
+- Abans de tocar res, comprova la clau, la imatge i els volums. Després atura l'aplicació uns segons, perquè la base de dades quedi coherent, i la torna a engegar encara que alguna cosa falli, premis Ctrl+C o es talli la connexió.
+- Crea dos fitxers nous amb la data i l'hora al nom: `claudegpt-AAAA-MM-DD_HHMMSS.tar.gz.age` (les dades) i `env-AAAA-MM-DD_HHMMSS.age` (el `.env`); si en fas dues en el mateix segon, la segona porta un sufix (`_HHMMSS-1`). Mai no sobreescriu ni esborra cap còpia anterior: si alguna cosa falla, surt `ERROR` i no queda cap fitxer a mitges.
+- Els fitxers queden a nom de l'usuari amb què has entrat al VPS, perquè els puguis descarregar; el directori continua sent privat.
+- Sense xifrar (només si no pots instal·lar age): `bash deploy/backup.sh --sense-xifrar`. Els fitxers es diuen igual, sense `.age`.
+- Si l'script mor de cop (un `kill -9` o un tall de corrent), no pot fer net: l'aplicació pot quedar aturada (`docker compose start app` la torna a engegar) i a `/var/backups/claudegpt` queden fitxers temporals ocults, amb `.parcial.` al nom, que la còpia següent esborra.
+- Si hi ha una restauració a mitges (vegeu més avall), la còpia s'atura amb `ERROR` sense tocar res: acaba-la primer amb `--reprèn` o `--desfés`.
 
-Després, descarrega-la al teu ordinador (des de l'ordinador, no des del VPS) i, quan hagis comprovat que la tens, esborra-la del servidor. `usuari` és el mateix usuari amb què entres al VPS al pas 2 (`root` si hi entres directament com a root):
+**Descarregar-la** des del teu ordinador (no des del VPS), a la carpeta on guardes les còpies. `usuari` és el mateix usuari amb què entres al VPS al pas 2 (`root` si hi entres directament com a root), i `S` és el que ha mostrat l'script a «Còpia feta:», amb el sufix si en porta:
 
 ```bash
-scp -r usuari@IP-DEL-VPS:/var/backups/claudegpt ./claudegpt-backups
-ssh usuari@IP-DEL-VPS 'rm -f /var/backups/claudegpt/*'
+S=AAAA-MM-DD_HHMMSS
+V=usuari@IP-DEL-VPS
+scp "${V}:/var/backups/claudegpt/claudegpt-$S.tar.gz.age" "${V}:/var/backups/claudegpt/env-$S.age" . \
+  && age -d -i claudegpt-backup.key "claudegpt-$S.tar.gz.age" | tar tzf - > /dev/null \
+  && ssh "$V" "rm /var/backups/claudegpt/claudegpt-$S.tar.gz.age /var/backups/claudegpt/env-$S.age" \
+  && echo "Còpia descarregada i comprovada: ja no és al servidor."
 ```
 
-**Restaurar** (al mateix servidor o a un de nou amb els passos 1–4 fets). Substitueix **tot** el contingut actual dels dos volums pel de la còpia.
+Només esborra del servidor aquests dos fitxers, i només si s'han descarregat bé i la còpia es pot desxifrar i llegir sencera amb la teva clau. Si tens la clau en una altra carpeta, canvia `claudegpt-backup.key` pel seu camí. Si la còpia és sense xifrar, treu `.age` dels noms i, en lloc de la línia d'`age`, comprova-la amb `tar tzf "claudegpt-$S.tar.gz" > /dev/null`.
 
-1. Al teu ordinador, si la còpia està xifrada, desxifra-la: `age -d -i claudegpt-backup.key -o claudegpt-AAAA-MM-DD.tar.gz claudegpt-AAAA-MM-DD.tar.gz.age` (i igual amb `env-AAAA-MM-DD.age`). Si `age` dona un error, la còpia està incompleta o no és teva: no la facis servir.
-2. Puja-la al teu directori del servidor: `scp claudegpt-AAAA-MM-DD.tar.gz env-AAAA-MM-DD usuari@IP-DEL-VPS:`
-3. Al servidor, com a root (`sudo -i`). Primer es llegeix tota la còpia: si està malmesa (per exemple, una pujada interrompuda), no s'esborra res.
+**Restaurar** (al mateix servidor o a un de nou amb els passos 1–4 fets). La còpia es restaura en volums nous: les dades actuals no es toquen, i les pots recuperar fins que confirmes que tot ha anat bé.
+
+1. Al teu ordinador, desxifra la còpia i el `.env`: `age -d -i claudegpt-backup.key -o claudegpt-AAAA-MM-DD_HHMMSS.tar.gz claudegpt-AAAA-MM-DD_HHMMSS.tar.gz.age` i `age -d -i claudegpt-backup.key -o env-AAAA-MM-DD_HHMMSS env-AAAA-MM-DD_HHMMSS.age`. Si `age` dona un error, la còpia està incompleta o no és teva: no la facis servir. Si restaures en un servidor amb un altre domini, canvia `DOMAIN` al fitxer `env-...` desxifrat.
+2. Puja els dos fitxers al teu directori del servidor: `scp claudegpt-AAAA-MM-DD_HHMMSS.tar.gz env-AAAA-MM-DD_HHMMSS usuari@IP-DEL-VPS:`
+3. Al servidor, com a root (`sudo -i`) i dins de `tmux`. Si hi entres directament com a root, els fitxers són a `/root/` en lloc de `/home/usuari/`:
 
 ```bash
 cd /opt/claudegpt
-B=/home/usuari         # on l'has pujada (/root si entres com a root)
-if tar tzf "$B/claudegpt-AAAA-MM-DD.tar.gz" > /dev/null; then
-  docker compose stop app
-  docker run --rm -i -v claudegpt_app_data:/data -v claudegpt_app_home:/home/app \
-    claudegpt-os:latest sh -c 'find /data /home/app -mindepth 1 -delete && tar xzf - -C /' \
-    < "$B/claudegpt-AAAA-MM-DD.tar.gz"
-  docker compose start app
-  install -m 600 "$B/env-AAAA-MM-DD" .env
-  docker compose up -d
-  rm -f "$B/claudegpt-AAAA-MM-DD.tar.gz" "$B/env-AAAA-MM-DD"
-else
-  echo "ERROR: la còpia està malmesa; no s'ha tocat res." >&2
-fi
+bash deploy/restore.sh /home/usuari/claudegpt-AAAA-MM-DD_HHMMSS.tar.gz /home/usuari/env-AAAA-MM-DD_HHMMSS
 ```
+
+L'script avança per passos i apunta a `/var/lib/claudegpt/restore.state` per on va. Si un pas falla, surt `ERROR` i t'explica en quin estat ho deixa:
+
+| Pas | Què fa | Si falla o l'interromps (Ctrl+C, tall de la connexió) |
+| --- | --- | --- |
+| R0 | Llegeix tota la còpia i comprova que és de ClaudeGPT OS, que el `.env` serveix, que hi ha la imatge i que hi ha prou espai | No s'ha tocat res. Corregeix la causa i torna-ho a provar |
+| R1 | Crea dos volums nous, hi extreu la còpia i en verifica la base de dades. L'aplicació continua funcionant | S'esborren els volums nous i l'aplicació no s'atura. Corregeix la causa i torna-ho a provar |
+| R2 | Prepara el `.env` nou (`.env.next`), amb els noms dels volums nous | Igual que a R1 |
+| R3 | Comprova que els volums nous encara hi són, atura l'aplicació i canvia el `.env` d'un sol cop; l'anterior queda com a `.env.prev` | Torna enrere sol: el `.env` i els volums d'abans, amb l'aplicació en marxa. Els volums nous es conserven: `--reprèn` ho torna a provar i `--desfés` els descarta |
+| R4 | Engega l'aplicació amb les dades restaurades i espera que respongui | Igual que a R3 |
+| R5 | Fet. Es conserven els volums d'abans, `.env.prev` i els fitxers pujats | Comprova l'aplicació i fes `--finalitza` (o `--desfés`, per tornar a les dades d'abans) |
+
+Quan acabi, entra a la web i comprova que hi ha les converses. Aleshores fes net amb `--finalitza`: primer comprova que l'aplicació funciona amb les dades restaurades i que la base de dades està bé (si no, no esborra res), i després et demana que escriguis «esborra» per confirmar-ho:
+
+| Ordre | Per a què |
+| --- | --- |
+| `bash deploy/restore.sh --estat` | Veure en quin pas és. Si la connexió s'ha tallat, els missatges que l'script ja no t'ha pogut mostrar són a `/var/lib/claudegpt/restore.state.log` |
+| `bash deploy/restore.sh --reprèn` | Continuar una restauració interrompuda, o tornar-la a provar després d'un error a R3 o R4 |
+| `bash deploy/restore.sh --desfés` | Tornar a l'estat d'abans des de qualsevol pas: el `.env` i els volums d'abans, amb l'aplicació en marxa. Si l'aplicació ja ha funcionat amb les dades restaurades (a R5, o si l'script ha mort a R4), els volums restaurats es conserven amb tot el que s'hi hagi escrit des d'aleshores: l'script te'n diu els noms i com esborrar-los |
+| `bash deploy/restore.sh --finalitza` | Quan ja has comprovat la restauració: esborra els volums d'abans, `.env.prev` i els fitxers pujats |
+
+- Si l'script mor a mitges (un `kill -9` o un tall de corrent), no pot tornar enrere sol: `--estat` et diu on s'ha quedat, i `--reprèn` o `--desfés` ho acaben.
+- Abans de continuar, `--reprèn` comprova que els volums restaurats encara hi són i que la base de dades està bé: mentre cap contenidor no els fa servir (per exemple, després d'un error a R3 o R4), un `docker volume prune` els esborra. Si la restauració ha tornat enrere sola, o l'script ha mort abans de R3, els torna a omplir a partir de la còpia pujada; si ha mort a R3 o R4, no continua i et demana que facis `--desfés` i tornis a començar.
+- Mentre hi hagi una restauració pendent, fins i tot a R5 abans de `--finalitza`, no se'n pot començar una altra.
+- Mentre l'script de restauració s'executa no es pot fer cap còpia, i al revés: el segon que arriba s'atura amb `ERROR` sense tocar res. Tampoc no es pot fer cap còpia mentre una restauració interrompuda, o que no ha pogut tornar enrere, no s'hagi acabat amb `--reprèn` o `--desfés`.
+- La restauració només torna a crear el contenidor de l'aplicació. Si el `.env` de la còpia canvia `DOMAIN`, `ACME_EMAIL` o `ALLOWED_IPS`, aplica-ho també a Caddy amb `docker compose up -d` quan acabi.
+- Sense accents també funcionen: `--repren` i `--desfes`.
 
 ## Resolució de problemes
 

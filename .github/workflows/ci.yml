@@ -77,8 +77,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      # A pinned shellcheck, the same as a local run: the runner's own (0.9.0)
+      # reports other things than a newer one.
       - name: Shell scripts
-        run: shellcheck deploy/harden.sh .claude/hooks/session-start.sh
+        run: >-
+          uvx --from shellcheck-py==0.11.0.1 shellcheck deploy/harden.sh
+          deploy/backup.sh deploy/restore.sh .claude/hooks/session-start.sh
 
       - name: Compose file
         run: cp .env.example .env && docker compose config --quiet

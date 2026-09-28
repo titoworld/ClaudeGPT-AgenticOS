@@ -171,7 +171,13 @@ networks:
   egress: {}
 
 volumes:
-  app_data: {}
-  app_home: {}
+  # The app's data: .env can point them to other volumes, which is how
+  # deploy/restore.sh switches to restored data (and back) in a single step.
+  # Unset, they keep the names of project "claudegpt": the ones every existing
+  # install already has.
+  app_data:
+    name: ${APP_DATA_VOLUME:-claudegpt_app_data}
+  app_home:
+    name: ${APP_HOME_VOLUME:-claudegpt_app_home}
   caddy_data: {}
   caddy_config: {}
