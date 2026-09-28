@@ -16,8 +16,10 @@ import shutil
 import sqlite3
 import stat
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
@@ -366,8 +368,9 @@ def _check_web(settings: Settings, report: _Report) -> None:
         report.ok(f"Interfície web: {dist}")
 
 
-async def cli_version(path: str) -> str | None:
-    """First line of ``<path> --version``, or ``None`` if it fails or hangs."""
+async def cli_version(path: str, env: Mapping[str, str]) -> str | None:
+    """First line of ``<path> --version`` run with ``env`` (the CLI's own closed
+    environment, never the app's), or ``None`` if it fails or hangs."""
     try:
         process = await asyncio.create_subprocess_exec(
             path,
@@ -375,6 +378,7 @@ async def cli_version(path: str) -> str | None:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=dict(env),
             start_new_session=True,
         )
     except OSError:
@@ -394,7 +398,12 @@ async def cli_version(path: str) -> str | None:
 
 
 async def _check_cli(
-    label: str, mode: ProviderMode, path: str, variable: str, report: _Report
+    label: str,
+    mode: ProviderMode,
+    path: str,
+    variable: str,
+    report: _Report,
+    env: Callable[[], Mapping[str, str]],
 ) -> None:
     if mode != "cli":
         report.skip(f"CLI de {label}: no cal (mode {mode}).")
@@ -405,7 +414,7 @@ async def _check_cli(
             f"No es troba la CLI de {label} («{path}»): instal·la-la o defineix {variable}."
         )
         return
-    version = await cli_version(resolved)
+    version = await cli_version(resolved, env())
     if version is None:
         report.fail(f"La CLI de {label} ({resolved}) no respon a --version.")
     else:
@@ -470,6 +479,34 @@ def _report_provider(
     _describe_limits(result, report)
 
 
+def _own_providers(
+    settings: Settings, report: _Report
+) -> tuple[dict[AgentName, Provider], Path | None]:
+    """Doctor's own providers, and the temporary Codex state directory to remove after.
+
+    With the app running, its Codex app-server uses the configured state directory: a
+    start deletes the log databases there, which that app-server has open, and two
+    app-servers must never share one. Doctor's Codex gets a private directory instead.
+    """
+    from agentic_os.providers.factory import build_provider, build_providers
+
+    if settings.chatgpt_mode != "cli":
+        return build_providers(settings), None
+    try:
+        state_dir = Path(tempfile.mkdtemp(prefix="aos-doctor-codex-"))
+    except OSError as exc:
+        report.fail(
+            f"{AGENT_LABELS['chatgpt']} (mode cli): no s'ha pogut crear un directori temporal "
+            f"per a l'estat de Codex ({exc})."
+        )
+        return {"claude": build_provider("claude", settings.claude_mode, settings)}, None
+    try:
+        return build_providers(settings, codex_state_dir=state_dir), state_dir
+    except BaseException:
+        shutil.rmtree(state_dir, ignore_errors=True)
+        raise
+
+
 async def run_doctor(
     settings: Settings,
     *,
@@ -478,7 +515,8 @@ async def run_doctor(
     status_timeout: float = STATUS_TIMEOUT_SECONDS,
 ) -> int:
     """Check the installation; returns 1 if something critical fails, else 0.
-    ``providers`` replaces the ones built from ``settings`` (and is not closed)."""
+    ``providers`` replaces the ones built from ``settings`` (and is not closed). The
+    ones doctor builds never touch the running server's Codex state directory."""
     report = _Report(out)
     out(f"ClaudeGPT OS {__version__}: diagnosi")
     _check_config(settings, report)
@@ -486,21 +524,29 @@ async def run_doctor(
     stored = await _check_database(settings, report)
     _report_fx(stored, report)
     _check_web(settings, report)
+    from agentic_os.providers.claude_cli import cli_environment
+    from agentic_os.providers.codex_appserver import codex_environment
+
     await _check_cli(
         "Claude Code",
         settings.claude_mode,
         settings.claude_cli_path,
         "AOS_CLAUDE_CLI_PATH",
         report,
+        cli_environment,
     )
     await _check_cli(
-        "Codex", settings.chatgpt_mode, settings.codex_cli_path, "AOS_CODEX_CLI_PATH", report
+        "Codex",
+        settings.chatgpt_mode,
+        settings.codex_cli_path,
+        "AOS_CODEX_CLI_PATH",
+        report,
+        codex_environment,
     )
 
+    state_dir: Path | None = None
     if providers is None:
-        from agentic_os.providers.factory import build_providers
-
-        owned = build_providers(settings)
+        owned, state_dir = _own_providers(settings, report)
     else:
         owned = {}
     active = providers if providers is not None else owned
@@ -512,7 +558,13 @@ async def run_doctor(
         for (agent, provider), result in zip(active.items(), results, strict=True):
             _report_provider(agent, provider, result, report, settings, stored.runtime)
     finally:
-        await asyncio.gather(*(p.aclose() for p in owned.values()), return_exceptions=True)
+        try:
+            await asyncio.gather(*(p.aclose() for p in owned.values()), return_exceptions=True)
+        finally:
+            # Once its app-server has stopped nothing writes there; also removed when a
+            # second interrupt cuts the close short.
+            if state_dir is not None:
+                shutil.rmtree(state_dir, ignore_errors=True)
 
     out("")
     if report.critical:

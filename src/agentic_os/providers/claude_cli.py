@@ -369,6 +369,14 @@ class _Turn:
     """Category of a refusal the CLI gave up on (``model_refusal_no_fallback``)."""
 
 
+def cli_environment() -> dict[str, str]:
+    """Environment of every ``claude`` process (also ``claude --version``): the
+    allow-list only, never the app's secrets, plus the values the app computes."""
+    env = {name: os.environ[name] for name in ENV_ALLOW_LIST if name in os.environ}
+    env["DISABLE_AUTOUPDATER"] = "1"
+    return env
+
+
 class ClaudeCliProvider:
     """Provider for agent ``claude`` in mode ``cli``: the official Claude Code CLI."""
 
@@ -617,8 +625,7 @@ class ClaudeCliProvider:
     @staticmethod
     def _env(key: _Key | None = None) -> dict[str, str]:
         """The allow-listed environment plus the values the provider computes itself."""
-        env = {name: os.environ[name] for name in ENV_ALLOW_LIST if name in os.environ}
-        env["DISABLE_AUTOUPDATER"] = "1"
+        env = cli_environment()
         if key is not None:
             env[MAX_OUTPUT_ENV] = str(key.max_output_tokens)
         return env

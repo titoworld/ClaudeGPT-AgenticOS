@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
 import stat
+import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from typing import Any
 
 import pytest
 
+import agentic_os.providers.codex_appserver as codex_appserver
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
 from agentic_os.orchestrator.tokens import estimate_tokens
@@ -28,10 +31,12 @@ from agentic_os.providers.base import (
     UsageLimit,
 )
 from agentic_os.providers.codex_appserver import (
+    BACKOFF_MAX,
     ENV_ALLOWLIST,
     MAX_SUB_AGENT_RUNS,
     SUB_AGENT_LIMIT_MESSAGE,
     CodexAppServerProvider,
+    _AppServerConnection,
     codex_environment,
     config_arguments,
     remove_log_databases,
@@ -701,6 +706,271 @@ async def test_aclose_kills_the_whole_process_group(fake: FakeCodex) -> None:
         await collect(codex, make_request())
 
 
+# -- a process that stops reading its input ---------------------------------------------------
+
+CONTROL = 1.0
+"""CONTROL_TIMEOUT in these tests (30 s in production)."""
+CLEANUP = 1.0
+"""CLEANUP_TIMEOUT in these tests (10 s in production)."""
+PIPE_AND_BUFFER = 131_072
+"""What a process that no longer reads its stdin still takes before ``drain()`` blocks:
+the pipe (64 KiB) plus asyncio's write buffer (64 KiB high-water mark), on Linux."""
+
+CHILD_READS_LATER = """
+import pathlib, sys, time
+go, received = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+while not go.exists():
+    time.sleep(0.01)
+with received.open("wb") as out:
+    for line in sys.stdin.buffer:
+        out.write(line)
+        out.flush()
+"""
+"""A process that reads nothing until ``go`` exists, then copies every line it gets."""
+
+CHILD_ASKS_LATER = """
+import pathlib, sys, time
+go = pathlib.Path(sys.argv[1])
+while not go.exists():
+    time.sleep(0.01)
+sys.stdout.write('{"id": "srv-1", "method": "item/tool/requestUserInput", "params": {}}\\n')
+sys.stdout.flush()
+time.sleep(60)
+"""
+"""A process that never reads its stdin and asks something once ``go`` exists."""
+
+
+@pytest.fixture
+def short_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_appserver, "CONTROL_TIMEOUT", CONTROL)
+    monkeypatch.setattr(codex_appserver, "CLEANUP_TIMEOUT", CLEANUP)
+
+
+def request_tasks() -> list[asyncio.Task[Any]]:
+    """Unfinished runs of ``_AppServerConnection.request`` (the calls' shielded RPCs)."""
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done()
+        and getattr(task.get_coro(), "__qualname__", "").endswith("Connection.request")
+    ]
+
+
+async def bare_connection(*arguments: str) -> _AppServerConnection:
+    """A JSON-RPC connection, without a provider, to ``python -c <arguments>``."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        *arguments,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    return _AppServerConnection(process, on_notification=lambda *_: None, on_exit=lambda *_: None)
+
+
+async def test_a_process_that_stops_reading_a_long_input_is_replaced(
+    fake: FakeCodex, short_timeouts: None
+) -> None:
+    """Audit item 3: the app-server stops reading its stdin when a call writes a
+    turn/start line longer than the pipe and the write buffer take. The request's timeout
+    covers the write, so the call fails at the answer timeout instead of the deadline; the
+    release gives up on the process and replaces it, and nothing is left waiting."""
+    fake.options(wedge_after="thread/start")
+    codex = CodexAppServerProvider(fake.settings(provider_timeout_seconds=6.0))
+    request = make_request("[echo] " + "L'àvia explicà què passà a l'estació. " * 12_000)
+    params = {"input": [{"type": "text", "text": render_transcript(request)}]}
+    line = json.dumps({"id": 3, "method": "turn/start", "params": params}, ensure_ascii=False)
+    assert len(line.encode()) > PIPE_AND_BUFFER
+    try:
+        started = time.monotonic()
+        with pytest.raises(ProviderError) as caught:
+            await collect(codex, request)
+        assert caught.value.kind == "timeout"
+        assert time.monotonic() - started < CONTROL + 1.5  # not the 6 s deadline
+        [wedged] = fake.pids()
+        await wait_until(lambda: not codex._background and codex._releasing == 0, CLEANUP + 5)
+        assert codex._conn is None and not codex._threads
+        assert process_gone(wedged)
+        assert not request_tasks()
+        assert fake.entries("wedged")
+        assert not fake.received("turn/start")  # it never read a byte of it
+
+        _, result = await collect(codex, make_request("[echo] de nou"))
+        assert result.text.strip() == "de nou"
+        assert len(set(fake.pids())) == 2
+    finally:
+        await codex.aclose()
+
+
+async def test_a_process_that_stops_answering_before_a_call_is_replaced(
+    fake: FakeCodex, short_timeouts: None
+) -> None:
+    """No thread/start answer: there is no thread to release, and so no request of the
+    release that would find the process stuck. A cheap request does, and it is replaced."""
+    fake.options(wedge_after="initialize")
+    codex = CodexAppServerProvider(fake.settings())
+    try:
+        with pytest.raises(ProviderError) as caught:
+            await collect(codex, make_request("[echo] hola"))
+        assert caught.value.kind == "timeout"
+        [wedged] = fake.pids()
+        await wait_until(lambda: not codex._background and codex._releasing == 0)
+        assert codex._conn is None
+        assert process_gone(wedged)
+        assert not fake.received("thread/start")
+
+        _, result = await collect(codex, make_request("[echo] de nou"))
+        assert result.text.strip() == "de nou"
+        assert len(set(fake.pids())) == 2
+    finally:
+        await codex.aclose()
+
+
+async def test_a_busy_process_is_not_replaced_under_a_running_call(
+    fake: FakeCodex, short_timeouts: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread/start answered too late fails only its own call. A cheap request shows
+    the process still answers, so another call streaming on it goes on; the process is
+    replaced once no call uses it (a late thread could never be released)."""
+    send = _AppServerConnection._send
+
+    async def slow_thread_start(self: _AppServerConnection, message: Any) -> None:
+        params = message.get("params") or {}
+        if message.get("method") == "thread/start" and params.get("baseInstructions") == "SLOW":
+            await asyncio.sleep(CONTROL + 0.3)  # a busy server: no answer within CONTROL
+        await send(self, message)
+
+    monkeypatch.setattr(_AppServerConnection, "_send", slow_thread_start)
+    codex = CodexAppServerProvider(fake.settings())
+    try:
+        long_call = asyncio.create_task(collect(codex, make_request("[long] parla")))
+        await wait_until(lambda: fake.received("turn/start"))
+        with pytest.raises(ProviderError) as caught:
+            await collect(codex, GenerationRequest(system="SLOW", prompt="[echo] x"))
+        assert caught.value.kind == "timeout"
+        deltas, _ = await long_call  # not failed with «El procés de Codex s'ha aturat»
+        assert len(deltas) > 100
+        [busy] = fake.pids()
+        await wait_until(lambda: not codex._background and codex._releasing == 0, CLEANUP + 5)
+        assert codex._conn is None  # replaced once idle
+        assert process_gone(busy)
+
+        _, result = await collect(codex, make_request("[echo] de nou"))
+        assert result.text.strip() == "de nou"
+        assert len(set(fake.pids())) == 2
+    finally:
+        await codex.aclose()
+
+
+@pytest.mark.parametrize("settled", [False, True])
+async def test_closing_during_a_pending_release_leaves_nothing_behind(
+    fake: FakeCodex, short_timeouts: None, caplog: pytest.LogCaptureFixture, settled: bool
+) -> None:
+    """aclose() while a call's release is pending, or not even started: the release count
+    goes back to 0 and every request's exception is retrieved (asyncio logs none)."""
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    fake.options(wedge_after="thread/start")
+    codex = CodexAppServerProvider(fake.settings(provider_timeout_seconds=0.4))
+    with pytest.raises(ProviderError):
+        await collect(codex, make_request("[echo] " + "L'àvia explicà què passà. " * 12_000))
+    assert codex._releasing == 1
+    if settled:
+        await asyncio.sleep(0.05)  # the release now waits for the call's requests
+    await codex.aclose()
+    await asyncio.sleep(0.3)
+    gc.collect()
+    await asyncio.sleep(0.05)
+    assert codex._releasing == 0
+    assert not [record for record in caplog.records if "never retrieved" in record.getMessage()]
+
+
+async def test_the_release_of_a_call_is_bounded(
+    fake: FakeCodex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a request that never ends (its own timeout makes that impossible) does not
+    hold the release: after CONTROL_TIMEOUT + CLEANUP_TIMEOUT the process is replaced."""
+    monkeypatch.setattr(codex_appserver, "CONTROL_TIMEOUT", 0.5)
+    monkeypatch.setattr(codex_appserver, "CLEANUP_TIMEOUT", 0.5)
+    resume = asyncio.Event()
+    request = _AppServerConnection.request
+
+    async def stuck_turn_start(
+        self: _AppServerConnection, method: str, params: Any, timeout: float
+    ) -> Any:
+        if method == "turn/start":
+            await resume.wait()  # neither an answer nor a timeout
+        return await request(self, method, params, timeout)
+
+    monkeypatch.setattr(_AppServerConnection, "request", stuck_turn_start)
+    codex = CodexAppServerProvider(fake.settings(provider_timeout_seconds=0.5))
+    try:
+        with pytest.raises(ProviderError) as caught:
+            await collect(codex, make_request("[echo] hola"))
+        assert caught.value.kind == "timeout"
+        [pid] = fake.pids()
+        started = time.monotonic()
+        await wait_until(lambda: codex._releasing == 0)
+        assert time.monotonic() - started < 0.5 + 0.5 + 0.5
+        assert codex._conn is None and not codex._threads
+        await wait_until(lambda: not codex._background)
+        assert process_gone(pid)
+    finally:
+        resume.set()
+        await codex.aclose()
+
+
+async def test_a_write_that_times_out_never_splits_a_frame(tmp_path: Path) -> None:
+    """The timeout of a request, and the one of a notification, cover the write: a
+    process that reads nothing cannot hold the caller or the write lock. Giving up on
+    ``drain()`` leaves the whole line in the transport's buffer, ahead of the next one."""
+    go, received = tmp_path / "go", tmp_path / "received.jsonl"
+    conn = await bare_connection(CHILD_READS_LATER, str(go), str(received))
+    try:
+        text = "L'àvia explicà què passà. " * 12_000
+        assert len(text.encode()) > PIPE_AND_BUFFER
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(conn.request("turn/start", {"text": text}, 0.3), 3)
+        assert time.monotonic() - started < 0.3 + 1.0  # its own timeout, not the 3 s guard
+        assert not conn._write_lock.locked() and not conn._pending
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):  # the pipe is still full
+            await asyncio.wait_for(conn.notify("initialized", timeout=0.3), 3)
+        assert time.monotonic() - started < 0.3 + 1.0
+        assert not conn._write_lock.locked()
+
+        go.touch()  # it starts reading: both lines arrive whole and in order
+        await wait_until(lambda: received.exists() and received.read_bytes().count(b"\n") == 2)
+        first, second = (json.loads(line) for line in received.read_bytes().splitlines())
+        assert first == {"id": 1, "method": "turn/start", "params": {"text": text}}
+        assert second == {"method": "initialized"}
+    finally:
+        await conn.close()
+
+
+async def test_an_answer_to_a_server_request_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The answer to a server -> client request cannot be written to a process that
+    reads nothing either: it gives up after CLEANUP_TIMEOUT and frees the write lock."""
+    monkeypatch.setattr(codex_appserver, "CLEANUP_TIMEOUT", 0.3)
+    caplog.set_level(logging.INFO, logger="agentic_os.providers.codex_appserver")
+    go = tmp_path / "go"
+    conn = await bare_connection(CHILD_ASKS_LATER, str(go))
+    try:
+        with pytest.raises(TimeoutError):  # fills the pipe and the write buffer
+            await asyncio.wait_for(conn.request("turn/start", {"text": "x" * 400_000}, 0.2), 3)
+        go.touch()
+        await wait_until(lambda: "request item/tool/requestUserInput" in caplog.text)
+        await wait_until(lambda: not conn._tasks and not conn._write_lock.locked(), 0.3 + 1.5)
+        assert "did not take the answer to item/tool/requestUserInput" in caplog.text
+    finally:
+        await conn.close()
+
+
 # -- status ----------------------------------------------------------------------------------
 
 
@@ -719,6 +989,29 @@ async def test_status_reports_the_plan_and_default_model(fake: FakeCodex) -> Non
     assert status.model == "gpt-6-sol"
     assert again == status
     assert len(fake.received("account/read")) == 1
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"config_error": True, "config_model": "gpt-6-sol"},  # config.toml unreadable
+        {"model_list_error": True},  # no model in config.toml, and no catalog
+    ],
+)
+async def test_status_never_names_a_guessed_model(
+    fake: FakeCodex, options: dict[str, object]
+) -> None:
+    """When Codex cannot say which model a thread gets, the status names none (N16): the
+    engine keys its turn cache on it, and a guess would replay another model's answers."""
+    fake.options(**options)
+    codex = CodexAppServerProvider(fake.settings())
+    try:
+        status = await codex.status()
+    finally:
+        await codex.aclose()
+    assert status.available
+    assert status.detail == "Subscripció ChatGPT activa (Plus)"
+    assert status.model == ""
 
 
 # -- model list ------------------------------------------------------------------------------
@@ -829,6 +1122,40 @@ async def test_respawn_backoff(fake: FakeCodex, provider: CodexAppServerProvider
     _, result = await collect(provider, make_request("[echo] ja"))
     assert result.text.strip() == "ja"
     assert time.monotonic() - started >= 0.4
+
+
+@pytest.mark.parametrize(
+    ("failures", "delay"),
+    [
+        (0, 0.0),
+        (1, 0.0),
+        (2, 0.5),
+        (3, 1.0),
+        (7, 16.0),
+        (8, BACKOFF_MAX),
+        (1025, BACKOFF_MAX),
+        (1026, BACKOFF_MAX),  # 2.0 ** 1024 overflows
+        (10**6, BACKOFF_MAX),
+    ],
+)
+async def test_respawn_backoff_delays(fake: FakeCodex, failures: int, delay: float) -> None:
+    codex = CodexAppServerProvider(fake.settings())
+    codex._failures = failures
+    codex._last_failure = time.monotonic()
+    assert codex._backoff_delay() == pytest.approx(delay, abs=0.05)
+
+
+async def test_the_backoff_never_overflows(
+    fake: FakeCodex, provider: CodexAppServerProvider
+) -> None:
+    """Audit item 26: after more than a thousand failed starts in a row the status still
+    answers (and so would a call) instead of raising OverflowError until a restart."""
+    provider._failures = 10**6
+    provider._last_failure = time.monotonic()
+    status = await provider.status()
+    assert not status.available
+    assert status.detail == "Codex s'ha aturat; es reiniciarà d'aquí a 30 s."
+    assert not fake.pids()
 
 
 async def test_status_with_an_api_key_account(fake: FakeCodex) -> None:

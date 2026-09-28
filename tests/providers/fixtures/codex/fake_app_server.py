@@ -28,11 +28,15 @@ on replay. The behaviour of a turn is chosen by a marker in its input text:
                   the turn itself is interrupted (max 12)
 
 Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
-``requiresOpenaiAuth``, ``config_model``, ``rate_limits_delay`` (seconds before answering
+``requiresOpenaiAuth``, ``config_model``, ``config_error`` (a forced error on config/read),
+``rate_limits_delay`` (seconds before answering
 account/rateLimits/read), ``init_error``, ``spawn_child`` (start a ``sleep`` child to
 check process-group kills), ``models`` / ``page_size`` / ``model_list_error`` (the
 model/list catalog, its page size and a forced error), ``term_delay`` (seconds a SIGTERM
-or the end of stdin takes to stop the process, which logs ``{"exited": time}``). Every
+or the end of stdin takes to stop the process, which logs ``{"exited": time}``),
+``wedge_after`` (a method: right after answering it, the first process stops reading its
+stdin for good, alive and with stdout open, like a process that is stopped or deadlocked;
+it logs ``{"wedged": time}`` and a marker file spares the processes that replace it). Every
 message received is appended to ``$CODEX_HOME/requests.jsonl`` with the pid (and the
 start time); the environment goes to ``env.json``. Like the real server, every turn input
 is logged to ``logs_2.sqlite`` (a plain-text stand-in) in ``-c sqlite_home=...``, or in
@@ -476,6 +480,9 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         timer.daemon = True
         timer.start()
     elif method == "config/read":
+        if OPTIONS.get("config_error"):
+            fail(request_id, -32603, "config unavailable")
+            return
         respond(
             request_id,
             {"config": {"model": OPTIONS.get("config_model")}, "origins": {}, "layers": None},
@@ -533,6 +540,18 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         fail(request_id, -32601, f"unknown method {method}")
 
 
+def wedge() -> None:
+    """The ``wedge_after`` option: never read stdin again (the client's writes pile up in
+    the pipe), but stay alive with stdout open. Only the first process of a test wedges."""
+    marker = HOME / "wedged.flag"
+    if marker.exists():
+        return
+    marker.write_text(str(PID), encoding="utf-8")
+    log({"wedged": time.time()})
+    while True:
+        time.sleep(3600)
+
+
 def slow_exit(signum: int, frame: Any) -> None:
     """SIGTERM handler of the ``term_delay`` option: a process slow to shut down (the
     real one flushes its SQLite databases)."""
@@ -561,6 +580,8 @@ def main() -> None:
                 waiter[0].set()
         elif "id" in message:
             handle(message["id"], message["method"], message.get("params") or {})
+            if message["method"] == OPTIONS.get("wedge_after"):
+                wedge()
     if OPTIONS.get("term_delay"):
         slow_exit(signal.SIGTERM, None)  # stdin closed: shut down just as slowly
 

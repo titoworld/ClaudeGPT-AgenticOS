@@ -88,6 +88,9 @@ MAX_DEBATE_ROUNDS = 4
 TITLE_MAX_CHARS = 60
 DEFAULT_TITLE = "Conversa nova"
 STATUS_TIMEOUT_SECONDS = 2.0
+"""How long a turn waits for a provider's status (the model in the turn cache key)."""
+STATUS_CHECK_TIMEOUT_SECONDS = 30.0
+"""A status check still running after this long is abandoned; the next turn asks again."""
 PREWARM_TIMEOUT_SECONDS = 5.0
 
 _DEFAULT_CONFIG = EngineConfig()
@@ -297,6 +300,8 @@ class Engine:
         self._clock = clock
         self._retry_delay = retry_delay
         self._identities: dict[AgentName, str] = {}
+        self._status_checks: dict[AgentName, asyncio.Task[None]] = {}
+        """The latest status check of each agent (see :meth:`_identity`)."""
         self._models: dict[AgentName, str] = {}
         """Model name per agent for StreamStarted, from ``status()`` or the first result."""
 
@@ -377,22 +382,28 @@ class Engine:
         turn.context = await self._prepare_context(turn, threshold)
 
         agents = self._agents(request)
-        identities = dict(
-            zip(agents, await asyncio.gather(*(self._identity(a) for a in agents)), strict=True)
+        identities = await asyncio.gather(
+            *(self._identity(agent, request.models.get(agent)) for agent in agents)
         )
-        for agent in agents:
-            if model := request.models.get(agent):
-                identities[agent] = f"{self._providers[agent].mode}:{model}"
-        cache_key = turn_cache_key(
-            mode=request.mode,
-            target=request.target,
-            options=request.options,
-            question=turn.question,
-            context_fingerprint=context_fingerprint(turn.context),
-            identities=identities,
+        known = {
+            agent: identity for agent, identity in zip(agents, identities, strict=True) if identity
+        }
+        # A key without the model of every agent would match other models' turns: a turn
+        # that could not learn one neither reads nor writes the turn cache.
+        cache_key = (
+            turn_cache_key(
+                mode=request.mode,
+                target=request.target,
+                options=request.options,
+                question=turn.question,
+                context_fingerprint=context_fingerprint(turn.context),
+                identities=known,
+            )
+            if len(known) == len(agents)
+            else None
         )
         cached: CachedTurn | None = None
-        if request.options.use_cache:
+        if request.options.use_cache and cache_key is not None:
             try:
                 cached = await self._store.cache_get(cache_key, self._clock())
             except Exception:
@@ -500,25 +511,50 @@ class Engine:
             meta["models"] = models
         return meta
 
-    async def _identity(self, agent: AgentName) -> str:
-        """``"<mode>:<model>"`` of an agent's provider (part of the cache key).
+    async def _identity(self, agent: AgentName, model: str | None = None) -> str | None:
+        """``"<mode>:<model>"`` of an agent's provider (part of the cache key), with the
+        ``model`` the turn asks for, else the provider's default; None while unknown.
 
-        Asked once per process: models only change with the configuration, which
-        requires a restart. An unreadable status is remembered as ``?`` so a slow
-        provider never delays later turns.
+        The default is asked until a status answers, then remembered for the process:
+        models only change with the configuration, which requires a restart. A turn
+        waits at most STATUS_TIMEOUT_SECONDS; a slower status is not cancelled (the
+        provider caches what it learns) and its answer serves the next turns. A failure
+        or an unavailable provider is never remembered: a placeholder or a guessed model
+        in the key would match another model's turns.
         """
+        if model:
+            return f"{self._providers[agent].mode}:{model}"
         identity = self._identities.get(agent)
         if identity is None:
-            provider = self._providers[agent]
-            try:
-                status = await asyncio.wait_for(provider.status(), STATUS_TIMEOUT_SECONDS)
-                model = status.model
-                self._models.setdefault(agent, model)
-            except Exception:
-                logger.warning("Could not read the status of %s", agent, exc_info=True)
-                model = "?"
-            identity = self._identities.setdefault(agent, f"{provider.mode}:{model}")
+            check = self._status_checks.get(agent)
+            if check is None or check.done():
+                check = asyncio.create_task(self._check_status(agent), name=f"status-{agent}")
+                self._status_checks[agent] = check
+            await asyncio.wait((check,), timeout=STATUS_TIMEOUT_SECONDS)
+            identity = self._identities.get(agent)
+            if identity is None and not check.done():
+                logger.warning("The status of %s is slow: this turn skips the turn cache", agent)
         return identity
+
+    async def _check_status(self, agent: AgentName) -> None:
+        """Ask a provider's status and remember its model identity (never raises). An
+        unavailable provider, or one that names no model, is not remembered either: it
+        may not have read its configuration yet, so its model would be a guess."""
+        provider = self._providers[agent]
+        try:
+            status = await asyncio.wait_for(provider.status(), STATUS_CHECK_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning(
+                "Could not read the status of %s (asked again on the next turn)",
+                agent,
+                exc_info=True,
+            )
+            return
+        if not status.available or not status.model:
+            logger.info("The model of %s is not known yet: asked again on the next turn", agent)
+            return
+        self._models.setdefault(agent, status.model)
+        self._identities.setdefault(agent, f"{provider.mode}:{status.model}")
 
     async def _prepare_context(self, turn: _Turn, threshold: int | None) -> TurnContext:
         """Canonical history of the conversation, compacted if it is too long."""
@@ -550,12 +586,15 @@ class Engine:
         turn.accounting.compaction_per_request = result.tokens_removed
         return result.context
 
-    async def _finish(self, turn: _Turn, consensus: Consensus | None, cache_key: str) -> None:
+    async def _finish(
+        self, turn: _Turn, consensus: Consensus | None, cache_key: str | None
+    ) -> None:
         accounting = turn.accounting
         await self._record_savings(turn)
         # Only whole, complete turns are replayed: never one with a failed, degraded or
-        # cut-off message.
-        if not turn.degraded and not turn.failed_agents and not turn.truncated and turn.stored:
+        # cut-off message, nor one whose key does not say which models answered.
+        complete = not turn.degraded and not turn.failed_agents and not turn.truncated
+        if cache_key is not None and complete and turn.stored:
             try:
                 await self._store.cache_put(
                     cache_key,

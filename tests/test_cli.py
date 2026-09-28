@@ -1,5 +1,8 @@
 import asyncio
+import json
 import stat
+import tempfile
+import tomllib
 from collections.abc import Iterator, Sequence
 from datetime import date, timedelta
 from importlib.metadata import version
@@ -278,6 +281,35 @@ async def test_doctor_reports_cli_versions_and_limits(tmp_path: Path) -> None:
     assert "       Límit de 5h: 42% usat (allowed)." in out
 
 
+async def test_the_cli_version_checks_get_only_the_allowlisted_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``claude --version`` and ``codex --version`` run with the same closed environment
+    as the CLIs themselves (CLAUDE.md): never the app's API keys or AOS_* settings."""
+    for name, value in (
+        ("AOS_ANTHROPIC_API_KEY", "sk-ant-secret"),
+        ("OPENAI_API_KEY", "sk-openai-secret"),
+        ("AOS_SESSION_SECRET", "session-secret"),
+    ):
+        monkeypatch.setenv(name, value)
+    shown = "${AOS_ANTHROPIC_API_KEY}${OPENAI_API_KEY}${AOS_SESSION_SECRET}"
+    for name in ("claude", "codex"):
+        script = tmp_path / name
+        script.write_text(f'#!/bin/sh\necho "{name} [{shown}] home=${{HOME:+yes}}"\n')
+        script.chmod(0o755)
+    settings = await ready_settings(
+        tmp_path,
+        claude_mode="cli",
+        claude_cli_path=str(tmp_path / "claude"),
+        chatgpt_mode="cli",
+        codex_cli_path=str(tmp_path / "codex"),
+    )
+    _, out = await doctor(settings, fakes())
+    assert "secret" not in out
+    assert f"[ OK ] CLI de Claude Code: {tmp_path / 'claude'} (claude [] home=yes)" in out
+    assert f"[ OK ] CLI de Codex: {tmp_path / 'codex'} (codex [] home=yes)" in out
+
+
 async def test_doctor_reports_critical_problems(tmp_path: Path) -> None:
     settings = isolated_settings(
         data_dir=tmp_path / "data",
@@ -336,6 +368,173 @@ async def test_doctor_reports_a_missing_owner(tmp_path: Path) -> None:
     assert "[ERROR] No hi ha cap propietari configurat" in out
 
 
+FAKE_CODEX = Path(__file__).parent / "providers" / "fixtures" / "codex" / "fake_app_server.py"
+
+
+def codex_state_dirs(codex_home: Path) -> list[Path]:
+    """``sqlite_home`` of every app-server the fake Codex CLI started."""
+    log = codex_home / "requests.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    starts = [entry["argv"] for entry in map(json.loads, lines) if "argv" in entry]
+    return [
+        Path(tomllib.loads(value)["sqlite_home"])
+        for argv in starts
+        if argv[:1] == ["app-server"]
+        for value in argv
+        if value.startswith("sqlite_home=")
+    ]
+
+
+@pytest.fixture
+def live_codex_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The running server's Codex state directory, with the log its app-server has open."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    (tmp_path / "codex-home").mkdir()
+    live = tmp_path / "codex-state"
+    live.mkdir()
+    live.chmod(0o750)
+    (live / "logs_2.sqlite").write_text("LIVE-PROMPT", encoding="utf-8")
+    return live
+
+
+def assert_untouched(live: Path) -> None:
+    assert sorted(path.name for path in live.iterdir()) == ["logs_2.sqlite"]
+    assert (live / "logs_2.sqlite").read_text(encoding="utf-8") == "LIVE-PROMPT"
+    assert stat.S_IMODE(live.stat().st_mode) == 0o750
+
+
+async def test_doctor_never_touches_the_live_codex_state(
+    tmp_path: Path, live_codex_state: Path
+) -> None:
+    """With the app running, doctor starts a Codex app-server of its own. A start deletes
+    the log databases of its state directory, which the server's app-server has open, and
+    two app-servers must never share one: doctor's gets a private temporary directory."""
+    settings = await ready_settings(
+        tmp_path,
+        chatgpt_mode="cli",
+        codex_cli_path=str(FAKE_CODEX),
+        codex_state_dir=live_codex_state,
+    )
+    lines: list[str] = []
+    code = await run_doctor(settings, out=lines.append, status_timeout=10)
+    out = "\n".join(lines)
+    assert code == 0, out
+    assert "[ OK ] ChatGPT (mode cli, model gpt-6-astra): Subscripció ChatGPT activa" in out
+    assert_untouched(live_codex_state)
+    [private] = codex_state_dirs(tmp_path / "codex-home")
+    assert not private.is_relative_to(live_codex_state.resolve())
+    assert not private.exists()  # removed when doctor is done
+
+
+async def test_doctor_skips_codex_without_a_private_state_directory(
+    tmp_path: Path, live_codex_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a private state directory doctor does not start Codex at all: it never
+    falls back to the live one."""
+
+    def no_space(*args: Any, **kwargs: Any) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", no_space)
+    settings = await ready_settings(
+        tmp_path,
+        chatgpt_mode="cli",
+        codex_cli_path=str(FAKE_CODEX),
+        codex_state_dir=live_codex_state,
+    )
+    lines: list[str] = []
+    code = await run_doctor(settings, out=lines.append, status_timeout=10)
+    out = "\n".join(lines)
+    assert code == 1, out
+    assert (
+        "[ERROR] ChatGPT (mode cli): no s'ha pogut crear un directori temporal per a l'estat "
+        "de Codex ([Errno 28] No space left on device)."
+    ) in out
+    assert "[ OK ] Claude (mode fake, model fake-claude): Mode demostració" in out
+    assert_untouched(live_codex_state)
+    assert codex_state_dirs(tmp_path / "codex-home") == []  # no app-server at all
+
+
+def version_only(tmp_path: Path) -> str:
+    """A ``codex`` that only answers ``--version`` (doctor's providers are stubbed)."""
+    script = tmp_path / "codex-version"
+    script.write_text("#!/bin/sh\necho 'codex-cli 0.157.1'\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+class StuckCodex(FakeProvider):
+    """ChatGPT whose status and close only end when cancelled (a slow app-server)."""
+
+    def __init__(self) -> None:
+        super().__init__("chatgpt")
+        self.asked = asyncio.Event()
+        self.closing = asyncio.Event()
+
+    async def status(self) -> ProviderStatus:
+        self.asked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        self.closing.set()
+        await asyncio.Event().wait()
+
+
+async def test_doctor_removes_its_codex_state_even_when_cancelled_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second Ctrl+C while doctor's Codex is being closed still removes its temporary
+    state directory."""
+    from agentic_os.providers import factory
+
+    codex = StuckCodex()
+    dirs: list[Path] = []
+
+    def own(
+        settings: Settings, *, codex_state_dir: Path | None = None
+    ) -> dict[AgentName, Provider]:
+        assert codex_state_dir is not None and codex_state_dir.is_dir()
+        dirs.append(codex_state_dir)
+        return {"claude": FakeProvider("claude"), "chatgpt": codex}
+
+    monkeypatch.setattr(factory, "build_providers", own)
+    settings = await ready_settings(
+        tmp_path, chatgpt_mode="cli", codex_cli_path=version_only(tmp_path)
+    )
+    running = asyncio.create_task(run_doctor(settings, out=lambda _: None, status_timeout=60))
+    await asyncio.wait_for(codex.asked.wait(), 5)
+    running.cancel()  # the first Ctrl+C: doctor closes its providers
+    await asyncio.wait_for(codex.closing.wait(), 5)
+    running.cancel()  # the second one, while Codex is closing
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    [state] = dirs
+    assert not state.exists()
+
+
+async def test_doctor_removes_its_codex_state_when_the_providers_cannot_be_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentic_os.providers import factory
+
+    dirs: list[Path] = []
+
+    def broken(settings: Settings, *, codex_state_dir: Path | None = None) -> Any:
+        assert codex_state_dir is not None
+        dirs.append(codex_state_dir)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(factory, "build_providers", broken)
+    settings = await ready_settings(
+        tmp_path, chatgpt_mode="cli", codex_cli_path=version_only(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_doctor(settings, out=lambda _: None, status_timeout=1)
+    [state] = dirs
+    assert not state.exists()
+
+
 def test_doctor_command(env: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["doctor"]) == 1
     out = capsys.readouterr().out
@@ -349,5 +548,5 @@ def test_cli_version_handles_failures(tmp_path: Path) -> None:
     failing = tmp_path / "failing"
     failing.write_text("#!/bin/sh\nexit 3\n")
     failing.chmod(0o755)
-    assert asyncio.run(cli_version(str(failing))) is None
-    assert asyncio.run(cli_version(str(tmp_path / "missing"))) is None
+    assert asyncio.run(cli_version(str(failing), {})) is None
+    assert asyncio.run(cli_version(str(tmp_path / "missing"), {})) is None

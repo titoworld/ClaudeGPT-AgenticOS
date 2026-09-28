@@ -148,9 +148,12 @@ LINE_LIMIT = 32 * 1024 * 1024
 """Longest JSON-RPC line accepted from the server (a turn/completed repeats the answer)."""
 INITIALIZE_TIMEOUT = 30.0
 CONTROL_TIMEOUT = 30.0
-"""thread/start and turn/start answers (local work, but they may touch the network)."""
+"""thread/start and turn/start (local work, but they may touch the network). Like every
+request timeout it covers the write too: a process that stops reading its stdin fills
+the pipe. A process that does not answer thread/start is replaced."""
 CLEANUP_TIMEOUT = 10.0
-"""turn/interrupt and thread/unsubscribe: no answer means the process is wedged."""
+"""turn/interrupt and thread/unsubscribe, and the answers to the server's requests: no
+answer (or no room in its stdin) means the process is wedged."""
 STATUS_REQUEST_TIMEOUT = 10.0
 MODELS_TTL = 600.0
 MAX_MODEL_PAGES = 5
@@ -276,8 +279,10 @@ class _AppServerConnection:
         self._closing = False
         self._terminated = asyncio.Event()
         self.started_at = time.monotonic()
-        self.tainted = False
-        """Sub-agents ran in this process: it is replaced as soon as no call uses it."""
+        self.tainted: str | None = None
+        """Why this process may hold threads nobody releases (sub-agents ran in it, or a
+        thread/start was answered too late), if it does: it is replaced as soon as no call
+        uses it."""
         self.stderr_tail: deque[str] = deque(maxlen=40)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stdout_task = asyncio.create_task(self._read_stdout(), name="codex-stdout")
@@ -298,7 +303,10 @@ class _AppServerConnection:
     async def request(self, method: str, params: Any, timeout: float) -> Any:
         """Send a request and wait for its result (``CodexRpcError`` on an error answer).
 
-        The pending entry is always removed, on timeout and cancellation too."""
+        ``timeout`` covers the write as well as the answer: a process that stops reading
+        its stdin fills the pipe, and the write would wait for it forever, holding the
+        write lock of every other request. The pending entry is always removed, on
+        timeout and cancellation too."""
         if not self._alive:
             raise ProcessGone("codex app-server is not running")
         self._next_id += 1
@@ -306,16 +314,19 @@ class _AppServerConnection:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
-            await self._send({"id": request_id, "method": method, "params": params})
-            return await asyncio.wait_for(future, timeout)
+            async with asyncio.timeout(timeout):
+                await self._send({"id": request_id, "method": method, "params": params})
+                return await future
         finally:
             self._pending.pop(request_id, None)
 
-    async def notify(self, method: str, params: Any = None) -> None:
+    async def notify(self, method: str, params: Any = None, *, timeout: float) -> None:
+        """Send a notification; ``timeout`` bounds the write (``TimeoutError``)."""
         message: JsonObject = {"method": method}
         if params is not None:
             message["params"] = params
-        await self._send(message)
+        async with asyncio.timeout(timeout):
+            await self._send(message)
 
     def listen(self, thread_id: str) -> asyncio.Queue[tuple[str, JsonObject] | None]:
         queue: asyncio.Queue[tuple[str, JsonObject] | None] = asyncio.Queue()
@@ -343,6 +354,10 @@ class _AppServerConnection:
     # -- internals ---------------------------------------------------------------------
 
     async def _send(self, message: JsonObject) -> None:
+        """Write one line. The transport takes the whole line at once (what the pipe does
+        not accept waits in its buffer), so a caller that gives up while it waits for the
+        lock or for ``drain()`` never leaves part of a frame: the line is written whole,
+        before any later one, or not at all."""
         stdin = self._process.stdin
         if stdin is None or not self._alive:
             raise ProcessGone("codex app-server is not running")
@@ -439,8 +454,17 @@ class _AppServerConnection:
         else:
             logger.info("Declined Codex app-server request %s", method)
             reply = {"id": request_id, "result": result}
-        with contextlib.suppress(ProcessGone):
-            await self._send(reply)
+        try:
+            async with asyncio.timeout(CLEANUP_TIMEOUT):
+                await self._send(reply)
+        except ProcessGone:
+            pass
+        except TimeoutError:
+            # The process has stopped reading its stdin: the requests that release the
+            # call find it stuck as well, and replace it.
+            logger.warning(
+                "Codex app-server did not take the answer to %s: it has stopped reading", method
+            )
 
     def _spawn(self, coroutine: Awaitable[None]) -> None:
         task = asyncio.ensure_future(coroutine)
@@ -492,12 +516,22 @@ async def _until[T](deadline: float, awaitable: Awaitable[T]) -> T:
     return await asyncio.wait_for(awaitable, max(0.0, deadline - time.monotonic()))
 
 
-async def _outcome(task: asyncio.Task[Any]) -> Any | None:
-    """Result of a task, or None if it failed or was cancelled (without raising)."""
-    await asyncio.wait((task,))
-    if task.cancelled() or task.exception() is not None:
+def _outcome(task: asyncio.Task[Any]) -> Any | None:
+    """Result of a task, or None if it is still running, failed or was cancelled."""
+    if not task.done() or task.cancelled() or task.exception() is not None:
         return None
     return task.result()
+
+
+def _timed_out(task: asyncio.Task[Any]) -> bool:
+    """Whether a finished request task failed for lack of an answer in time."""
+    return task.done() and not task.cancelled() and isinstance(task.exception(), TimeoutError)
+
+
+def _retrieved(task: asyncio.Task[Any]) -> None:
+    """Done callback of a task that nobody awaits any more: its exception is expected."""
+    if not task.cancelled():
+        task.exception()
 
 
 def _as_int(value: Any) -> int:
@@ -701,7 +735,8 @@ class CodexAppServerProvider:
     """ChatGPT in ``cli`` mode: ``codex app-server`` signed in with the owner's ChatGPT plan.
 
     The process is spawned lazily (or by :meth:`prewarm`), shared by concurrent calls
-    and re-spawned with exponential backoff if it dies.
+    and re-spawned with exponential backoff if it dies. One that stops answering, or
+    stops reading its stdin, is replaced when a call that used it is released.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -866,7 +901,7 @@ class CodexAppServerProvider:
                             completed.add(item.get("id"))
                     run = sub_agent_run(item)
                     if run is not None:
-                        conn.tainted = True
+                        conn.tainted = "ChatGPT started sub-agents in it"
                         sub_agent_threads.update(run[1])
                         if run[0] not in sub_agent_runs:
                             sub_agent_runs.add(run[0])
@@ -937,8 +972,13 @@ class CodexAppServerProvider:
             if conn is not None and thread_task is not None:
                 if thread_id is not None:
                     conn.stop_listening(thread_id)
+                # No one else may await the call's requests: the release can be cancelled
+                # by aclose() even before it starts. Their exceptions are expected.
+                for task in (thread_task, turn_task):
+                    if task is not None:
+                        task.add_done_callback(_retrieved)
                 self._releasing += 1
-                self._spawn(
+                release = self._spawn(
                     self._release_thread(
                         conn,
                         thread_task,
@@ -946,6 +986,10 @@ class CodexAppServerProvider:
                         tuple(sorted(sub_agent_threads)),
                     )
                 )
+                if release is None:
+                    self._releasing -= 1
+                else:  # also when it is cancelled before it starts
+                    release.add_done_callback(lambda _: self._released(conn))
 
     @staticmethod
     def _truncated(
@@ -1001,11 +1045,12 @@ class CodexAppServerProvider:
         """Interrupt an unfinished turn and unsubscribe its thread and the sub-agent
         threads it started (in the background, so a cancelled call returns at once).
         A server that does not answer is restarted, and so is one that ran sub-agents,
-        once no call uses it."""
-        try:
-            await self._release(conn, thread_task, turn_task, sub_agents)
-        finally:
-            self._releasing -= 1
+        once no call uses it (see :meth:`_released`)."""
+        await self._release(conn, thread_task, turn_task, sub_agents)
+
+    def _released(self, conn: _AppServerConnection) -> None:
+        """Done callback of a release, however it ended."""
+        self._releasing -= 1
         self._recycle_if_idle(conn)
 
     async def _release(
@@ -1015,16 +1060,29 @@ class CodexAppServerProvider:
         turn_task: asyncio.Task[Any] | None,
         sub_agents: Sequence[str],
     ) -> None:
-        thread = await _outcome(thread_task)
-        if thread is None:
-            return
-        thread_id = _as_dict(_as_dict(thread).get("thread")).get("id")
-        if not isinstance(thread_id, str):
-            return
+        # Bounded: the call's own requests end by themselves (their timeout covers the
+        # write too), so one still running after this long means the process is stuck.
+        requests = [task for task in (thread_task, turn_task) if task is not None]
+        _, running = await asyncio.wait(requests, timeout=CONTROL_TIMEOUT + CLEANUP_TIMEOUT)
+        thread_id = _as_dict(_as_dict(_outcome(thread_task)).get("thread")).get("id")
         try:
+            if running:
+                raise TimeoutError("codex app-server did not answer the call's requests")
+            if _timed_out(thread_task):
+                # No thread/start answer leaves no thread to release, so nothing else
+                # would find out whether the process still answers. A cheap request
+                # tells a stuck process (replaced now) from a busy one: that one keeps
+                # serving its other calls and is replaced once idle, since the thread
+                # may still be created and could never be released.
+                with contextlib.suppress(CodexRpcError):  # an error is an answer too
+                    await conn.request("config/read", {}, CLEANUP_TIMEOUT)
+                logger.warning("Codex answered too late; its app-server is replaced once idle")
+                conn.tainted = "a thread/start was answered too late"
+                return
+            if not isinstance(thread_id, str):
+                return
             if turn_task is not None:
-                turn = await _outcome(turn_task)
-                turn_id = _as_dict(_as_dict(turn).get("turn")).get("id")
+                turn_id = _as_dict(_as_dict(_outcome(turn_task)).get("turn")).get("id")
                 if isinstance(turn_id, str):
                     with contextlib.suppress(CodexRpcError):
                         await conn.request(
@@ -1045,18 +1103,17 @@ class CodexAppServerProvider:
         except ProcessGone:
             pass
         finally:
-            self._threads.discard(thread_id)
+            if isinstance(thread_id, str):
+                self._threads.discard(thread_id)
 
     def _recycle_if_idle(self, conn: _AppServerConnection) -> None:
-        """Replace a process that ran sub-agents once no call uses it: interrupted and
-        unsubscribed, their threads still hold memory (~2 MB each) that 0.157.1 never
-        gives back, and a turn that starts after the last check would go unnoticed."""
+        """Replace a tainted process once no call uses it. Sub-agent threads, even
+        interrupted and unsubscribed, still hold memory (~2 MB each) that 0.157.1 never
+        gives back, and a turn that starts after the last check would go unnoticed; a
+        thread whose thread/start was answered too late is never released at all."""
         idle = self._active_calls == 0 and self._releasing == 0
         if conn.tainted and idle and self._conn is conn and not self._closed:
-            logger.warning(
-                "Restarting the Codex app-server (pid %d): ChatGPT started sub-agents in it",
-                conn.pid,
-            )
+            logger.warning("Restarting the Codex app-server (pid %d): %s", conn.pid, conn.tainted)
             self._retire(conn)
 
     # -- process lifecycle ---------------------------------------------------------------
@@ -1156,7 +1213,7 @@ class CodexAppServerProvider:
                 },
                 INITIALIZE_TIMEOUT,
             )
-            await conn.notify("initialized")
+            await conn.notify("initialized", timeout=INITIALIZE_TIMEOUT)
         except BaseException as exc:
             if conn.alive and isinstance(exc, Exception):
                 self._record_failure()
@@ -1215,7 +1272,10 @@ class CodexAppServerProvider:
         """Seconds to wait before the next spawn: none after a single failure."""
         if self._failures <= 1:
             return 0.0
-        delay = min(BACKOFF_MAX, BACKOFF_BASE * 2.0 ** (self._failures - 2))
+        # The exponent is capped before the power, which overflows (OverflowError) from
+        # 1026 failures in a row on, long after the delay has reached BACKOFF_MAX.
+        exponent = min(self._failures - 2, math.ceil(math.log2(BACKOFF_MAX / BACKOFF_BASE)))
+        delay = min(BACKOFF_MAX, BACKOFF_BASE * 2.0**exponent)
         return max(0.0, self._last_failure + delay - time.monotonic())
 
     def _retire(self, conn: _AppServerConnection) -> None:
@@ -1225,15 +1285,18 @@ class CodexAppServerProvider:
             self._stray_turns.clear()
         self._spawn(conn.close())
 
-    def _spawn(self, coroutine: Awaitable[None]) -> None:
+    def _spawn(self, coroutine: Awaitable[None]) -> asyncio.Future[None] | None:
+        """Run ``coroutine`` in the background (cancelled by :meth:`aclose`); None when
+        there is no running loop (interpreter shutdown)."""
         try:
             task = asyncio.ensure_future(coroutine)
-        except RuntimeError:  # no running loop (interpreter shutdown)
+        except RuntimeError:
             if asyncio.iscoroutine(coroutine):
                 coroutine.close()
-            return
+            return None
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        return task
 
     def _on_notification(self, conn: _AppServerConnection, method: str, params: JsonObject) -> None:
         """Notifications no call listens to: account-wide ones, and the activity of
@@ -1268,7 +1331,7 @@ class CodexAppServerProvider:
         if turn_id in self._stray_turns:
             return
         self._stray_turns.add(turn_id)
-        conn.tainted = True
+        conn.tainted = "ChatGPT started sub-agents in it"
         logger.warning(
             "Codex is running a turn outside any call (thread %s, turn %s), probably a "
             "sub-agent started by the model; interrupting it",
@@ -1341,8 +1404,10 @@ class CodexAppServerProvider:
 
     async def _refresh_status(self) -> ProviderStatus:
         """Read the account and cache the status before the slower (networked) usage
-        read, so a caller that gives up early still leaves a status behind."""
-        model = self._settings.chatgpt_model or self._default_model or FALLBACK_MODEL_LABEL
+        read, so a caller that gives up early still leaves a status behind. The model is
+        the one a thread gets, or "" while Codex cannot say which: never a guess, since
+        the engine keys its turn cache on it."""
+        model = self._settings.chatgpt_model or self._default_model or ""
 
         def remember(available: bool, detail: str, ttl: float) -> ProviderStatus:
             status = ProviderStatus(

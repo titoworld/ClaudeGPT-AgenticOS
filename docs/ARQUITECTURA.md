@@ -57,7 +57,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | tokens de l'historial original − tokens del context compactat |
 | Parada per consens | S'ometen les rondes que queden | tokens mitjans d'una ronda × rondes omeses |
 | `UNCHANGED` | Un agent d'acord no reescriu la resposta (com a molt hi afegeix una nota curta) | longitud de la resposta no reescrita |
-| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents i context) es respon sense cridar cap model | tokens del torn original |
+| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau | tokens del torn original |
 | Memòria cau del proveïdor | Prefixos estables (prompt de sistema primer) perquè Anthropic i OpenAI reaprofitin el càlcul | `cache_read_tokens` |
 
 ## Proveïdors
@@ -106,12 +106,13 @@ Cada proveïdor ho aplica així:
 - Sessions al servidor (només se'n desa el hash), cookie `__Host-` HttpOnly, Secure, SameSite=Strict, caducitat per inactivitat i absoluta.
 - Comprovació d'`Origin` a totes les peticions que canvien estat i al WebSocket.
 - CSP estricta (`script-src 'self'`), HSTS, `frame-ancestors 'none'`; el markdown dels models es neteja amb DOMPurify.
-- Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi en un procés fill (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació només en deixa córrer un alhora (`agents.max_threads=1`), interromp de seguida els torns que no són de cap crida en curs, atura la crida que en fa servir més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat, i els registres s'esborren cada vegada que s'engega Codex.
+- Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi en un procés fill (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació només en deixa córrer un alhora (`agents.max_threads=1`), interromp de seguida els torns que no són de cap crida en curs, atura la crida que en fa servir més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat, i els registres s'esborren cada vegada que s'engega Codex. Per això `agentic-os doctor` engega el seu propi Codex amb un directori d'estat temporal, que esborra en acabar: mai no comparteix el de l'aplicació en marxa. També `claude --version` i `codex --version` s'executen amb la llista tancada de variables d'entorn de cada CLI.
 - Contenidors sense root (l'aplicació amb l'usuari 10001 i Caddy amb el 10002; només `caddy-init` corre uns segons com a root, sense xarxa i amb només les *capabilities* que necessita `chown`, per donar els volums de Caddy al seu usuari), `no-new-privileges`, sense *capabilities* efectives i amb límits de memòria, CPU i processos.
 
 ## Latència i connexió
 
 - Una sola connexió WebSocket persistent (sense *handshakes* per petició), amb *ping/pong* i reconnexió automàtica.
 - Els torns continuen al servidor si es talla la connexió; en reconnectar, el client recupera els esdeveniments pendents (`turn.subscribe`).
+- El procés de Codex es recupera sol. Cada petició té un temps màxim que inclou escriure-la, perquè un procés encallat que deixa de llegir l'entrada no pugui bloquejar les altres. Quan s'allibera una crida, un procés que no respon es reinicia, i després de fallades seguides els reinicis s'espacien com a molt 30 s. Si una crida no rep resposta en començar, una petició barata distingeix un procés encallat, que es reinicia de seguida, d'un d'ocupat: aquest continua servint les altres crides i es reinicia quan queda lliure.
 - Les dues IA treballen en paral·lel; el text arriba en *streaming*.
 - uvloop + httptools, HTTP/3 a Caddy, fitxers estàtics amb hash i memòria cau llarga, three.js carregat de manera diferida perquè la interfície aparegui a l'instant.
