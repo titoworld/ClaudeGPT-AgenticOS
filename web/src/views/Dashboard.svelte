@@ -123,6 +123,17 @@
   });
 
   const k = $derived(stats ? kpis(stats) : null);
+  // What the processed tokens are made of: the provider's cache is billed too (ADR 0008).
+  const tokenParts = $derived(
+    k
+      ? [
+          { key: 'input', label: 'Entrada', value: k.processed.input },
+          { key: 'cache-read', label: 'Lectura de memòria cau', value: k.processed.cacheRead },
+          { key: 'cache-write', label: 'Escriptura a memòria cau', value: k.processed.cacheWrite },
+          { key: 'output', label: 'Sortida', value: k.processed.output },
+        ]
+      : [],
+  );
   const money = $derived(stats ? costKpis(stats) : null);
   const tokenDays = $derived(stats ? dailyTokens(stats) : []);
   const costDays = $derived(stats && money ? dailyCost(stats, rateOf(money.fx) ?? 0) : []);
@@ -134,7 +145,7 @@
 
   const tokensTable = $derived(
     chartTable(tokenDays, AGENT_SERIES, {
-      caption: 'Tokens consumits per dia i agent',
+      caption: 'Tokens processats per dia i agent',
       categoryLabel: 'Dia',
       format: formatInt,
       total: true,
@@ -188,7 +199,7 @@
 {#snippet agentAmounts(values: Record<string, number>)}
   <ul class="agents">
     {#each AGENTS as a (a)}
-      <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]}<strong>{formatAmount(values[a])}</strong></li>
+      <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]} <strong>{formatAmount(values[a])}</strong></li>
     {/each}
   </ul>
 {/snippet}
@@ -270,7 +281,7 @@
           <p class="value">{formatTokens(k.saved.total)}</p>
           {#if k.saved.ratio != null}
             <p class="sub">
-              <strong>{formatPercent(k.saved.ratio)}</strong> menys del que s’hauria gastat sense optimitzacions
+              <strong>{formatPercent(k.saved.ratio)}</strong> menys tokens dels que s’haurien processat sense optimitzacions
             </p>
             <Meter
               value={k.saved.ratio * 100}
@@ -293,28 +304,33 @@
         </article>
 
         <article class="tile">
-          <h3>Tokens consumits</h3>
-          <p class="value">{formatTokens(k.consumed.total)}</p>
-          {#if k.consumed.total > 0}
+          <h3>Tokens processats</h3>
+          <p class="value">{formatTokens(k.processed.total)}</p>
+          {#if k.processed.total > 0}
             <div class="split" aria-hidden="true">
               {#each AGENTS as a (a)}
-                {#if k.consumed.byAgent[a] > 0}
-                  <span style:flex-grow={k.consumed.byAgent[a]} style:background="var(--{a})"></span>
+                {#if k.processed.byAgent[a] > 0}
+                  <span style:flex-grow={k.processed.byAgent[a]} style:background="var(--{a})"></span>
                 {/if}
               {/each}
             </div>
           {/if}
           <ul class="agents">
             {#each AGENTS as a (a)}
-              <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]}<strong>{formatTokens(k.consumed.byAgent[a])}</strong></li>
+              <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]} <strong>{formatTokens(k.processed.byAgent[a])}</strong></li>
+            {/each}
+          </ul>
+          <ul class="parts" aria-label="Tokens processats per tipus">
+            {#each tokenParts as part (part.key)}
+              <li><span>{part.label}</span> <strong>{formatTokens(part.value)}</strong></li>
             {/each}
           </ul>
           <p class="sub">
-            {plural(k.consumed.calls, 'crida', 'crides', formatInt(k.consumed.calls))} · {plural(
-              k.consumed.errors,
+            {plural(k.processed.calls, 'crida', 'crides', formatInt(k.processed.calls))} · {plural(
+              k.processed.errors,
               'error',
               'errors',
-              formatInt(k.consumed.errors),
+              formatInt(k.processed.errors),
             )}
           </p>
         </article>
@@ -546,7 +562,7 @@
 
         <ChartCard
           title="Tokens per dia"
-          subtitle="Entrada i sortida de cada agent"
+          subtitle="Tokens processats per cada agent: entrada, memòria cau i sortida"
           legend={AGENT_SERIES}
           table={tokensTable}
           empty={isEmpty(tokenDays)}
@@ -555,7 +571,7 @@
           <StackedColumns
             data={tokenDays}
             series={AGENT_SERIES}
-            label="Tokens consumits per dia i agent"
+            label="Tokens processats per dia i agent"
             format={formatInt}
             tickFormat={formatCompact}
           />
@@ -622,8 +638,9 @@
               <h4>Memòria cau del proveïdor</h4>
               <p>
                 El prompt de sistema va primer i no canvia, així Anthropic i OpenAI en reaprofiten el càlcul. En aquest
-                període s’han llegit <strong>{formatTokens(k.consumed.cacheRead)}</strong> tokens de la seva memòria cau, més
-                barats i no comptats com a estalvi.
+                període s’han llegit <strong>{formatTokens(k.processed.cacheRead)}</strong> tokens de la seva memòria cau i
+                se n’hi han escrit <strong>{formatTokens(k.processed.cacheWrite)}</strong>. Compten com a tokens processats,
+                cadascun al seu preu, i no com a estalvi.
               </p>
             </div>
           </li>
@@ -1064,6 +1081,31 @@
   .agents strong {
     margin-left: auto;
     color: var(--text-primary);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* What the processed tokens are made of, under the agents. */
+  .parts {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 6px 0 0;
+    border-top: 1px solid var(--border);
+    list-style: none;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+
+  .parts li {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .parts strong {
+    margin-left: auto;
+    color: var(--text-secondary);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }

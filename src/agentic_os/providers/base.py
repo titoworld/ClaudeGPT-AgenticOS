@@ -10,6 +10,12 @@ Integrity of a reply (docs/adr/0005-integritat-de-les-respostes.md): a result sa
 whether the reply is complete or was cut off (``truncated``, ``finish_reason``); a
 refusal is never a result, even when some text streamed before it; a stream that ends
 without the vendor's final event is an error, never a complete answer.
+
+Billing: ``usage`` is always what the attempt that produced the result (or the error)
+billed, at the rates of its ``model``. Earlier attempts of the same call that another
+model declined (a server-side fallback) are ``declined``, each with its own model, and
+the engine prices and records every one of them apart: tokens of different models are
+never summed (docs/adr/0008-recompte-de-tokens.md).
 """
 
 from __future__ import annotations
@@ -76,11 +82,23 @@ class TextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class DeclinedAttempt:
+    """An attempt of a call that its model declined before another model took over (a
+    server-side fallback of the Claude API). It is billed on its own, at the rates of the
+    model that ran it; ``usage`` has no cost (the engine prices it)."""
+
+    model: str
+    usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationResult:
     text: str
     """Full generated text (the concatenation of all deltas)."""
     usage: Usage
+    """What the attempt that produced ``text`` billed (never the declined ones)."""
     model: str
+    """The model that produced ``text`` (after a fallback, the one that served)."""
     latency_ms: int
     """Wall time from call start to completion."""
     ttft_ms: int | None = None
@@ -91,6 +109,9 @@ class GenerationResult:
     The engine stores it as such and never caches the turn."""
     finish_reason: FinishReason | None = None
     """Why a truncated reply stopped (None for a complete one)."""
+    declined: tuple[DeclinedAttempt, ...] = ()
+    """The billed attempts that other models declined before ``model`` served, in order
+    (a server-side fallback); empty without one."""
 
 
 ProviderEvent = TextDelta | GenerationResult
@@ -99,9 +120,10 @@ ProviderErrorKind = Literal["auth", "rate_limit", "timeout", "unavailable", "inv
 
 
 class ProviderError(Exception):
-    """A call that failed. ``usage`` and ``model`` say what it billed when the vendor
-    reported it (a refusal, an output budget spent before any text...), so the engine
-    records its cost; None when nothing is known to be billed."""
+    """A call that failed. ``usage`` and ``model`` say what its last attempt billed when
+    the vendor reported it (a refusal, an output budget spent before any text...), so the
+    engine records its cost; None when nothing is known to be billed. ``declined`` are the
+    billed attempts other models declined before it (see :class:`DeclinedAttempt`)."""
 
     def __init__(
         self,
@@ -111,6 +133,7 @@ class ProviderError(Exception):
         retryable: bool = False,
         usage: Usage | None = None,
         model: str | None = None,
+        declined: Sequence[DeclinedAttempt] = (),
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -118,6 +141,7 @@ class ProviderError(Exception):
         self.retryable = retryable
         self.usage = usage
         self.model = model
+        self.declined: tuple[DeclinedAttempt, ...] = tuple(declined)
 
 
 def clean_refusal(text: str) -> str:
@@ -138,10 +162,12 @@ class RefusalError(ProviderError):
     ``refusal`` part). Not retryable: asking again gets the same answer, and any text
     streamed before the refusal is never an answer.
 
-    The vendor may still bill it: ``usage`` holds the billed tokens (all zero when
-    nothing is billed) and ``model`` the model that declined, so the call's cost is
-    recorded. ``category`` is the vendor's refusal category when it gives one and
-    ``refusal`` the model's own explanation (cleaned with :func:`clean_refusal`)."""
+    The vendor may still bill it: ``usage`` holds the billed tokens of the attempt that
+    refused (all zero when nothing is billed) and ``model`` the model that refused, so
+    the call's cost is recorded; after a server-side fallback, ``declined`` holds the
+    billed attempts of the models that declined before it, each at its own model.
+    ``category`` is the vendor's refusal category when it gives one and ``refusal`` the
+    model's own explanation (cleaned with :func:`clean_refusal`)."""
 
     usage: Usage
     model: str
@@ -154,8 +180,9 @@ class RefusalError(ProviderError):
         model: str,
         category: str | None = None,
         refusal: str = "",
+        declined: Sequence[DeclinedAttempt] = (),
     ) -> None:
-        super().__init__(message, kind="invalid", usage=usage, model=model)
+        super().__init__(message, kind="invalid", usage=usage, model=model, declined=declined)
         self.category = category
         self.refusal = clean_refusal(refusal)
 

@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from agentic_os.domain import AgentName, Usage
-from agentic_os.orchestrator.accounting import failed_call_usage, is_billed
+from agentic_os.orchestrator.accounting import declined_attempts, failed_call_usage, is_billed
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
 from agentic_os.orchestrator.store import History, Store, StoredMessage, UsageRecord
 from agentic_os.orchestrator.tokens import estimate_context_tokens
@@ -131,6 +131,39 @@ async def _collect(provider: Provider, request: GenerationRequest) -> Generation
     return result
 
 
+async def _record_declined(
+    source: object,
+    *,
+    agent: AgentName,
+    provider: Provider,
+    conversation_id: int,
+    store: Store,
+    price_overrides: Mapping[str, ModelPrice] | None,
+) -> Usage:
+    """Record the billed attempts other models declined before a summary call's result
+    or error (a server-side fallback), each as a call of its own model, and return what
+    they cost together."""
+    spent = Usage()
+    for model, usage in declined_attempts(source, price_overrides):
+        spent += usage
+        await store.record_usage(
+            UsageRecord(
+                conversation_id=conversation_id,
+                turn_id=None,
+                agent=agent,
+                provider_mode=provider.mode,
+                model=model,
+                purpose="summary",
+                usage=usage,
+                latency_ms=0,
+                ttft_ms=None,
+                ok=False,
+                error=f"invalid: {model} ha declinat la petició i l'ha passada a un altre model.",
+            )
+        )
+    return spent
+
+
 async def compact(
     context: TurnContext,
     cut: int,
@@ -148,9 +181,10 @@ async def compact(
     agent (the provider's own when missing). Each call gets exactly ``max_output_tokens``
     of billed output and reasoning "off". Every attempt is recorded as usage, priced
     with ``price_overrides`` over the default prices: an empty or cut-off summary keeps
-    its real model and billed tokens, and the next provider is tried. The result's
-    ``context`` is None when no provider could write the summary; its ``usage`` adds up
-    every attempt that reached a model.
+    its real model and billed tokens, and the next provider is tried; an attempt another
+    model declined before a fallback is a call of its own model. The result's ``context``
+    is None when no provider could write the summary; its ``usage`` adds up every attempt
+    that reached a model.
     """
     upto_message_id = context.messages[cut - 1].id
     spent = Usage()
@@ -180,6 +214,17 @@ async def compact(
                 logger.exception("Compaction summary by %s failed unexpectedly", agent)
             # A failure can still be billed (a refusal): it is part of the summary cost.
             model, failed = failed_call_usage(exc, request.model or "", price_overrides)
+            declined = await _record_declined(
+                exc,
+                agent=agent,
+                provider=provider,
+                conversation_id=conversation_id,
+                store=store,
+                price_overrides=price_overrides,
+            )
+            if is_billed(declined):
+                spent += declined
+                billed = True
             if is_billed(failed):
                 spent += failed
                 billed = True
@@ -199,6 +244,14 @@ async def compact(
                 )
             )
             continue
+        spent += await _record_declined(
+            result,
+            agent=agent,
+            provider=provider,
+            conversation_id=conversation_id,
+            store=store,
+            price_overrides=price_overrides,
+        )
         usage = replace(
             result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, price_overrides)
         )

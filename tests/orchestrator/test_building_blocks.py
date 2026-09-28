@@ -10,6 +10,7 @@ from agentic_os.orchestrator.cache import (
     context_fingerprint,
     normalize_question,
     replay_cost_usd,
+    replay_tokens,
     replayed_message,
     turn_cache_key,
 )
@@ -187,12 +188,15 @@ def test_replayed_message_is_flagged_as_cached_and_costs_nothing() -> None:
         "usage": dict(Usage(input_tokens=5, cost_usd=0.1).to_dict()),
         "cost_basis": "api",
         "savings": {"cache": 0},
+        "unstored_usage": dict(Usage(input_tokens=9).to_dict()),
+        "declined": [{"model": "claude-fable-5-1", "usage": dict(Usage(3).to_dict())}],
     }
     original = NewMessage(
         conversation_id=1, kind="answer", content="A", turn_id=1, agent="claude", meta=meta
     )
     replayed = replayed_message(original, conversation_id=7, turn_id=9)
     assert (replayed.conversation_id, replayed.turn_id) == (7, 9)
+    # A replay spends nothing: no usage, no failed calls, no declined attempts.
     assert replayed.meta == {"x": 1, "cached": True, "usage": Usage().to_dict()}
     assert original.meta == meta
 
@@ -215,6 +219,31 @@ def test_replay_cost_is_recomputed_at_current_prices() -> None:
     assert replay_cost_usd(messages[1:]) is None
 
 
+def test_a_replay_is_worth_each_declined_attempt_at_its_own_model_price() -> None:
+    fable: JsonValue = {"input_tokens": 20_000, "output_tokens": 800, "cache_read_tokens": 500}
+    opus: JsonValue = {"input_tokens": 20_100, "output_tokens": 1200, "cost_usd": 1.0}
+    meta: dict[str, JsonValue] = {
+        "model": "claude-opus-4-8",
+        "usage": opus,
+        "declined": [
+            {"model": "claude-fable-5-1", "usage": fable},
+            {"model": "mystery-model", "usage": fable},  # no price: ignored
+            {"model": "claude-fable-5-1", "usage": "corrupt"},
+            "corrupt",
+        ],
+    }
+    served = NewMessage(1, "answer", "A", turn_id=1, agent="claude", meta=meta)
+    # Fable 5.1 at its own rates (0.240125) plus Opus 4.8 at its own (0.1305): the turn
+    # as Anthropic billed it (before: every token at Opus 4.8's rates, 0.25075).
+    assert replay_cost_usd([served]) == pytest.approx(0.370625)
+    # The tokens saved are the processed tokens of both attempts (the priced ones and not).
+    assert replay_tokens([served]) == 21_300 + 2 * 21_300
+    only_declined = NewMessage(
+        1, "answer", "A", turn_id=1, agent="claude", meta={"declined": meta["declined"]}
+    )
+    assert replay_cost_usd([only_declined]) == pytest.approx(0.240125)
+
+
 # -- accounting -----------------------------------------------------------------------
 
 
@@ -231,8 +260,7 @@ def test_accounting_savings() -> None:
     accounting.add_context_request()
     savings = accounting.savings()
     assert (savings.early_stop, savings.unchanged, savings.compaction) == (1200, 10, 60)
-    assert accounting.usage.total_tokens == 765
-    assert accounting.turn_usage.total_tokens == 750
+    assert accounting.usage.processed_tokens == 765
     records = accounting.saving_records(1, 2)
     assert {r.kind for r in records} == {"early_stop", "unchanged", "compaction"}
     assert all(r.turn_id == 2 and r.tokens_saved > 0 for r in records)

@@ -45,9 +45,14 @@ interface Usage {
   input_tokens: number;        // entrada no servida des de memòria cau
   output_tokens: number;       // inclou el raonament
   cache_read_tokens: number; cache_write_tokens: number;
-  reasoning_tokens: number;
+  reasoning_tokens: number;    // part de output_tokens: no s'hi torna a sumar
   cost_usd: number | null;     // cost estimat (preus d'API); null si el model no té preu
 }
+// Tokens processats (ADR 0008): input_tokens + cache_read_tokens + cache_write_tokens +
+// output_tokens. És la definició de tots els recomptes de tokens: el total d'un torn, els
+// estalvis (cache i early_stop) i la ràtio del tauler, amb la mateixa definició al
+// numerador i al denominador. El client la calcula (processedTokens a web/src/lib/costs.ts).
+// Un Usage és sempre d'un sol model, llevat dels totals (d'un torn, d'un agent, d'un dia).
 
 interface ProviderStatus {
   agent: Agent; mode: "cli" | "api" | "fake";
@@ -164,12 +169,18 @@ interface Stats {
   days: number;
   totals: { calls: number; errors: number; cost_usd: number;
             by_agent: Record<Agent, Usage & { calls: number }> };
+            // errors: crides amb ok = false (fallides, i cada intent que un model va
+            // declinar abans d'un fallback)
   savings: { cache: number; compaction: number; early_stop: number;
              unchanged: number; total: number; cost_usd: number | null };
              // cost_usd: valor dels estalvis de la finestra; com els tokens, es conserva
-             // encara que s'esborri la conversa (null si cap estalvi no té preu)
+             // encara que s'esborri la conversa (null si cap estalvi no té preu).
+             // Tokens processats; les files desades abans de l'ADR 0008 conserven la
+             // definició antiga (input + output a cache i early_stop).
   daily: { date: string; agent: Agent; input_tokens: number; output_tokens: number;
-           cache_read_tokens: number; cost_usd: number }[];   // date: dia natural UTC
+           cache_read_tokens: number; cache_write_tokens: number;
+           cost_usd: number }[];   // date: dia natural UTC; els quatre tipus de tokens
+                                   // processats, per sumar-los com Usage
   savings_daily: { date: string; kind: "cache" | "compaction" | "early_stop" | "unchanged";
                    tokens: number }[];
   latency: Record<Agent, { p50_ms: number | null; p95_ms: number | null;
@@ -192,15 +203,42 @@ interface Stats {
 - `422`: falta `revision`, no és un enter ≥ 0 o algun altre camp no és vàlid. L'ordre és: el cos ha de ser un objecte JSON, després `revision` i després la resta de camps. La revisió es compara al final, de manera que una edició no vàlida dona `422` encara que es basi en una revisió antiga.
 - La comparació i l'escriptura són atòmiques (una sola transacció d'escriptura de SQLite): de dues peticions basades en la mateixa revisió, una rep `200` i l'altra `409`, encara que vinguin de processos diferents.
 
+### Resultat del torn (`meta.outcome` de la pregunta)
+
+Com va acabar un torn es decideix una sola vegada i es desa a la pregunta abans de l'esdeveniment final ([ADR 0007](adr/0007-resultat-del-torn.md)):
+
+```ts
+interface TurnOutcome {
+  status: "completed" | "failed" | "cancelled";
+  error?: { kind: string; message: string };   // només si status és "failed" (el de turn.failed)
+  failures: { agent: Agent; kind: string; message: string; round: number }[];
+                                   // les fallades de crida del torn (stream.failed), en ordre
+  usage: Usage;                    // total del torn: totes les crides facturades (resums de
+                                   // compactació, crides fallides, intents declinats i crides
+                                   // sense missatge incloses); el mateix usage de l'esdeveniment final
+  savings: object;                 // com el savings de turn.completed (vegeu més avall);
+                                   // zeros en un torn fallit o cancel·lat (no registra estalvis),
+                                   // tret d'un torn cancel·lat quan ja desava els seus
+                                   // estalvis: les files s'escriuen senceres i els porta
+  consensus: object | null;        // com el consensus de turn.completed: el d'un debat completat
+  final_message_ids: number[];     // missatges finals desats (també en un torn cancel·lat)
+  cached: boolean;                 // servit des de la memòria cau de torns
+}
+```
+
+- La pregunta es crea amb `outcome: null`. Si el torn no acaba mai (una caiguda o un reinici del servidor), es queda `null`: el client el mostra com a no completat. Els torns desats abans de l'ADR 0007 no tenen la clau.
+- Un torn cancel·lat també el desa, abans del `turn.cancelled`. Un torn es cancel·la una sola vegada: un `turn.cancel` repetit, o l'aturada del servidor, mentre el torn s'atura no l'interromp, i el `turn.cancelled` arriba quan el torn s'ha aturat i ha desat el resultat, amb el mateix `usage`. Si l'escriptura falla, el torn no falla i la pregunta es queda amb `null`.
+
 ### Metadades de missatge (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha) i `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut).
-- Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
+- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut) i `outcome` (vegeu «Resultat del torn»).
+- Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`; només el de l'intent que ha respost), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
+- Resposta servida després d'un fallback (API de Claude): `declined`, `[{model, usage}]`, els intents facturats que altres models van declinar abans, cadascun amb el seu model i el seu cost. Són crides facturades a part (una fila d'ús per intent, amb `ok = false`) i compten al total del torn, però no a l'`usage` del missatge: els tokens de models diferents no se sumen mai ([ADR 0008](adr/0008-recompte-de-tokens.md)).
 - Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
 - Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`) i `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva, i `unchanged_note` (opcional) és la nota curta que el model va escriure després d'`UNCHANGED`, a la mateixa línia (com a molt 200 caràcters). `content` també conté la resposta anterior (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
 - Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
-- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). L'últim missatge final porta també `unstored_usage` (`Usage`) si hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, negatives, límit de sortida esgotat sense text).
-- Total d'un torn recarregat: la suma dels `usage` dels seus missatges, més `compaction_usage` i `unstored_usage`. És igual al `usage` de `turn.completed`, llevat que en un duel una crida fallida acabi després que l'altre agent hagi desat la seva resposta.
+- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). Cada missatge final porta també `unstored_usage` (`Usage`) si fins llavors hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, negatives, límit de sortida esgotat sense text, intents declinats).
+- Total d'un torn recarregat: `outcome.usage` de la pregunta, tal com és (no s'hi tornen a sumar `compaction_usage` ni `unstored_usage`). És igual al `usage` de l'esdeveniment final i a la suma de les files d'ús del torn més les dels seus resums de compactació, que es desen sense `turn_id` perquè es fan abans que existeixi la pregunta. Per als torns sense `outcome` (desats abans de l'ADR 0007), la suma dels `usage` dels seus missatges, més `compaction_usage` i l'`unstored_usage` de l'últim missatge final, que no inclou una crida fallida que acabés després que l'altre agent d'un duel hagués desat la seva resposta.
 
 ## WebSocket `/api/ws`
 
@@ -241,14 +279,14 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
 | `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
 | `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason` i `unchanged_note` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. Tots tres valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
-| `stream.failed` | `stream_id`, `error: {kind, message}` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa |
+| `stream.failed` | `stream_id`, `error: {kind, message}`; opcional: `usage` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa. `usage` és el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text); només hi és quan se'n sap una facturació |
 | `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached` | Torn acabat |
-| `turn.failed` | `error: {kind, message}` | Torn avortat |
-| `turn.cancelled` | – | Cancel·lat per l'usuari |
+| `turn.failed` | `error: {kind, message}`, `usage` | Torn avortat. `usage` és el total del torn fins aleshores, el mateix d'`outcome.usage` (zero si ha fallat abans de cap crida) |
+| `turn.cancelled` | `usage` | Cancel·lat per l'usuari (o perquè el servidor s'atura). `usage` és el que el torn havia gastat, el mateix d'`outcome.usage`. Arriba quan el torn s'ha aturat i ha desat el resultat; un `turn.cancel` repetit mentrestant no fa res |
 
 Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start`). Un `conversation_id` fora de l'interval 1 – 2^63 − 1 dona `invalid`. Un missatge amb text que no es pot codificar en UTF-8 (un substitut solitari, `\ud800`, en qualsevol clau o valor) dona `invalid` amb `El missatge conté text que no és UTF-8 vàlid.` i el `request_id` si aquest és vàlid; no se n'usa res.
 
-`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens estimats estalviats i el seu valor aproximat: les respostes conservades al preu de sortida del seu model, la compactació al preu d'entrada de les crides que portaven el context, les rondes omeses al cost mitjà de les revisions del torn i un encert de memòria cau al cost del torn original; `null` si no se'n pot posar preu a cap). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
+`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens processats estimats estalviats i el seu valor aproximat: les respostes conservades al preu de sortida del seu model, la compactació al preu d'entrada de les crides que portaven el context, les rondes omeses al cost mitjà de les revisions del torn i un encert de memòria cau al cost del torn original sencer, cada crida i cada intent declinat abans d'un fallback a les tarifes actuals del seu model; `null` si no se'n pot posar preu a cap). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
 
 ### Ordre típic d'un debat
 

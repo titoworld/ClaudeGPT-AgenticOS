@@ -1,11 +1,52 @@
 // Costs in euros: per-answer and per-turn amounts, savings value and the
-// month-to-date budget / subscription lines of the sidebar.
+// month-to-date budget / subscription lines of the sidebar; and the tokens a call
+// processed, the count every total and ratio uses (ADR 0008).
 
-import { formatDay, formatEur, formatPercent, usdToEur } from './format';
-import type { AgentSpend, FxRate, ProviderMode, Savings, Usage } from './protocol';
+import { formatDay, formatEur, formatInt, formatPercent, usdToEur } from './format';
+import { AGENTS, type AgentSpend, type FxRate, type ProviderMode, type Savings, type Usage } from './protocol';
 import type { CostBasis, StreamView, TurnView } from './turns.svelte';
 
 export type Level = 'ok' | 'warn' | 'bad';
+
+/** The token counts of a Usage, any of them possibly missing (a stats row, a stored meta). */
+export type TokenCounts = Partial<
+  Pick<Usage, 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cache_write_tokens' | 'reasoning_tokens'>
+>;
+
+/** A token count: negative, missing and non-numeric values count as 0. */
+const tokens = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+
+/**
+ * Tokens the calls processed (ADR 0008): input, cache reads, cache writes and output.
+ * The reasoning is a part of the output, so it is never added again. Turn totals, the
+ * dashboard and its savings share all count this, whatever each kind costs.
+ */
+export function processedTokens(usage: TokenCounts | null | undefined): number {
+  if (!usage) return 0;
+  return (
+    tokens(usage.input_tokens) +
+    tokens(usage.cache_read_tokens) +
+    tokens(usage.cache_write_tokens) +
+    tokens(usage.output_tokens)
+  );
+}
+
+/**
+ * Each kind of processed token, e.g. "3 d'entrada · 10.000 llegits de la memòria cau ·
+ * 20.000 escrits a la memòria cau · 100 de sortida (50 de raonament)"; the cache parts only
+ * when there are any.
+ */
+export function tokenBreakdown(usage: TokenCounts): string {
+  const parts = [`${formatInt(tokens(usage.input_tokens))} d'entrada`];
+  const read = tokens(usage.cache_read_tokens);
+  const written = tokens(usage.cache_write_tokens);
+  const reasoning = tokens(usage.reasoning_tokens);
+  if (read) parts.push(`${formatInt(read)} llegits de la memòria cau`);
+  if (written) parts.push(`${formatInt(written)} escrits a la memòria cau`);
+  const thinking = reasoning ? ` (${formatInt(reasoning)} de raonament)` : '';
+  parts.push(`${formatInt(tokens(usage.output_tokens))} de sortida${thinking}`);
+  return parts.join(' · ');
+}
 
 /** Budget share from which the bar turns amber (and red at 100 %). */
 export const BUDGET_WARN_RATIO = 0.8;
@@ -69,10 +110,44 @@ export function streamCost(stream: StreamView, eurPerUsd: number): { text: strin
 export interface TurnCost {
   /** Server total when known (includes internal calls), else the sum of the answers. */
   totalUsd: number | null;
+  /** Real API cost. */
   apiUsd: number;
+  /** Subscription calls valued at API prices. */
   equivalentUsd: number;
+  /**
+   * The rest of the total when the turn does not tell its kind: calls no answer shows (a
+   * history summary, a failed call, attempts declined before a fallback) that may have been
+   * an API agent's or a subscription agent's. The three parts add up to the total.
+   */
+  otherUsd: number;
 }
 
+/** Less than this between a total and its parts is rounding, never a call (USD). */
+const ROUNDING_USD = 1e-9;
+
+/**
+ * The cost basis of every call of a turn, when its answers tell it: every agent that could
+ * have made a call answered with that same basis (an agent's mode does not change while the
+ * server runs). Those agents are both in a duel or a debate, and the one that answered in a
+ * solo turn, unless it compacted the history: either agent may have written the summary
+ * (Claude first, even in a turn for ChatGPT). Null when the turn does not tell.
+ */
+function turnBasis(turn: TurnView): CostBasis | null {
+  const callers = turn.mode === 'solo' && !turn.compacted ? new Set(turn.streams.map((s) => s.agent)) : AGENTS;
+  const bases = new Set<CostBasis>();
+  for (const agent of callers) {
+    const known = turn.streams.filter((s) => s.agent === agent && s.costBasis);
+    if (!known.length) return null;
+    for (const s of known) bases.add(s.costBasis!);
+  }
+  return bases.size === 1 ? [...bases][0]! : null;
+}
+
+/**
+ * A turn's total and its split: the answers' costs by basis, and what the total has that no
+ * answer shows (a history summary, failed calls, attempts declined before a fallback, a
+ * billed call that was retried) under the turn's basis when it has one, else apart.
+ */
 export function turnCost(turn: TurnView): TurnCost {
   let apiUsd = 0;
   let equivalentUsd = 0;
@@ -84,17 +159,30 @@ export function turnCost(turn: TurnView): TurnCost {
     if (s.costBasis === 'api') apiUsd += usd;
     else if (s.costBasis === 'equivalent') equivalentUsd += usd;
   }
-  return { totalUsd: turn.usage?.cost_usd ?? sum, apiUsd, equivalentUsd };
+  const totalUsd = turn.usage?.cost_usd ?? sum;
+  const rest = totalUsd == null ? 0 : totalUsd - apiUsd - equivalentUsd;
+  if (!(rest > ROUNDING_USD)) return { totalUsd, apiUsd, equivalentUsd, otherUsd: 0 };
+  const basis = turnBasis(turn);
+  if (basis === 'api') return { totalUsd, apiUsd: apiUsd + rest, equivalentUsd, otherUsd: 0 };
+  if (basis === 'equivalent') return { totalUsd, apiUsd, equivalentUsd: equivalentUsd + rest, otherUsd: 0 };
+  return { totalUsd, apiUsd, equivalentUsd, otherUsd: rest };
 }
 
-/** Tooltip of the turn total: real API cost vs value included in subscriptions. */
+const TURN_COST_TITLE = "Cost del torn a preus d'API";
+
+/**
+ * Tooltip of the turn total: real API cost vs value included in subscriptions, and the
+ * calls whose kind the turn does not tell. Without either kind it only names the total.
+ */
 export function turnCostTitle(cost: TurnCost, eurPerUsd: number): string {
-  const parts = ["Cost del torn a preus d'API"];
-  if (cost.apiUsd > 0) parts.push(`cost real d'API: ${formatEur(cost.apiUsd * eurPerUsd)}`);
-  if (cost.equivalentUsd > 0) {
-    parts.push(`valor inclòs a la subscripció: ${formatEur(cost.equivalentUsd * eurPerUsd)}`);
-  }
-  return parts.join(' · ');
+  if (!(cost.apiUsd > 0) && !(cost.equivalentUsd > 0)) return TURN_COST_TITLE;
+  const part = (label: string, usd: number) => (usd > 0 ? [`${label}: ${formatEur(usd * eurPerUsd)}`] : []);
+  return [
+    TURN_COST_TITLE,
+    ...part("cost real d'API", cost.apiUsd),
+    ...part('valor inclòs a la subscripció', cost.equivalentUsd),
+    ...part('altres crides', cost.otherUsd),
+  ].join(' · ');
 }
 
 /** Euros worth of the tokens a turn saved, or null when unknown / nothing saved. */

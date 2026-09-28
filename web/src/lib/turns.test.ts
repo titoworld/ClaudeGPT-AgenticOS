@@ -175,7 +175,7 @@ describe('applyTurnEvent: failures', () => {
     const turn = live();
     const events = debateEvents().slice(0, 6);
     applyAll(turn, events);
-    applyTurnEvent(turn, { type: 'turn.failed', request_id: 'req-1', seq: 7, error: { kind: 'x', message: 'Error' } });
+    applyTurnEvent(turn, { type: 'turn.failed', request_id: 'req-1', seq: 7, error: { kind: 'x', message: 'Error' }, usage: usage(0, 0) });
     expect(turn.status).toBe('failed');
     expect(turn.error?.message).toBe('Error');
     expect(turn.streams.every((s) => s.status === 'interrupted')).toBe(true);
@@ -184,7 +184,7 @@ describe('applyTurnEvent: failures', () => {
   it('handles cancellation', () => {
     const turn = live();
     applyAll(turn, debateEvents().slice(0, 4));
-    applyTurnEvent(turn, { type: 'turn.cancelled', request_id: 'req-1', seq: 5 });
+    applyTurnEvent(turn, { type: 'turn.cancelled', request_id: 'req-1', seq: 5, usage: usage(0, 0) });
     expect(turn.status).toBe('cancelled');
     expect(turn.streams.every((s) => s.status === 'interrupted')).toBe(true);
   });
@@ -318,8 +318,19 @@ describe('turnsFromMessages: turn totals after a reload (F1)', () => {
     expect([b.input_tokens, b.output_tokens]).toEqual([a.input_tokens, a.output_tokens]);
     expect(b.cost_usd).toBeCloseTo(a.cost_usd!, 12);
     expect(turnCost(stored!).totalUsd).toBeCloseTo(turnCost(live).totalUsd!, 12);
-    // The split between API cost and subscription value still comes from the answers.
-    expect(turnCost(stored!).equivalentUsd).toBeCloseTo(0.003063 + 0.003198, 12);
+    // Both agents answered by subscription, so the summary, whichever wrote it, was
+    // subscription value too: the split covers the whole total (A8).
+    expect(turnCost(stored!)).toMatchObject({ apiUsd: 0, otherUsd: 0 });
+    expect(turnCost(stored!).equivalentUsd).toBeCloseTo(0.003063 + 0.003198 + 0.003114, 12);
+  });
+
+  it('knows the turn compacted the history, live and after a reload', () => {
+    expect(liveTurn().compacted).toBe(true);
+    expect(turnsFromMessages(compactedDuelMessages(), 3)[0]!.compacted).toBe(true);
+    const plain = live();
+    applyAll(plain, debateEvents());
+    expect(plain.compacted).toBe(false);
+    expect(turnsFromMessages(debateMessages())[0]!.compacted).toBe(false);
   });
 
   it('prefers a stored turn total and never adds the summary twice', () => {

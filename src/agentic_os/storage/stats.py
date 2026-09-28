@@ -6,8 +6,12 @@ included, oldest first.
 
 Definitions:
 
-- ``totals``: every recorded model call; ``errors`` counts calls with ``ok`` false.
+- ``totals``: every recorded model call; ``errors`` counts calls with ``ok`` false
+  (a failed call, and each attempt another model declined before a fallback served).
   An agent's ``cost_usd`` is ``None`` when none of its calls reported a cost.
+- ``daily``: every kind of processed token (input, cache reads, cache writes and
+  output; reasoning is part of the output), so the dashboard can add them up as
+  ``Usage.processed_tokens`` does (docs/adr/0008-recompte-de-tokens.md).
 - ``latency``: nearest-rank percentiles over successful calls.
 - ``costs``: per agent, ``api_usd`` sums the cost of api-mode calls (real spend) and
   ``equivalent_usd`` the cost of the other calls (subscription usage valued at API
@@ -78,6 +82,7 @@ class DailyUsage(TypedDict):
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
+    cache_write_tokens: int
     cost_usd: float
 
 
@@ -381,7 +386,7 @@ async def compute_stats(
         )
         for agent in AGENTS
     }
-    daily_map: dict[tuple[str, AgentName], tuple[int, int, int, float]] = {}
+    daily_map: dict[tuple[str, AgentName], tuple[int, int, int, int, float]] = {}
     errors = 0
     for row in usage_rows:
         agent = _agent(row["agent"])
@@ -401,6 +406,7 @@ async def compute_stats(
             int(row["input_tokens"]),
             int(row["output_tokens"]),
             int(row["cache_read_tokens"]),
+            int(row["cache_write_tokens"]),
             round(float(row["cost_usd"] or 0.0), 6),
         )
     for totals in by_agent.values():
@@ -409,7 +415,9 @@ async def compute_stats(
     daily: list[DailyUsage] = []
     for day in dates:
         for agent in AGENTS:
-            tokens_in, tokens_out, cache_read, cost = daily_map.get((day, agent), (0, 0, 0, 0.0))
+            tokens_in, tokens_out, cache_read, cache_write, cost = daily_map.get(
+                (day, agent), (0, 0, 0, 0, 0.0)
+            )
             daily.append(
                 DailyUsage(
                     date=day,
@@ -417,6 +425,7 @@ async def compute_stats(
                     input_tokens=tokens_in,
                     output_tokens=tokens_out,
                     cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
                     cost_usd=cost,
                 )
             )

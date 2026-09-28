@@ -16,6 +16,7 @@ from typing import Final, Self, cast
 
 from agentic_os.domain import AGENTS, MessageKind
 from agentic_os.fx import FxRate
+from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.orchestrator.store import (
     CachedTurn,
     History,
@@ -365,6 +366,17 @@ class SqliteStore:
             )
         if updated == 0:
             raise ConversationNotFoundError(conversation_id)
+
+    async def set_turn_outcome(self, question_message_id: int, outcome: TurnOutcome) -> None:
+        """Write how a turn ended into its question's meta (``$.outcome``, a JSON object:
+        the other keys and the conversation's ``updated_at`` are kept). An id that is not
+        a question, or no longer exists (a deleted conversation), changes nothing."""
+        async with self._db.transaction() as tx:
+            await tx.execute(
+                "UPDATE messages SET meta = json_set(meta, '$.outcome', json(?)) "
+                "WHERE id = ? AND kind = 'question'",
+                (_dump_json(outcome.to_wire()), question_message_id),
+            )
 
     async def record_usage(self, record: UsageRecord) -> None:
         usage = record.usage

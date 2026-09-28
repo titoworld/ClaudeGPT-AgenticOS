@@ -2,22 +2,25 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from agentic_os.domain import AgentName, ProviderMode, Usage
+from agentic_os.domain import AgentName, ProviderMode, TurnOptions, Usage
+from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.events import (
     ErrorInfo,
     PhaseChanged,
     ServerEvent,
     TurnCompleted,
     TurnFailed,
+    TurnOutcome,
     TurnStarted,
 )
 from agentic_os.orchestrator.events import Savings as TurnSavings
+from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.pricing import ModelPrice
 from agentic_os.providers.base import (
@@ -25,6 +28,8 @@ from agentic_os.providers.base import (
     ModelInfo,
     ProviderEvent,
     ProviderStatus,
+    RefusalError,
+    TextDelta,
     UsageLimit,
 )
 from agentic_os.providers.fake import FakeProvider
@@ -59,12 +64,16 @@ class Recorder:
 
 
 class ScriptedRunner:
-    """Emits started + phase, waits on a gate, then completes (or crashes)."""
+    """Emits started + phase, waits on a gate, then completes (or crashes). When
+    cancelled it reports ``spent`` as its outcome, as the engine does."""
 
-    def __init__(self, *, crash: bool = False, silent_end: bool = False) -> None:
+    def __init__(
+        self, *, crash: bool = False, silent_end: bool = False, spent: Usage | None = None
+    ) -> None:
         self.gate = asyncio.Event()
         self.crash = crash
         self.silent_end = silent_end
+        self.spent = spent
         self.cancelled: list[str] = []
         self.thresholds: list[int | None] = []
         self.prices: list[Mapping[str, ModelPrice] | None] = []
@@ -75,6 +84,7 @@ class ScriptedRunner:
         *,
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
+        on_outcome: Callable[[TurnOutcome], None] | None = None,
     ) -> AsyncIterator[ServerEvent]:
         self.thresholds.append(compaction_threshold_tokens)
         self.prices.append(price_overrides)
@@ -85,6 +95,8 @@ class ScriptedRunner:
             await self.gate.wait()
         except asyncio.CancelledError:
             self.cancelled.append(rid)
+            if on_outcome is not None and self.spent is not None:
+                on_outcome(TurnOutcome("cancelled", self.spent, TurnSavings()))
             raise
         if self.crash:
             raise RuntimeError("boom")
@@ -157,11 +169,34 @@ async def test_cancel_emits_turn_cancelled_last() -> None:
     await settle()
     assert runner.cancelled == ["r1"]
     assert live.types == ["turn.started", "phase", "turn.cancelled"]
-    assert live.messages[-1] == {"type": "turn.cancelled", "request_id": "r1", "seq": 3}
+    assert live.messages[-1] == {
+        "type": "turn.cancelled",
+        "request_id": "r1",
+        "usage": Usage().to_dict(),
+        "seq": 3,
+    }
     assert turns.cancel("r1")  # known, already over: nothing happens
     await settle()
     assert len(live.messages) == 3
     assert not turns.cancel("unknown")
+    await turns.aclose()
+
+
+async def test_turn_cancelled_carries_what_the_engine_reported_as_spent() -> None:
+    spent = Usage(input_tokens=1200, output_tokens=300, cost_usd=0.042)
+    turns = TurnManager(ScriptedRunner(spent=spent))
+    live = Recorder()
+    turns.start(request("r1"), live)
+    await settle()
+    assert turns.cancel("r1")
+    await settle()
+    # Before: turn.cancelled carried nothing, so a cancelled turn showed no cost.
+    assert live.messages[-1] == {
+        "type": "turn.cancelled",
+        "request_id": "r1",
+        "usage": spent.to_dict(),
+        "seq": 3,
+    }
     await turns.aclose()
 
 
@@ -187,6 +222,7 @@ async def test_crash_and_missing_terminal_event_become_turn_failed() -> None:
             "kind": "internal",
             "message": "S'ha produït un error intern i el torn s'ha aturat.",
         }
+        assert live.messages[-1]["usage"] == Usage().to_dict()
         await turns.aclose()
 
 
@@ -198,6 +234,7 @@ async def test_engine_turn_failed_is_terminal() -> None:
             *,
             compaction_threshold_tokens: int | None = None,
             price_overrides: Mapping[str, ModelPrice] | None = None,
+            on_outcome: Callable[[TurnOutcome], None] | None = None,
         ) -> AsyncIterator[ServerEvent]:
             yield TurnFailed(request.request_id, ErrorInfo("invalid", "La pregunta és buida."))
 
@@ -208,6 +245,238 @@ async def test_engine_turn_failed_is_terminal() -> None:
     assert live.types == ["turn.failed"]
     assert live.messages[0]["error"]["message"] == "La pregunta és buida."
     await turns.aclose()
+
+
+class Stalls(FakeProvider):
+    """Streams its first words, then thinks until it is cancelled."""
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(request)
+        yield TextDelta("Encara escric ")
+        await asyncio.sleep(3600)
+        yield TextDelta("mai")
+
+
+class SlowToStop(FakeProvider):
+    """Streams its first words and thinks until it is cancelled; stopping then takes
+    until :attr:`stopped` is set (a CLI process being terminated)."""
+
+    def __init__(self, agent: AgentName) -> None:
+        super().__init__(agent, chunk_delay=0)
+        self.stopping = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(request)
+        yield TextDelta("Encara escric ")
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            self.stopping.set()
+            await self.stopped.wait()
+
+
+class SlowStopRunner:
+    """Stops like the engine: when cancelled it stops its calls (until :attr:`stopped`
+    is set), then reports what the turn spent and lets the cancellation go on."""
+
+    def __init__(self, spent: Usage) -> None:
+        self.spent = spent
+        self.stopping = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.interrupted = 0
+        """Cancellations that reached it while it was stopping."""
+
+    async def run(
+        self,
+        request: TurnRequest,
+        *,
+        compaction_threshold_tokens: int | None = None,
+        price_overrides: Mapping[str, ModelPrice] | None = None,
+        on_outcome: Callable[[TurnOutcome], None] | None = None,
+    ) -> AsyncIterator[ServerEvent]:
+        yield TurnStarted(request.request_id, 41, 7, request.mode, True)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.stopping.set()
+            try:
+                await self.stopped.wait()
+            except asyncio.CancelledError:
+                self.interrupted += 1
+                raise
+            if on_outcome is not None:
+                on_outcome(TurnOutcome("cancelled", self.spent, TurnSavings()))
+            raise
+
+
+class OutcomeLogStore(InMemoryStore):
+    """Adds each outcome it has written to a shared log."""
+
+    def __init__(self, log: list[str]) -> None:
+        super().__init__()
+        self._log = log
+
+    async def set_turn_outcome(self, question_message_id: int, outcome: TurnOutcome) -> None:
+        await super().set_turn_outcome(question_message_id, outcome)
+        self._log.append(f"outcome {outcome.status}")
+
+
+class TerminalLogRecorder(Recorder):
+    """Adds each terminal event it receives to a shared log."""
+
+    def __init__(self, log: list[str]) -> None:
+        super().__init__()
+        self._log = log
+
+    def send(self, text: str) -> bool:
+        accepted = super().send(text)
+        kind = self.messages[-1]["type"]
+        if kind in ("turn.completed", "turn.failed", "turn.cancelled"):
+            self._log.append(kind)
+        return accepted
+
+
+class Declines(FakeProvider):
+    """Declines every call after some text, billed as the Claude API does."""
+
+    def __init__(self, agent: AgentName, billed: Usage) -> None:
+        super().__init__(agent, chunk_delay=0)
+        self._billed = billed
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(request)
+        yield TextDelta("Comencem ")
+        raise RefusalError("Claude ha declinat.", usage=self._billed, model="fake-claude")
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.001)
+
+
+async def test_a_cancelled_engine_turn_reports_and_stores_what_it_spent() -> None:
+    store = InMemoryStore()
+    engine = Engine(
+        {
+            "claude": Stalls("claude", chunk_delay=0),
+            "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+        },
+        store,
+        retry_delay=0,
+    )
+    turns = TurnManager(engine)
+    live = Recorder()
+    duel = TurnRequest("r1", "Pregunta?", "duel", options=TurnOptions(use_cache=False))
+    prices = {"fake-chatgpt": ModelPrice(4.0, 20.0, 0.2, 5.0)}
+    turns.start(duel, live, price_overrides=prices)
+    await until(lambda: "stream.completed" in live.types)  # ChatGPT answered and was billed
+    assert turns.cancel("r1")
+    await until(lambda: "turn.cancelled" in live.types)
+    answered = next(m for m in live.messages if m["type"] == "stream.completed")
+    cancelled = live.messages[-1]
+    assert cancelled["type"] == "turn.cancelled" and cancelled["usage"] == answered["usage"]
+    assert cancelled["usage"]["cost_usd"]
+    question = next(m for m in store.messages if m.kind == "question")
+    outcome = question.meta["outcome"]
+    assert isinstance(outcome, dict)
+    assert outcome["status"] == "cancelled" and outcome["usage"] == cancelled["usage"]
+    await turns.aclose()
+
+
+async def test_an_engine_turn_that_fails_reports_what_it_spent() -> None:
+    store = InMemoryStore()
+    billed = Usage(input_tokens=5000, output_tokens=300)
+    engine = Engine(
+        {"claude": Declines("claude", billed), "chatgpt": FakeProvider("chatgpt", chunk_delay=0)},
+        store,
+        retry_delay=0,
+    )
+    turns = TurnManager(engine)
+    live = Recorder()
+    prices = {"fake-claude": ModelPrice(4.0, 20.0, 0.2, 5.0)}
+    turns.start(request("r1"), live, price_overrides=prices)
+    await until(lambda: "turn.failed" in live.types)
+    failed = live.messages[-1]
+    expected = Usage(input_tokens=5000, output_tokens=300, cost_usd=0.026).to_dict()
+    assert failed["usage"] == pytest.approx(expected)
+    stream_failed = next(m for m in live.messages if m["type"] == "stream.failed")
+    assert stream_failed["usage"] == failed["usage"]
+    await turns.aclose()
+
+
+@pytest.mark.parametrize("again", ["turn.cancel", "shutdown"])
+async def test_a_turn_that_is_stopping_is_not_cancelled_again(again: str) -> None:
+    spent = Usage(input_tokens=1200, output_tokens=300, cost_usd=0.042)
+    runner = SlowStopRunner(spent)
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(request("r1"), live)
+    await settle()
+    assert turns.cancel("r1")
+    await asyncio.wait_for(runner.stopping.wait(), 5)
+    closing: asyncio.Task[None] | None = None
+    if again == "shutdown":
+        closing = asyncio.create_task(turns.aclose())
+    else:
+        assert turns.cancel("r1")  # the owner presses stop again
+    await settle()
+    # Before: the second cancellation interrupted the turn while it stopped, and
+    # turn.cancelled went out at once, without what the turn had spent.
+    assert live.types == ["turn.started"]
+    runner.stopped.set()
+    await until(lambda: "turn.cancelled" in live.types)
+    assert runner.interrupted == 0
+    assert live.messages[-1]["usage"] == spent.to_dict()
+    if closing is not None:
+        await asyncio.wait_for(closing, 5)
+    else:
+        await turns.aclose()
+
+
+@pytest.mark.parametrize("again", ["turn.cancel", "shutdown"])
+async def test_stopping_an_engine_turn_again_still_announces_its_stored_outcome(
+    again: str,
+) -> None:
+    log: list[str] = []
+    store = OutcomeLogStore(log)
+    claude = SlowToStop("claude")
+    engine = Engine(
+        {"claude": claude, "chatgpt": FakeProvider("chatgpt", chunk_delay=0)},
+        store,
+        retry_delay=0,
+    )
+    turns = TurnManager(engine)
+    live = TerminalLogRecorder(log)
+    duel = TurnRequest("r1", "Pregunta?", "duel", options=TurnOptions(use_cache=False))
+    prices = {"fake-chatgpt": ModelPrice(4.0, 20.0, 0.2, 5.0)}
+    turns.start(duel, live, price_overrides=prices)
+    await until(lambda: "stream.completed" in live.types)  # ChatGPT answered and was billed
+    assert turns.cancel("r1")
+    await asyncio.wait_for(claude.stopping.wait(), 5)  # Claude's call is stopping
+    closing: asyncio.Task[None] | None = None
+    if again == "shutdown":
+        closing = asyncio.create_task(turns.aclose())
+    else:
+        assert turns.cancel("r1")  # the owner presses stop again
+    await settle()
+    # Before: turn.cancelled went out at once, with no usage, and the outcome was written
+    # after it (at shutdown, maybe to a store about to be closed).
+    assert log == []
+    claude.stopped.set()
+    if closing is not None:
+        await asyncio.wait_for(closing, 5)
+    await until(lambda: "turn.cancelled" in live.types)
+    assert log == ["outcome cancelled", "turn.cancelled"]
+    answered = next(m for m in live.messages if m["type"] == "stream.completed")
+    cancelled = live.messages[-1]
+    assert cancelled["usage"] == answered["usage"] and cancelled["usage"]["cost_usd"]
+    question = next(m for m in store.messages if m.kind == "question")
+    outcome = question.meta["outcome"]
+    assert isinstance(outcome, dict) and outcome["usage"] == cancelled["usage"]
+    if closing is None:
+        await turns.aclose()
 
 
 async def test_limits() -> None:

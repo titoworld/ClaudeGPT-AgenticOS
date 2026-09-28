@@ -14,9 +14,14 @@ import pytest
 
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
+from agentic_os.orchestrator.engine import Engine
+from agentic_os.orchestrator.events import ServerEvent, TurnCompleted, TurnFailed
+from agentic_os.orchestrator.memory_store import InMemoryStore
+from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.providers.base import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     ChatTurn,
+    DeclinedAttempt,
     GenerationRequest,
     GenerationResult,
     Provider,
@@ -31,6 +36,7 @@ from agentic_os.providers.claude_api import (
     ModelSupport,
     model_support,
 )
+from agentic_os.providers.fake import FakeProvider
 from agentic_os.providers.prompt_format import to_chat_messages
 
 SYSTEM = "Ets Claude. Respon en català."
@@ -644,12 +650,14 @@ async def test_mid_stream_fallback_counts_the_declined_attempt(tmp_path: Path) -
     deltas, result = await run(MockApi(replying(body)), req, make_settings(tmp_path))
     assert "".join(deltas) == result.text == "Part one part two."
     assert result.model == "claude-opus-4-8"
-    assert result.usage == Usage(
-        input_tokens=40_100,
-        output_tokens=2000,
-        cache_read_tokens=500,
-        cache_write_tokens=0,
-        reasoning_tokens=90,
+    # Each attempt is billed at the rates of the model that ran it, and tokens of
+    # different models are never summed (before: 40 100 input tokens, all at Opus 4.8's
+    # rates): the served attempt is the usage, the declined one goes apart.
+    assert result.usage == Usage(input_tokens=20_100, output_tokens=1200, reasoning_tokens=90)
+    assert result.declined == (
+        DeclinedAttempt(
+            "claude-fable-5-1", Usage(input_tokens=20_000, output_tokens=800, cache_read_tokens=500)
+        ),
     )
 
 
@@ -676,8 +684,9 @@ async def test_pre_output_fallback_counts_only_a_billed_decline(
     )
     _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
     assert result.model == "claude-opus-4-8"
-    served = Usage(input_tokens=412, output_tokens=264)
-    assert result.usage == (served + Usage(input_tokens=535) if billed else served)
+    assert result.usage == Usage(input_tokens=412, output_tokens=264)
+    declined = (DeclinedAttempt("claude-opus-5", Usage(input_tokens=535)),)
+    assert result.declined == (declined if billed else ())
 
 
 async def test_refusal_after_a_fallback_bills_every_billed_attempt(tmp_path: Path) -> None:
@@ -701,7 +710,12 @@ async def test_refusal_after_a_fallback_bills_every_billed_attempt(tmp_path: Pat
     req = request(model="claude-fable-5-1")
     error = await run_error(MockApi(replying(body)), req, make_settings(tmp_path))
     assert isinstance(error, RefusalError) and error.model == "claude-opus-4-8"
-    assert error.usage == Usage(input_tokens=9000, output_tokens=400)
+    # The refusal itself (Opus 4.8, before any output) is not billed; Fable's declined
+    # attempt is, at Fable's rates (before: its tokens were the refusal's, at Opus's).
+    assert error.usage == Usage()
+    assert error.declined == (
+        DeclinedAttempt("claude-fable-5-1", Usage(input_tokens=9000, output_tokens=400)),
+    )
 
 
 @pytest.mark.parametrize(
@@ -732,6 +746,7 @@ async def test_iterations_without_a_declined_attempt_add_nothing(
     )
     _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
     assert result.usage == Usage(input_tokens=12, output_tokens=25)
+    assert result.declined == ()
 
 
 def fallback_without_category(index: int, source: str, target: str, trigger: Any) -> list[Event]:
@@ -771,10 +786,12 @@ async def test_a_fallback_block_without_a_category_still_returns_the_answer(
     )
     deltas, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
     assert "".join(deltas) == result.text == "Hola!"
-    served = Usage(input_tokens=412, output_tokens=264)
-    declined = Usage(input_tokens=535, output_tokens=declined_output)
+    assert result.usage == Usage(input_tokens=412, output_tokens=264)
+    declined = DeclinedAttempt(
+        "claude-fable-5", Usage(input_tokens=535, output_tokens=declined_output)
+    )
     # Without a category only a decline after some output is billed.
-    assert result.usage == (served + declined if billed else served)
+    assert result.declined == ((declined,) if billed else ())
 
 
 async def test_iterations_of_an_unknown_type_are_not_declined_hops(tmp_path: Path) -> None:
@@ -797,7 +814,183 @@ async def test_iterations_of_an_unknown_type_are_not_declined_hops(tmp_path: Pat
     )
     _, result = await run(MockApi(replying(body)), request(), make_settings(tmp_path))
     # The bio decline (billed before any output) is counted, the unknown entry is not.
-    assert result.usage == Usage(input_tokens=412 + 535, output_tokens=264)
+    assert result.usage == Usage(input_tokens=412, output_tokens=264)
+    assert result.declined == (DeclinedAttempt("claude-opus-5", Usage(input_tokens=535)),)
+
+
+@pytest.mark.parametrize(
+    ("first_from", "first_model"),
+    [("claude-fable-5-1", "claude-fable-5-1"), ("", "claude-opus-5-5")],
+)
+async def test_a_declined_attempt_without_its_model_takes_the_one_that_declined(
+    tmp_path: Path, first_from: str, first_model: str
+) -> None:
+    # ``model`` of a ``message`` entry is optional: the fallback block of that hop names
+    # the model that declined; without it, the model the previous hop fell back to, and
+    # for the first hop the one the request asked for. The request names a model that no
+    # block does, so each case passes only by its own rule (before, it asked for the
+    # model of the first block, and the requested model hid a ``from`` read wrongly).
+    first = iteration("message", "", 535, 10)
+    second = iteration("message", "", 400, 20)
+    del first["model"], second["model"]
+    iterations = [first, second, iteration("fallback_message", "claude-opus-4-8", 412, 264)]
+    usage = {"input_tokens": 412, "output_tokens": 264, "iterations": iterations}
+    body = sse(
+        [
+            message_start("claude-fable-5-1", cache_read=0, cache_write=0),
+            *text_block(0, ["Hola "]),
+            *fallback_without_category(1, first_from, "claude-opus-5", ...),
+            *text_block(2, ["i "]),
+            *fallback_without_category(3, "", "claude-opus-4-8", ...),
+            *text_block(4, ["adéu"]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+    req = request(model="claude-opus-5-5")
+    _, result = await run(MockApi(replying(body)), req, make_settings(tmp_path))
+    assert result.model == "claude-opus-4-8"
+    assert result.declined == (
+        DeclinedAttempt(first_model, Usage(input_tokens=535, output_tokens=10)),
+        DeclinedAttempt("claude-opus-5", Usage(input_tokens=400, output_tokens=20)),
+    )
+
+
+async def test_an_output_budget_spent_after_a_fallback_keeps_the_declined_attempt(
+    tmp_path: Path,
+) -> None:
+    iterations = [
+        iteration("message", "claude-fable-5-1", 9000, 400),
+        iteration("fallback_message", "claude-opus-4-8", 9100, 16_000),
+    ]
+    usage = {"input_tokens": 9100, "output_tokens": 16_000, "iterations": iterations}
+    body = sse(
+        [
+            message_start("claude-fable-5-1", cache_read=0, cache_write=0),
+            *fallback_block(0, "claude-fable-5-1", "claude-opus-4-8", "bio"),
+            *final_delta("max_tokens", usage),
+        ]
+    )
+    req = request(model="claude-fable-5-1")
+    error = await run_error(MockApi(replying(body)), req, make_settings(tmp_path))
+    assert type(error) is ProviderError and error.kind == "invalid"
+    assert (error.model, error.usage) == (
+        "claude-opus-4-8",
+        Usage(input_tokens=9100, output_tokens=16_000),
+    )
+    assert error.declined == (
+        DeclinedAttempt("claude-fable-5-1", Usage(input_tokens=9000, output_tokens=400)),
+    )
+
+
+# -- a fallback turn through the engine (audit point 8) ------------------------------------------
+
+
+def fallback_turn_body() -> bytes:
+    """Fable 5.1 declines mid-stream and Opus 4.8 serves (the audit's case)."""
+    iterations = [
+        iteration("message", "claude-fable-5-1", 20_000, 800, cache_read=500),
+        iteration("fallback_message", "claude-opus-4-8", 20_100, 1200),
+    ]
+    start = message_start("claude-fable-5-1", cache_read=500, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 20_000
+    usage = {
+        "input_tokens": 20_100,
+        "output_tokens": 1200,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "iterations": iterations,
+    }
+    return sse(
+        [
+            start,
+            *text_block(0, ["Part ", "one "]),
+            *fallback_block(1, "claude-fable-5-1", "claude-opus-4-8", "cyber"),
+            *text_block(2, ["part two."]),
+            *final_delta("end_turn", usage),
+        ]
+    )
+
+
+def refused_after_fallback_body() -> bytes:
+    """Fable 5.1 declines after some output, Opus 4.8 refuses before any (not billed)."""
+    iterations = [
+        iteration("message", "claude-fable-5-1", 9000, 400),
+        iteration("fallback_message", "claude-opus-4-8", 9100, 0),
+    ]
+    start = message_start("claude-fable-5-1", cache_read=0, cache_write=0)
+    start[1]["message"]["usage"]["input_tokens"] = 9000
+    usage = {"input_tokens": 9100, "output_tokens": 0, "iterations": iterations}
+    return sse(
+        [
+            start,
+            *text_block(0, ["Comença"]),
+            *fallback_block(1, "claude-fable-5-1", "claude-opus-4-8", "cyber"),
+            *final_delta("refusal", usage, refusal_details("cyber")),
+        ]
+    )
+
+
+def engine_with(body: bytes, tmp_path: Path, store: InMemoryStore) -> Engine:
+    provider = ClaudeApiProvider(make_settings(tmp_path), MockApi(replying(body)).client())
+    return Engine(
+        {"claude": provider, "chatgpt": FakeProvider("chatgpt", chunk_delay=0)},
+        store,
+        retry_delay=0,
+    )
+
+
+async def fable_turn(engine: Engine, request_id: str) -> list[ServerEvent]:
+    turn = TurnRequest(request_id, "Pregunta", "solo", models={"claude": "claude-fable-5-1"})
+    return [event async for event in engine.run(turn)]
+
+
+async def test_a_fallback_turn_is_billed_per_attempt_at_the_default_prices(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStore()
+    engine = engine_with(fallback_turn_body(), tmp_path, store)
+    events = await fable_turn(engine, "a")
+    done = events[-1]
+    assert isinstance(done, TurnCompleted)
+    # Fable 5.1 at 10/50 (cache reads 0.25) and Opus 4.8 at 5/25 USD per MTok
+    # (before: 0.25075 USD, every token at Opus 4.8's rates and under its name).
+    declined, served = store.usage
+    assert (declined.model, declined.ok) == ("claude-fable-5-1", False)
+    assert declined.usage.cost_usd == pytest.approx(0.240125)
+    assert (served.model, served.ok) == ("claude-opus-4-8", True)
+    assert served.usage.cost_usd == pytest.approx(0.1305)
+    assert done.usage.cost_usd == pytest.approx(0.370625)
+    (question, answer) = store.messages
+    outcome = question.meta["outcome"]
+    assert isinstance(outcome, dict) and outcome["usage"] == done.usage.to_dict()
+    # The answer keeps the served attempt's usage only.
+    assert answer.meta["model"] == "claude-opus-4-8"
+    assert answer.meta["usage"] == served.usage.to_dict()
+
+    # A cache hit is worth the whole original turn, each attempt at its model's price.
+    replay = (await fable_turn(engine, "b"))[-1]
+    assert isinstance(replay, TurnCompleted) and replay.cached
+    assert replay.savings.cost_usd == pytest.approx(0.370625)
+    assert replay.savings.cache == (20_100 + 1200) + (20_000 + 800 + 500)
+
+
+async def test_a_refusal_after_a_fallback_is_billed_at_the_declining_model_rates(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStore()
+    events = await fable_turn(engine_with(refused_after_fallback_body(), tmp_path, store), "c")
+    failed = events[-1]
+    assert isinstance(failed, TurnFailed)
+    # 9000 input and 400 output tokens at Fable 5.1's rates (before: 0.055 USD at Opus
+    # 4.8's); the refusal of Opus 4.8 before any output bills nothing.
+    assert [(u.model, u.ok, u.usage.cost_usd) for u in store.usage] == [
+        ("claude-fable-5-1", False, pytest.approx(0.11)),
+        ("claude-opus-4-8", False, None),
+    ]
+    assert failed.usage.cost_usd == pytest.approx(0.11)
+    (question,) = store.messages
+    outcome = question.meta["outcome"]
+    assert isinstance(outcome, dict) and outcome["usage"] == failed.usage.to_dict()
 
 
 async def test_a_refusal_without_stop_details_carries_its_streamed_usage(

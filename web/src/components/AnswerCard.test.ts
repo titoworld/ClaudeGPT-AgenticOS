@@ -90,3 +90,15 @@ describe('AnswerCard: truncated answers', () => {
     await vi.waitFor(() => expect(written).toEqual([TEXT]));
   });
 });
+
+describe('AnswerCard: the tokens of the answer (A7)', () => {
+  it("shows what it read from the provider's cache and what it wrote to it", () => {
+    const cache = { ...usage(3, 100, 10_000), cache_write_tokens: 20_000 };
+    const meta = textOf(card(stored({ usage: cache })).target.querySelector('footer.meta'));
+    expect(meta).toContain('3 → 100 tokens');
+    expect(meta).toContain('10.000 llegits de la memòria cau');
+    expect(meta).toContain('20.000 escrits a la memòria cau');
+    // Nothing about the cache when it was not used.
+    expect(textOf(card(stored({})).target.querySelector('footer.meta'))).not.toContain('memòria cau');
+  });
+});

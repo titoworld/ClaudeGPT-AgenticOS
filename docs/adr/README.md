@@ -14,6 +14,8 @@ Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el su
 | 0004 | [Interfície web i desplegament](0004-web-i-desplegament.md)                               | Acceptat |
 | 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-integritat-de-les-respostes.md) | Proposat |
 | 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
+| 0007 | [Resultat del torn desat a la pregunta](0007-resultat-del-torn.md)                        | Proposat |
+| 0008 | [Recompte de tokens i intents declinats](0008-recompte-de-tokens.md)                      | Proposat |
 
 ## Plantilla
 

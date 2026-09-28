@@ -17,6 +17,7 @@ import type {
   Phase,
   Savings,
   TurnEvent,
+  TurnFailure,
   TurnMode,
   TurnOptions,
   Usage,
@@ -81,6 +82,12 @@ export interface TurnView {
   cached: boolean;
   error: ErrorInfo | null;
   finalMessageIds: number[];
+  /**
+   * The turn compacted the history first (live: its `compaction` phase; stored: the
+   * question's `compaction_usage`). The summary call is in the total but on no stream,
+   * and either agent may have written it.
+   */
+  compacted: boolean;
   /** True when built from WebSocket events in this session. */
   live: boolean;
 }
@@ -142,6 +149,7 @@ export function createLiveTurn(input: NewTurnInput): TurnView {
     cached: false,
     error: null,
     finalMessageIds: [],
+    compacted: false,
     live: true,
   };
 }
@@ -198,6 +206,7 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
     case 'phase':
       turn.phase = ev.phase;
       turn.round = ev.round;
+      if (ev.phase === 'compaction') turn.compacted = true;
       if (turn.status === 'pending') turn.status = 'running';
       break;
     case 'stream.started': {
@@ -233,6 +242,8 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       if (!s) break;
       s.status = 'failed';
       s.error = ev.error;
+      // What the failed call was billed (a refusal, an empty reply), when the server knows.
+      s.usage = ev.usage ?? null;
       break;
     }
     case 'turn.completed':
@@ -250,17 +261,23 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
     case 'turn.failed':
       turn.status = 'failed';
       turn.error = ev.error;
+      // A turn that fails or is cancelled may have billed calls too: its total (N10).
+      turn.usage = ev.usage ?? turn.usage;
       stopOpenStreams(turn, 'interrupted');
       break;
     case 'turn.cancelled':
       turn.status = 'cancelled';
+      turn.usage = ev.usage ?? turn.usage;
       stopOpenStreams(turn, 'interrupted');
       break;
   }
   return true;
 }
 
-/** Total usage of a turn: the server total when known, else the sum of its streams. */
+/**
+ * Total usage of a turn: the server total when known (every terminal event carries it),
+ * else the sum of its streams, failed calls included.
+ */
 export function turnUsage(turn: TurnView): Usage | null {
   if (turn.usage) return turn.usage;
   let total: Usage | null = null;
@@ -473,28 +490,136 @@ function inferMode(streams: StreamView[]): TurnMode {
   return agents.size > 1 ? 'duel' : 'solo';
 }
 
-/** Error of a stored turn that never finished (cancelled, failed or still running). */
+/**
+ * Error of a stored turn that never finished: its outcome is still null (the server
+ * stopped or crashed during it), or, stored before outcomes existed, it has no answer
+ * (a debate: no synthesis).
+ */
 export const INCOMPLETE_KIND = 'incomplete';
 const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: 'Aquest torn no es va completar.' });
 
 /**
- * Whether stored messages hold a finished turn: every finished debate stores a
- * synthesis (real, degraded or replayed from the cache); solo and duel turns
- * store their answers.
+ * Whether stored messages hold a finished turn, for turns stored without an outcome:
+ * every finished debate stores a synthesis (real, degraded or replayed from the cache);
+ * solo and duel turns store their answers.
  */
 function storedTurnFinished(mode: TurnMode, streams: StreamView[]): boolean {
   if (!streams.length) return false;
   return mode !== 'debate' || streams.some((s) => s.kind === 'synthesis');
 }
 
+/** How a stored turn ended (`question.meta.outcome`, ADR 0007), as the view uses it. */
+interface StoredOutcome {
+  status: 'done' | 'failed' | 'cancelled';
+  error: ErrorInfo | null;
+  failures: TurnFailure[];
+  /** The turn's total; null only when unreadable. */
+  usage: Usage | null;
+  savings: Savings | null;
+  consensus: Consensus | null;
+  finalMessageIds: number[] | null;
+  cached: boolean;
+}
+
+function outcomeStatus(v: unknown): StoredOutcome['status'] | null {
+  switch (v) {
+    case 'completed':
+      return 'done';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return null;
+  }
+}
+
+const errorKind = (v: unknown): string => (typeof v === 'string' && v ? v : 'unavailable');
+
+function asError(v: unknown): ErrorInfo | null {
+  if (!isRecord(v)) return null;
+  const message = asText(v.message);
+  return message ? { kind: errorKind(v.kind), message } : null;
+}
+
+function asFailure(v: unknown): TurnFailure | null {
+  if (!isRecord(v) || (v.agent !== 'claude' && v.agent !== 'chatgpt')) return null;
+  const round = asNumber(v.round);
+  if (round == null || round < 0 || !Number.isInteger(round)) return null;
+  return { agent: v.agent, kind: errorKind(v.kind), message: asText(v.message) ?? '', round };
+}
+
+/** The outcome of a stored turn, or null when there is none it can read. */
+function asOutcome(v: unknown): StoredOutcome | null {
+  if (!isRecord(v)) return null;
+  const status = outcomeStatus(v.status);
+  if (!status) return null;
+  const failures = Array.isArray(v.failures) ? v.failures.map(asFailure) : [];
+  const ids = Array.isArray(v.final_message_ids) ? v.final_message_ids.map(asNumber) : null;
+  return {
+    status,
+    error: status === 'failed' ? asError(v.error) : null,
+    failures: failures.filter((f): f is TurnFailure => f != null),
+    usage: asUsage(v.usage),
+    savings: asSavings(v.savings),
+    consensus: asConsensus(v.consensus),
+    finalMessageIds: ids?.filter((id): id is number => id != null) ?? null,
+    cached: v.cached === true,
+  };
+}
+
+/** Where a call goes in a turn: first answers, each revision round, then the synthesis. */
+const stage = (s: StreamView): number =>
+  s.kind === 'answer' ? 0 : s.kind === 'revision' ? s.round : Number.MAX_SAFE_INTEGER;
+
 /**
- * Map stored messages (oldest first) into turns. Turn-level `savings`,
- * `consensus` and `usage` are read from any message meta when the backend
- * stores them; otherwise consensus is derived from the last revision round.
- * The total usage is the answers' plus the compaction summary's
- * (`question.meta.compaction_usage`) plus the billed calls that stored no
- * message (`unstored_usage` of the last final message, a running total), as in
- * the live `turn.completed`.
+ * The calls of a stored turn that failed (`outcome.failures`, in the order they failed)
+ * as failed streams where the live turn had them, since they stored no message. Round 0
+ * is an agent's first answer and a later round a debate's revision, unless the agent
+ * already has that call (stored, or failed before): then it was an attempt at the
+ * debate's synthesis, which runs in the round of the last revision. Failed synthesis
+ * attempts go before the synthesis that counts, as they came before it.
+ */
+function withFailures(streams: StreamView[], failures: TurnFailure[], mode: TurnMode): StreamView[] {
+  if (!failures.length) return streams;
+  const taken = new Set(streams.filter((s) => s.kind !== 'synthesis').map((s) => `${s.agent} ${s.kind} ${s.round}`));
+  const failed: StreamView[] = [];
+  failures.forEach((f, i) => {
+    let kind: StreamKind = mode === 'debate' && f.round > 0 ? 'revision' : 'answer';
+    const call = `${f.agent} ${kind} ${f.round}`;
+    if (taken.has(call)) {
+      if (mode !== 'debate') return; // an answer that was stored after all: it is what counts
+      kind = 'synthesis';
+    } else {
+      taken.add(call);
+    }
+    const s = newStream(`f${i}`, f.agent, kind, f.round, '');
+    s.status = 'failed';
+    s.error = { kind: f.kind, message: f.message };
+    failed.push(s);
+  });
+  const attempt = (s: StreamView) => Number(s.kind === 'synthesis' && s.messageId == null);
+  return [...streams, ...failed]
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => stage(a.s) - stage(b.s) || attempt(b.s) - attempt(a.s) || a.i - b.i)
+    .map(({ s }) => s);
+}
+
+/**
+ * Map stored messages (oldest first) into turns.
+ *
+ * A turn whose question has an outcome (ADR 0007) ended as it says: its status and
+ * error, the calls that failed (shown on their cards with their reason), its total
+ * usage (every billed call of the turn, taken as is), savings, consensus, final
+ * messages and cache flag, exactly as its live terminal event said. An outcome that is
+ * still null means the turn never ended: it is incomplete.
+ *
+ * Turns stored before outcomes existed follow the old rules: they are finished when
+ * they stored their answers (a debate, its synthesis); `savings`, `consensus` and
+ * `usage` come from any message meta that stores them, else the consensus is derived
+ * from the last revision round; and the total usage is the answers' plus the compaction
+ * summary's (`question.meta.compaction_usage`) plus the billed calls that stored no
+ * message (`unstored_usage` of the last final message, a running total).
  */
 export function turnsFromMessages(messages: Message[], conversationId: number | null = null): TurnView[] {
   const groups = new Map<number, Message[]>();
@@ -553,8 +678,14 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
     const mode: TurnMode =
       qmeta.mode === 'solo' || qmeta.mode === 'duel' || qmeta.mode === 'debate' ? qmeta.mode : inferMode(streams);
     const target: Agent | null = qmeta.target === 'claude' || qmeta.target === 'chatgpt' ? qmeta.target : null;
-    const last = streams.at(-1);
-    const finished = storedTurnFinished(mode, streams);
+    // How the turn ended, as its live terminal event said (ADR 0007). Null: it never ended.
+    const ended = asOutcome(qmeta.outcome);
+    const calls = ended ? withFailures(streams, ended.failures, mode) : streams;
+    const last = calls.at(-1);
+    let status: TurnStatus = 'done';
+    let error: ErrorInfo | null = null;
+    if (ended) [status, error] = [ended.status, ended.error];
+    else if (qmeta.outcome === null || !storedTurnFinished(mode, streams)) [status, error] = ['failed', incomplete()];
 
     const turn: TurnView = {
       key: `t${turnId}`,
@@ -566,20 +697,23 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       options: asOptions(qmeta.options),
       question: question?.content ?? '',
       createdAt: question?.created_at ?? group[0]!.created_at,
-      status: finished ? 'done' : 'failed',
+      status,
       phase: last ? (last.kind === 'revision' ? 'revision' : last.kind === 'synthesis' ? 'synthesis' : 'answer') : null,
       round: last?.round ?? 0,
-      streams,
+      streams: calls,
       lastSeq: 0,
-      usage,
-      savings,
-      consensus,
-      cached: streams.length > 0 && streams.every((s) => s.cached),
-      error: finished ? null : incomplete(),
-      finalMessageIds: group.filter((m) => m.final && m.kind !== 'question').map((m) => m.id),
+      // The outcome's total is the whole turn's: nothing is added to it.
+      usage: ended?.usage ?? usage,
+      savings: ended ? (ended.savings ?? savings) : savings,
+      consensus: ended ? ended.consensus : consensus,
+      cached: ended ? ended.cached : streams.length > 0 && streams.every((s) => s.cached),
+      error,
+      finalMessageIds: ended?.finalMessageIds ?? group.filter((m) => m.final && m.kind !== 'question').map((m) => m.id),
+      compacted: compaction != null,
       live: false,
     };
-    if (mode === 'debate' && !turn.consensus) turn.consensus = deriveConsensus(turn);
+    // A turn that ended has the consensus it had live (none, unless it completed a debate).
+    if (mode === 'debate' && !turn.consensus && !ended) turn.consensus = deriveConsensus(turn);
     turns.push(turn);
   }
   return turns;

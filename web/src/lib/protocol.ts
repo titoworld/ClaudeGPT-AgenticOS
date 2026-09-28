@@ -10,6 +10,12 @@ export type Phase = 'answer' | 'revision' | 'synthesis' | 'compaction';
 export type Section = 'text' | 'critique' | 'answer';
 export type SavingKind = 'cache' | 'compaction' | 'early_stop' | 'unchanged';
 
+/**
+ * Tokens of one or more model calls. `input_tokens` is the input not served from the
+ * provider's cache and `output_tokens` includes the reasoning (`reasoning_tokens` is a
+ * part of it). A call processed input + cache read + cache write + output tokens
+ * (ADR 0008, `processedTokens` in costs.ts).
+ */
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
@@ -163,6 +169,12 @@ export interface MessageMeta {
   target?: Agent;
   options?: TurnOptions;
   models?: Partial<Record<Agent, string>>;
+  /**
+   * Question only: how the turn ended (ADR 0007). `null` from the moment the question is
+   * stored until the engine writes it at the end of the turn, so a turn that never ended
+   * (a crash, a restart) keeps `null`; absent on turns stored before it existed.
+   */
+  outcome?: TurnOutcome | null;
   model?: string;
   usage?: Usage;
   latency_ms?: number;
@@ -171,6 +183,12 @@ export interface MessageMeta {
   cost_basis?: 'api' | 'equivalent';
   compaction_usage?: Usage; // question only: the turn's compaction summary call
   unstored_usage?: Usage; // last final message: billed calls stored on no message (failed/empty)
+  /**
+   * An answer served after a fallback (Claude API): the billed attempts other models
+   * declined before it, each with its model and cost. They count in the turn's total,
+   * never in this message's `usage` (tokens of different models are never summed).
+   */
+  declined?: { model: string; usage: Usage }[];
   savings?: Savings;
   consensus?: Consensus;
   degraded?: boolean;
@@ -218,6 +236,7 @@ export interface Stats {
     input_tokens: number;
     output_tokens: number;
     cache_read_tokens: number;
+    cache_write_tokens: number;
     cost_usd: number;
   }[];
   savings_daily: { date: string; kind: SavingKind; tokens: number }[];
@@ -247,6 +266,35 @@ export interface Consensus {
   reached: boolean;
   round: number;
   scores: Partial<Record<Agent, number>>;
+}
+
+/** A model call that failed during a turn (a `stream.failed`): `kind` and `message` are its error's. */
+export interface TurnFailure {
+  agent: Agent;
+  kind: string;
+  message: string;
+  round: number;
+}
+
+/**
+ * How a turn ended, written once on its question (`meta.outcome`) when it ends (ADR 0007):
+ * what the terminal event said, so a reloaded turn shows what the live one did.
+ */
+export interface TurnOutcome {
+  status: 'completed' | 'failed' | 'cancelled';
+  /** Only when `status` is "failed": the error of `turn.failed`. */
+  error?: ErrorInfo;
+  /** The stream failures of the turn, in the order they happened (possibly none). */
+  failures: TurnFailure[];
+  /**
+   * The turn's total: every billed call (compaction, failed calls, declined attempts and
+   * calls stored on no message included), the `usage` of the terminal event.
+   */
+  usage: Usage;
+  savings: Savings;
+  consensus: Consensus | null;
+  final_message_ids: number[];
+  cached: boolean;
 }
 
 export type ClientMessage =
@@ -304,7 +352,13 @@ export type TurnEvent =
       /** Unchanged revision: the model's short note, as the stored `meta.unchanged_note`. */
       unchanged_note?: string;
     })
-  | (TurnEventBase & { type: 'stream.failed'; stream_id: string; error: ErrorInfo })
+  | (TurnEventBase & {
+      type: 'stream.failed';
+      stream_id: string;
+      error: ErrorInfo;
+      /** What the failed call was billed, when known (a refusal, an empty reply...). */
+      usage?: Usage;
+    })
   | (TurnEventBase & {
       type: 'turn.completed';
       conversation_id: number;
@@ -315,8 +369,17 @@ export type TurnEvent =
       consensus: Consensus | null;
       cached: boolean;
     })
-  | (TurnEventBase & { type: 'turn.failed'; error: ErrorInfo })
-  | (TurnEventBase & { type: 'turn.cancelled' });
+  | (TurnEventBase & {
+      type: 'turn.failed';
+      error: ErrorInfo;
+      /** The turn's total so far (zero when nothing was billed), as the stored `outcome.usage`. */
+      usage: Usage;
+    })
+  | (TurnEventBase & {
+      type: 'turn.cancelled';
+      /** The turn's total so far (zero when nothing was billed), as the stored `outcome.usage`. */
+      usage: Usage;
+    });
 
 export type ServerMessage =
   | TurnEvent

@@ -4,6 +4,9 @@ See docs/ARQUITECTURA.md (modes, token savings) and docs/PROTOCOL.md (event orde
 The turn itself runs in its own task and hands events to :meth:`Engine.run`
 through a queue, so concurrent model calls interleave naturally and closing or
 cancelling the iterator cancels every task of the turn before returning.
+
+How every turn ends (completed, failed or cancelled) is decided once and stored on its
+question before the terminal event (docs/adr/0007-resultat-del-torn.md).
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from collections.abc import (
     Coroutine,
     Iterable,
     Mapping,
+    Sequence,
 )
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -34,10 +38,16 @@ from agentic_os.domain import (
     Usage,
     other_agent,
 )
-from agentic_os.orchestrator.accounting import TurnAccounting, failed_call_usage, is_billed
+from agentic_os.orchestrator.accounting import (
+    TurnAccounting,
+    declined_attempts,
+    failed_call_usage,
+    is_billed,
+)
 from agentic_os.orchestrator.cache import (
     context_fingerprint,
     replay_cost_usd,
+    replay_tokens,
     replayed_message,
     turn_cache_key,
 )
@@ -53,7 +63,10 @@ from agentic_os.orchestrator.events import (
     StreamStarted,
     TurnCompleted,
     TurnFailed,
+    TurnFailure,
+    TurnOutcome,
     TurnStarted,
+    TurnStatus,
 )
 from agentic_os.orchestrator.memory import (
     TurnContext,
@@ -69,7 +82,14 @@ from agentic_os.orchestrator.prompts import (
     system_prompt,
 )
 from agentic_os.orchestrator.sections import RevisionStreamParser
-from agentic_os.orchestrator.store import CachedTurn, JsonValue, NewMessage, Store, UsageRecord
+from agentic_os.orchestrator.store import (
+    CachedTurn,
+    JsonValue,
+    NewMessage,
+    SavingRecord,
+    Store,
+    UsageRecord,
+)
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
 from agentic_os.pricing import ModelPrice, estimate_cost_usd, find_price
 from agentic_os.providers.base import (
@@ -102,6 +122,8 @@ _PHASE_OF: dict[MessageKind, Literal["answer", "revision", "synthesis"]] = {
 }
 
 Emit = Callable[[ServerEvent], None]
+OnOutcome = Callable[[TurnOutcome], None]
+INTERNAL_ERROR = ErrorInfo("internal", "S'ha produït un error intern i el torn s'ha aturat.")
 
 
 def _utc_now() -> datetime:
@@ -189,6 +211,16 @@ class _Turn:
     truncated: bool = False
     """A stored message of the turn was cut off: the turn is never cached."""
     background: set[asyncio.Task[None]] = field(default_factory=set)
+    failures: list[TurnFailure] = field(default_factory=list)
+    """The stream failures of the turn, in order (``outcome.failures``)."""
+    on_outcome: OnOutcome | None = None
+    outcome: TurnOutcome | None = None
+    """How the turn ended, once decided (see :meth:`Engine._settle`)."""
+    outcome_write: asyncio.Task[None] | None = None
+    """The write of :attr:`outcome` on the question (shielded from cancellation)."""
+    savings_write: asyncio.Task[None] | None = None
+    """The write of the turn's saving rows, once started (shielded from cancellation):
+    from then on the outcome carries them, even if the turn is cancelled."""
 
     @property
     def request_id(self) -> str:
@@ -201,6 +233,27 @@ async def _cancel_and_wait(tasks: Iterable[asyncio.Task[Any]]) -> None:
         task.cancel()
     if pending:
         await asyncio.wait(pending)
+
+
+async def _end_turn(task: asyncio.Task[None], turn: _Turn) -> None:
+    """Cancel the task of ``turn`` (once, if it is still running) and wait until it has
+    ended and how it ended is stored. A caller cancelled again meanwhile (the owner
+    pressing stop twice, a shutdown while the turn stops) keeps waiting, without
+    cancelling the task again, and its ``CancelledError`` goes on afterwards: whatever
+    announces the cancellation then comes after the stored outcome, with what the turn
+    spent, and no write of the turn outlives :meth:`Engine.run` (nor, at shutdown, the
+    store). The wait is bounded by how long the providers take to stop a call and the
+    store takes to write."""
+    if not task.done():
+        task.cancel()
+    interrupted: asyncio.CancelledError | None = None
+    while pending := [t for t in (task, turn.outcome_write) if t is not None and not t.done()]:
+        try:
+            await asyncio.wait(pending)
+        except asyncio.CancelledError as exc:
+            interrupted = exc
+    if interrupted is not None:
+        raise interrupted
 
 
 def _usage_json(usage: Usage) -> dict[str, JsonValue]:
@@ -221,9 +274,10 @@ def _savings_json(savings: Savings) -> dict[str, JsonValue]:
 
 def _set_unstored(meta: dict[str, JsonValue], accounting: TurnAccounting) -> None:
     """On a final message: ``unstored_usage``, the billed calls of the turn so far that
-    stored no message (failed, refused or empty), so a reloaded turn adds up to the live
-    total. Every final message carries the running total and the last one the turn's
-    (a billed failure after the last final message of a duel is on none)."""
+    stored no message (failed, refused, empty or declined). Every final message carries
+    the running total, so it can miss a billed failure that ends after the last final
+    message of a duel: the turn's total is its outcome's usage (``meta.outcome`` of the
+    question), and this is kept for the turns reconstructed without one."""
     if is_billed(accounting.unstored):
         meta["unstored_usage"] = _usage_json(accounting.unstored)
 
@@ -304,6 +358,10 @@ class Engine:
         """The latest status check of each agent (see :meth:`_identity`)."""
         self._models: dict[AgentName, str] = {}
         """Model name per agent for StreamStarted, from ``status()`` or the first result."""
+        self._writes: set[asyncio.Task[None]] = set()
+        """Writes of how a turn ended (its outcome and its saving rows) still running:
+        kept here so that one whose turn stopped waiting for it (it is shielded) still
+        ends."""
 
     # -- public API --------------------------------------------------------------
 
@@ -313,6 +371,7 @@ class Engine:
         *,
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
+        on_outcome: OnOutcome | None = None,
     ) -> AsyncIterator[ServerEvent]:
         """Run one turn, yielding its events (see docs/PROTOCOL.md).
 
@@ -320,7 +379,15 @@ class Engine:
         ``price_overrides`` (the owner's prices, over ``pricing.DEFAULT_PRICES``) price
         its calls. The last event is always ``TurnCompleted`` or ``TurnFailed``.
         Closing the iterator or cancelling its consumer cancels the turn and all its
-        model calls.
+        model calls; the ``CancelledError`` always propagates, once the turn has ended
+        (a consumer cancelled again meanwhile still waits for that: see
+        :func:`_end_turn`).
+
+        ``on_outcome`` is called once with how the turn ended, as soon as it is decided
+        (before the terminal event, and also when the turn is cancelled, which has no
+        event here: the web layer announces it with what the turn spent). A cancelled
+        consumer gets its ``CancelledError`` after that call and after the outcome is
+        stored.
         """
         queue: asyncio.Queue[ServerEvent | _End] = asyncio.Queue()
         turn = _Turn(
@@ -328,6 +395,7 @@ class Engine:
             emit=queue.put_nowait,
             question=request.text.strip(),
             prices=price_overrides,
+            on_outcome=on_outcome,
         )
         task = asyncio.create_task(
             self._execute(turn, compaction_threshold_tokens),
@@ -346,18 +414,34 @@ class Engine:
             if error is not None:
                 logger.error("Turn %s crashed", request.request_id, exc_info=error)
             if not finished:
-                yield TurnFailed(
-                    request.request_id,
-                    ErrorInfo("internal", "S'ha produït un error intern i el torn s'ha aturat."),
-                )
+                outcome = await self._settle(turn, "failed", error=INTERNAL_ERROR)
+                yield TurnFailed(request.request_id, INTERNAL_ERROR, outcome.usage)
         finally:
-            await _cancel_and_wait((task,))
+            await _end_turn(task, turn)
 
     # -- turn ----------------------------------------------------------------------
 
     async def _execute(self, turn: _Turn, threshold: int | None) -> None:
         try:
             await self._run_turn(turn, threshold)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                # Cancelled by the owner, a closed iterator or a shutdown: the turn's
+                # calls have stopped. How it ended is stored (shielded, see _settle)
+                # before the cancellation goes on.
+                await self._settle(turn, "cancelled")
+            else:
+                # Nobody cancelled the turn: a call raised the error by itself (a bug in
+                # a provider or a library). run() reports an internal failure, so the
+                # stored outcome says the same, not that the owner stopped the turn.
+                logger.error(
+                    "Turn %s raised CancelledError without being cancelled",
+                    turn.request_id,
+                    exc_info=True,
+                )
+                await self._settle(turn, "failed", error=INTERNAL_ERROR)
+            raise
         finally:
             await _cancel_and_wait(turn.background)
 
@@ -365,7 +449,7 @@ class Engine:
         request = turn.request
         invalid = self._validate(request)
         if invalid is not None:
-            turn.emit(TurnFailed(turn.request_id, invalid))
+            await self._fail(turn, invalid)
             return
 
         new_conversation = request.conversation_id is None
@@ -374,9 +458,7 @@ class Engine:
         elif await self._store.conversation_exists(request.conversation_id):
             turn.conversation_id = request.conversation_id
         else:
-            turn.emit(
-                TurnFailed(turn.request_id, ErrorInfo("not_found", "La conversa no existeix."))
-            )
+            await self._fail(turn, ErrorInfo("not_found", "La conversa no existeix."))
             return
 
         turn.context = await self._prepare_context(turn, threshold)
@@ -414,8 +496,11 @@ class Engine:
         question_meta = self._question_meta(request, agents)
         if turn.compaction_usage is not None:
             # The summary ran before the question existed: its cost travels with the
-            # question so a reloaded turn adds up to the live TurnCompleted.usage.
+            # question (and in the turn's outcome).
             question_meta["compaction_usage"] = _usage_json(turn.compaction_usage)
+        # Open until the turn ends (see _settle): a turn that never ends (a crash, a
+        # restart) keeps it null, unlike the turns stored before outcomes existed.
+        question_meta["outcome"] = None
         turn.turn_id = await self._store.add_message(
             NewMessage(
                 conversation_id=turn.conversation_id,
@@ -589,7 +674,6 @@ class Engine:
     async def _finish(
         self, turn: _Turn, consensus: Consensus | None, cache_key: str | None
     ) -> None:
-        accounting = turn.accounting
         await self._record_savings(turn)
         # Only whole, complete turns are replayed: never one with a failed, degraded or
         # cut-off message, nor one whose key does not say which models answered.
@@ -601,27 +685,115 @@ class Engine:
                     CachedTurn(
                         mode=turn.request.mode,
                         messages=tuple(turn.stored),
-                        tokens=accounting.turn_usage.total_tokens,
+                        tokens=replay_tokens(turn.stored),
                     ),
                     self._clock() + timedelta(seconds=self._config.cache_ttl_seconds),
                 )
             except Exception:
                 logger.exception("Could not store turn %s in the cache", turn.turn_id)
+        outcome = await self._settle(turn, "completed", consensus=consensus)
         turn.emit(
             TurnCompleted(
                 turn.request_id,
                 turn.conversation_id,
                 turn.turn_id,
-                tuple(sorted(turn.final_ids)),
-                accounting.usage,
-                accounting.savings(),
+                outcome.final_message_ids,
+                outcome.usage,
+                outcome.savings,
                 consensus,
                 cached=False,
             )
         )
 
+    async def _fail(self, turn: _Turn, error: ErrorInfo) -> None:
+        """End the turn as failed: its outcome, then ``turn.failed`` with its total."""
+        outcome = await self._settle(turn, "failed", error=error)
+        turn.emit(TurnFailed(turn.request_id, error, outcome.usage))
+
+    async def _settle(
+        self,
+        turn: _Turn,
+        status: TurnStatus,
+        *,
+        error: ErrorInfo | None = None,
+        consensus: Consensus | None = None,
+        cached: bool = False,
+    ) -> TurnOutcome:
+        """How the turn ended (docs/adr/0007-resultat-del-torn.md), decided once: a later
+        call (a cancellation while the outcome is being written) gets the same outcome.
+        It is reported to ``on_outcome`` and written on the question, if it exists, in a
+        task of its own that the caller waits for through ``asyncio.shield``: cancelling
+        the turn meanwhile stops the wait, never the write.
+
+        Only a turn whose messages are all stored records savings, right before it
+        completes, so a failed or cancelled turn has none; one cancelled while its saving
+        rows were being written keeps them (the rows are written in full, see
+        :meth:`_record_savings`), and its outcome is stored after them."""
+        if turn.outcome is None:
+            accounting = turn.accounting
+            done = status == "completed"
+            saved = done or turn.savings_write is not None
+            turn.outcome = TurnOutcome(
+                status=status,
+                usage=accounting.usage,
+                savings=accounting.savings() if saved else Savings(),
+                error=error if status == "failed" else None,
+                failures=tuple(turn.failures),
+                consensus=consensus if done else None,
+                final_message_ids=tuple(sorted(turn.final_ids)),
+                cached=done and cached,
+            )
+            if turn.on_outcome is not None:
+                try:
+                    turn.on_outcome(turn.outcome)
+                except Exception:
+                    logger.exception("The outcome callback of turn %s failed", turn.request_id)
+            if turn.turn_id:
+                turn.outcome_write = self._write(
+                    self._write_outcome(turn.turn_id, turn.outcome, after=turn.savings_write),
+                    name=f"outcome-{turn.request_id}",
+                )
+        if turn.outcome_write is not None:
+            await asyncio.shield(turn.outcome_write)
+        return turn.outcome
+
+    def _write(self, write: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        """Run a write of how a turn ended (its outcome, its saving rows) in a task of
+        its own, kept until it ends: the turn waits for it through ``asyncio.shield``,
+        so a cancellation meanwhile stops the wait, never the write."""
+        task = asyncio.create_task(write, name=name)
+        self._writes.add(task)
+        task.add_done_callback(self._writes.discard)
+        return task
+
+    async def _write_outcome(
+        self, question_id: int, outcome: TurnOutcome, *, after: asyncio.Task[None] | None
+    ) -> None:
+        """Store an outcome, once the saving rows it counts (``after``, if any) are
+        written; a failure only leaves the question's outcome open (null)."""
+        if after is not None and not after.done():
+            await asyncio.wait((after,))
+        try:
+            await self._store.set_turn_outcome(question_id, outcome)
+        except Exception:
+            logger.exception("Could not store the outcome of turn %s", question_id)
+
     async def _record_savings(self, turn: _Turn) -> None:
-        for record in turn.accounting.saving_records(turn.conversation_id, turn.turn_id):
+        """Record the savings of a turn whose messages are all stored (one row per kind),
+        right before it completes. The rows are written in a task of their own that the
+        turn waits for through ``asyncio.shield``: once started they are all written, and
+        a turn cancelled meanwhile keeps them in its outcome, so the outcome and the rows
+        the dashboard counts agree."""
+        records = turn.accounting.saving_records(turn.conversation_id, turn.turn_id)
+        if not records:
+            return
+        turn.savings_write = self._write(
+            self._write_savings(records), name=f"savings-{turn.request_id}"
+        )
+        await asyncio.shield(turn.savings_write)
+
+    async def _write_savings(self, records: Sequence[SavingRecord]) -> None:
+        for record in records:
             try:
                 await self._store.record_saving(record)
             except Exception:
@@ -643,12 +815,7 @@ class Engine:
         if outcome.ok:
             return True
         kind = outcome.error.kind if outcome.error else "unavailable"
-        turn.emit(
-            TurnFailed(
-                turn.request_id,
-                ErrorInfo(kind, f"{AGENT_LABELS[agent]} no ha pogut respondre."),
-            )
-        )
+        await self._fail(turn, ErrorInfo(kind, f"{AGENT_LABELS[agent]} no ha pogut respondre."))
         return False
 
     async def _duel(self, turn: _Turn) -> bool:
@@ -668,7 +835,7 @@ class Engine:
         )
         if any(outcome.ok for outcome in outcomes.values()):
             return True
-        self._fail_all(turn, outcomes)
+        await self._fail_all(turn, outcomes)
         return False
 
     async def _debate(self, turn: _Turn) -> Consensus | None:
@@ -694,7 +861,7 @@ class Engine:
         )
         survivors = [agent for agent in AGENTS if outcomes[agent].ok]
         if not survivors:
-            self._fail_all(turn, outcomes)
+            await self._fail_all(turn, outcomes)
             return None
         answers = _Answers(text={}, cut={})
         for agent in survivors:
@@ -781,12 +948,10 @@ class Engine:
         # Nobody could synthesize: the latest answer of the healthier agent is final.
         await self._store_degraded_synthesis(turn, order[0], answers, round_, consensus)
 
-    def _fail_all(self, turn: _Turn, outcomes: Mapping[AgentName, _Outcome]) -> None:
+    async def _fail_all(self, turn: _Turn, outcomes: Mapping[AgentName, _Outcome]) -> None:
         kinds = {outcome.error.kind for outcome in outcomes.values() if outcome.error}
         kind = kinds.pop() if len(kinds) == 1 else "unavailable"
-        turn.emit(
-            TurnFailed(turn.request_id, ErrorInfo(kind, "Cap dels dos agents ha pogut respondre."))
-        )
+        await self._fail(turn, ErrorInfo(kind, "Cap dels dos agents ha pogut respondre."))
 
     async def _store_degraded_synthesis(
         self,
@@ -913,14 +1078,15 @@ class Engine:
         if turn.request.mode == "debate" and consensus is None:
             consensus = Consensus(reached=False, round=phase[1] if phase else 0, scores={})
         await self._record_savings(turn)
+        outcome = await self._settle(turn, "completed", consensus=consensus, cached=True)
         turn.emit(
             TurnCompleted(
                 turn.request_id,
                 turn.conversation_id,
                 turn.turn_id,
-                tuple(sorted(turn.final_ids)),
-                turn.accounting.usage,
-                savings,
+                outcome.final_message_ids,
+                outcome.usage,
+                outcome.savings,
                 consensus,
                 cached=True,
             )
@@ -1052,6 +1218,7 @@ class Engine:
             model, usage = failed_call_usage(
                 error, request.model or self._models.get(agent, ""), turn.prices
             )
+            await self._record_declined(turn, agent, request.purpose, error, carries_context)
             if is_billed(usage):
                 # Billed all the same (a refusal): it counts in the turn's usage, and the
                 # context it was billed for was the compacted one.
@@ -1072,8 +1239,12 @@ class Engine:
                 logger.info("Retrying %s after a retryable error: %s", agent, error.message)
                 await asyncio.sleep(self._retry_delay)
                 continue
-            return self._stream_failed(turn, agent, stream_id, error)
+            billed = usage if is_billed(usage) else None
+            return self._stream_failed(turn, agent, stream_id, error, round_, billed)
 
+        declined = await self._record_declined(
+            turn, agent, request.purpose, result, carries_context
+        )
         price = find_price(result.model, turn.prices)
         if carries_context:
             # Only a call that reached a model and was billed sent the compacted context
@@ -1123,7 +1294,8 @@ class Engine:
                 ttft_ms=result.ttft_ms,
                 error=error,
             )
-            return self._stream_failed(turn, agent, stream_id, error)
+            billed = usage if is_billed(usage) else None
+            return self._stream_failed(turn, agent, stream_id, error, round_, billed)
 
         await self._record_usage(
             turn,
@@ -1150,6 +1322,12 @@ class Engine:
         }
         if basis := _cost_basis(provider.mode, usage):
             meta["cost_basis"] = basis
+        if declined:
+            # The attempts other models declined before this one: billed calls of their
+            # own (the turn's usage has them), kept here so a replay is worth them too.
+            meta["declined"] = [
+                {"model": model, "usage": _usage_json(attempt)} for model, attempt in declined
+            ]
         if result.truncated:
             # A usable partial answer, never a complete one: shown as such, never cached.
             _set_truncated(meta, result.finish_reason)
@@ -1246,11 +1424,53 @@ class Engine:
         return result
 
     def _stream_failed(
-        self, turn: _Turn, agent: AgentName, stream_id: str, error: ProviderError
+        self,
+        turn: _Turn,
+        agent: AgentName,
+        stream_id: str,
+        error: ProviderError,
+        round_: int,
+        usage: Usage | None = None,
     ) -> _Outcome:
+        """Report a failed call (with what it billed, if anything) and keep it for the
+        turn's outcome."""
         turn.failed_agents.add(agent)
-        turn.emit(StreamFailed(turn.request_id, stream_id, ErrorInfo(error.kind, error.message)))
+        info = ErrorInfo(error.kind, error.message)
+        turn.failures.append(TurnFailure(agent, info.kind, info.message, round_))
+        turn.emit(StreamFailed(turn.request_id, stream_id, info, usage))
         return _Outcome(agent=agent, ok=False, error=error)
+
+    async def _record_declined(
+        self,
+        turn: _Turn,
+        agent: AgentName,
+        purpose: Purpose,
+        source: object,
+        carries_context: bool,
+    ) -> list[tuple[str, Usage]]:
+        """Record the billed attempts other models declined before ``source`` (a result or
+        a provider error) was served or refused: each is a billed call of its own model,
+        priced at its rates, that stored no message (docs/adr/0008-recompte-de-tokens.md).
+        Returns them priced, in order."""
+        declined = declined_attempts(source, turn.prices)
+        for model, usage in declined:
+            turn.accounting.add_unstored(usage)
+            if carries_context:
+                turn.accounting.add_context_request(find_price(model, turn.prices))
+            await self._record_usage(
+                turn,
+                agent,
+                purpose,
+                model=model,
+                usage=usage,
+                latency_ms=0,
+                ttft_ms=None,
+                error=ProviderError(
+                    f"{model} ha declinat la petició i l'ha passada a un altre model.",
+                    kind="invalid",
+                ),
+            )
+        return declined
 
     async def _record_usage(
         self,

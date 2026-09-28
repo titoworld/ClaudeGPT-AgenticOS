@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { approxEur, turnCost, turnCostTitle } from '../lib/costs';
+  import { approxEur, processedTokens, tokenBreakdown, turnCost, turnCostTitle } from '../lib/costs';
   import { AGENT_LABEL, formatInt, formatTime } from '../lib/format';
   import { AGENTS } from '../lib/protocol';
   import { MODE_LABEL } from '../lib/text';
@@ -40,8 +40,11 @@
   const fallbackNote = $derived(synthesisNote(turn, synthesis));
   const threshold = $derived(turn.options?.debate.consensus_threshold ?? DEFAULT_CONSENSUS_THRESHOLD);
   const soloAgent = $derived(answers.claude ? 'claude' : answers.chatgpt ? 'chatgpt' : (turn.target ?? 'claude'));
+  // However the turn ended: a failed or cancelled one may have billed calls too.
   const usage = $derived(isTerminal(turn.status) ? turnUsage(turn) : null);
-  const usedTokens = $derived(usage ? usage.input_tokens + usage.output_tokens : 0);
+  // Every token its calls processed, the provider's cache included (ADR 0008).
+  const usedTokens = $derived(processedTokens(usage));
+  const tokensTitle = $derived(usage ? tokenBreakdown(usage) : '');
   const cost = $derived(usage ? turnCost(turn) : null);
   const costText = $derived(cost && cost.totalUsd ? approxEur(cost.totalUsd, app.eurPerUsd) : null);
   const showTotals = $derived(
@@ -125,7 +128,7 @@
   {/if}
 
   {#if turn.status === 'failed' && turn.error?.kind === INCOMPLETE_KIND}
-    <!-- Stored turn that never finished: the server does not say whether it was stopped or failed. -->
+    <!-- Stored turn that never ended: its outcome is still null (or, stored before outcomes, it lacks its answers). -->
     <div class="banner"><Icon name="info" size={16} /><span>{turn.error.message}</span></div>
   {:else if turn.status === 'failed'}
     <div class="banner bad" role="alert">
@@ -133,17 +136,15 @@
       <span><strong>El torn ha fallat.</strong> {turn.error?.message ?? ''}</span>
     </div>
   {:else if turn.status === 'cancelled'}
-    <div class="banner"><Icon name="x" size={16} /><span>Has aturat aquest torn.</span></div>
+    <!-- The owner's stop or a server shutdown: neither the event nor the outcome says which. -->
+    <div class="banner"><Icon name="x" size={16} /><span>Aquest torn s'ha aturat.</span></div>
   {/if}
 
   {#if showTotals}
     <footer class="totals">
       {#if usage && usedTokens > 0}
-        <span
-          title="{formatInt(usage.input_tokens)} d'entrada · {formatInt(usage.output_tokens)} de sortida{usage.cache_read_tokens
-            ? ` · ${formatInt(usage.cache_read_tokens)} en memòria cau`
-            : ''}">
-          Total <b>{formatInt(usedTokens)}</b> tokens
+        <span title={tokensTitle}>
+          Total <b>{formatInt(usedTokens)}</b> tokens<span class="sr-only"> ({tokensTitle})</span>
         </span>
         {#if cost && costText}
           <span class="cost" title={turnCostTitle(cost, app.eurPerUsd)}>

@@ -1,5 +1,5 @@
 // Shared fixtures for unit tests (never imported by application code).
-import type { Agent, Message, MessageMeta, TurnEvent, TurnOptions, Usage } from './protocol';
+import type { Agent, ErrorInfo, Message, MessageMeta, TurnEvent, TurnOptions, TurnOutcome, Usage } from './protocol';
 import { addUsage } from './turns.svelte';
 
 export const usage = (input: number, output: number, cacheRead = 0): Usage => ({
@@ -226,7 +226,7 @@ export function cancelledDebateEvents(requestId = 'req-x'): TurnEvent[] {
     { type: 'stream.started', stream_id: 'g1', agent: 'chatgpt', kind: 'revision', round: 1, model: 'm' },
     { type: 'stream.completed', stream_id: 'c1', message_id: 23, usage: usage(20, 5), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
     { type: 'stream.completed', stream_id: 'g1', message_id: 24, usage: usage(20, 5), latency_ms: 1, ttft_ms: 1, agreement: 60, unchanged: false },
-    { type: 'turn.cancelled' },
+    { type: 'turn.cancelled', usage: usage(60, 20) },
   ]);
 }
 
@@ -411,6 +411,261 @@ export function keptRevisionMessages(): Message[] {
     message({
       id: 85, turn_id: t, kind: 'synthesis', agent: 'claude', round: 1, content: 'Síntesi', final: true,
       meta: meta({ consensus: { reached: false, round: 1, scores: { chatgpt: 90 } }, savings: NO_SAVINGS }),
+    }),
+  ];
+}
+
+// ------------------------------------------ how a turn ended (ADR 0007: A9, A14, N10)
+
+/** The outcome the engine writes on the question of a turn when it ends. */
+export function outcome(partial: Partial<TurnOutcome> & Pick<TurnOutcome, 'status' | 'usage'>): TurnOutcome {
+  return { failures: [], savings: NO_SAVINGS, consensus: null, final_message_ids: [], cached: false, ...partial };
+}
+
+/** The same stored turn with `value` as the outcome of its question (null: it never ended). */
+export function withOutcome(messages: Message[], value: TurnOutcome | null): Message[] {
+  return messages.map((m) => (m.kind === 'question' ? { ...m, meta: { ...m.meta, outcome: value } } : m));
+}
+
+/** Messages without the outcome key, as turns stored before it existed. */
+export function withoutOutcome(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (m.kind !== 'question') return m;
+    const meta = { ...m.meta };
+    delete meta.outcome;
+    return { ...m, meta };
+  });
+}
+
+// A duel where ChatGPT stores its answer before Claude's call ends in a billed failure,
+// a refusal or an empty reply (the real engine's numbers with priced fake providers,
+// audit A9): the stored answer cannot carry that call's cost, only the outcome can.
+const LATE_ANSWER = priced(164, 123, 0.003116);
+const LATE_FAILURES: Record<'refusal' | 'empty', { error: ErrorInfo; usage: Usage }> = {
+  refusal: { error: { kind: 'invalid', message: 'Claude ha declinat.' }, usage: { ...usage(5000, 300, 1000), cost_usd: 0.0262 } },
+  empty: { error: { kind: 'invalid', message: 'El model ha retornat una resposta buida.' }, usage: priced(5000, 300, 0.026) },
+};
+export type LateFailure = keyof typeof LATE_FAILURES;
+
+export function lateFailureDuelEvents(failure: LateFailure = 'refusal', requestId = 'req-l'): TurnEvent[] {
+  const failed = LATE_FAILURES[failure];
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'duel', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'fake-claude' },
+    { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'fake-chatgpt' },
+    { type: 'stream.delta', stream_id: 'g', section: 'text', text: 'Resposta de ChatGPT' },
+    {
+      type: 'stream.completed', stream_id: 'g', message_id: 2, usage: LATE_ANSWER, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    { type: 'stream.failed', stream_id: 'c', error: failed.error, usage: failed.usage },
+    {
+      type: 'turn.completed', conversation_id: 1, turn_id: 1, final_message_ids: [2], usage: addUsage(LATE_ANSWER, failed.usage),
+      savings: NO_SAVINGS, consensus: null, cached: false,
+    },
+  ]);
+}
+
+export function lateFailureDuelMessages(failure: LateFailure = 'refusal'): Message[] {
+  const failed = LATE_FAILURES[failure];
+  return [
+    message({
+      id: 1, turn_id: 1, kind: 'question', content: 'Pregunta?', final: true,
+      meta: {
+        mode: 'duel', target: 'claude',
+        outcome: outcome({
+          status: 'completed', usage: addUsage(LATE_ANSWER, failed.usage), final_message_ids: [2],
+          failures: [{ agent: 'claude', ...failed.error, round: 0 }],
+        }),
+      },
+    }),
+    message({
+      id: 2, turn_id: 1, kind: 'answer', agent: 'chatgpt', content: 'Resposta de ChatGPT', final: true,
+      meta: { model: 'fake-chatgpt', usage: LATE_ANSWER, latency_ms: 5, ttft_ms: 1, cached: false, cost_basis: 'equivalent', savings: NO_SAVINGS },
+    }),
+  ];
+}
+
+// A duel that compacted the history, cancelled after ChatGPT stored its answer while
+// Claude was still writing (audit A14): stored, it looks like a duel whose other agent
+// failed unless the outcome says how it ended. Its cost is the summary's and the answer's.
+const KEPT_ANSWER = priced(167, 126, 0.00318);
+export const CANCELLED_TOTAL = addUsage(SUMMARY, KEPT_ANSWER);
+
+export function cancelledDuelEvents(requestId = 'req-k'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'phase', phase: 'compaction', round: 0 },
+    { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'duel', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'fake-claude' },
+    { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'fake-chatgpt' },
+    { type: 'stream.delta', stream_id: 'c', section: 'text', text: 'Comencem per ' },
+    { type: 'stream.delta', stream_id: 'g', section: 'text', text: 'Resposta de ChatGPT' },
+    {
+      type: 'stream.completed', stream_id: 'g', message_id: 2, usage: KEPT_ANSWER, latency_ms: 5, ttft_ms: 1,
+      agreement: null, unchanged: false, cost_basis: 'equivalent',
+    },
+    { type: 'turn.cancelled', usage: CANCELLED_TOTAL },
+  ]);
+}
+
+export function cancelledDuelMessages(): Message[] {
+  return [
+    message({
+      id: 1, turn_id: 1, kind: 'question', content: 'Pregunta cancel·lada?', final: true,
+      meta: {
+        mode: 'duel', target: 'claude', compaction_usage: SUMMARY,
+        outcome: outcome({ status: 'cancelled', usage: CANCELLED_TOTAL, final_message_ids: [2] }),
+      },
+    }),
+    message({
+      id: 2, turn_id: 1, kind: 'answer', agent: 'chatgpt', content: 'Resposta de ChatGPT', final: true,
+      meta: { model: 'fake-chatgpt', usage: KEPT_ANSWER, latency_ms: 5, ttft_ms: 1, cached: false, cost_basis: 'equivalent', savings: NO_SAVINGS },
+    }),
+  ];
+}
+
+// A solo turn whose only call is refused after it was billed: the turn fails, and what it
+// cost is that call's (audit N10).
+export const REFUSED: Usage = { ...usage(5000, 300, 1000), cost_usd: 0.0262 };
+
+export function failedSoloEvents(requestId = 'req-s'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'solo', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'fake-claude' },
+    { type: 'stream.failed', stream_id: 'c', error: { kind: 'invalid', message: 'Claude ha declinat.' }, usage: REFUSED },
+    { type: 'turn.failed', error: { kind: 'invalid', message: 'Claude no ha pogut respondre.' }, usage: REFUSED },
+  ]);
+}
+
+export function failedSoloMessages(): Message[] {
+  return [
+    message({
+      id: 1, turn_id: 1, kind: 'question', content: 'Pregunta?', final: true,
+      meta: {
+        mode: 'solo', target: 'claude',
+        outcome: outcome({
+          status: 'failed', usage: REFUSED, error: { kind: 'invalid', message: 'Claude no ha pogut respondre.' },
+          failures: [{ agent: 'claude', kind: 'invalid', message: 'Claude ha declinat.', round: 0 }],
+        }),
+      },
+    }),
+  ];
+}
+
+// A one-round debate where ChatGPT's revision times out (unbilled): the debate goes on and
+// Claude synthesizes. The failed call leaves no message; only the outcome says it failed.
+const REVISION_DEBATE: TurnOptions = { debate: { rounds: 1, consensus_threshold: 85, synthesizer: 'claude' }, use_cache: false };
+const REVISION_CONSENSUS = { reached: false, round: 1, scores: { claude: 70 } };
+
+export function failedRevisionEvents(requestId = 'req-v'): TurnEvent[] {
+  const done = (streamId: string, messageId: number, used: Usage, agreement: number | null = null): Draft => ({
+    type: 'stream.completed', stream_id: streamId, message_id: messageId, usage: used, latency_ms: 1, ttft_ms: 1,
+    agreement, unchanged: false,
+  });
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 6, turn_id: 90, mode: 'debate', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c0', agent: 'claude', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.started', stream_id: 'g0', agent: 'chatgpt', kind: 'answer', round: 0, model: 'm' },
+    { type: 'stream.delta', stream_id: 'c0', section: 'text', text: 'Resposta de Claude' },
+    { type: 'stream.delta', stream_id: 'g0', section: 'text', text: 'Resposta de ChatGPT' },
+    done('c0', 91, usage(10, 5)),
+    done('g0', 92, usage(10, 5)),
+    { type: 'phase', phase: 'revision', round: 1 },
+    { type: 'stream.started', stream_id: 'c1', agent: 'claude', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.started', stream_id: 'g1', agent: 'chatgpt', kind: 'revision', round: 1, model: 'm' },
+    { type: 'stream.delta', stream_id: 'c1', section: 'critique', text: '- Falta context' },
+    { type: 'stream.delta', stream_id: 'c1', section: 'answer', text: 'Resposta millorada' },
+    { type: 'stream.failed', stream_id: 'g1', error: { kind: 'timeout', message: 'Temps esgotat.' } },
+    done('c1', 93, usage(20, 5), 70),
+    { type: 'phase', phase: 'synthesis', round: 1 },
+    { type: 'stream.started', stream_id: 's', agent: 'claude', kind: 'synthesis', round: 1, model: 'm' },
+    { type: 'stream.delta', stream_id: 's', section: 'text', text: 'Síntesi' },
+    done('s', 94, usage(30, 10)),
+    {
+      type: 'turn.completed', conversation_id: 6, turn_id: 90, final_message_ids: [94], usage: usage(70, 25),
+      savings: NO_SAVINGS, consensus: REVISION_CONSENSUS, cached: false,
+    },
+  ]);
+}
+
+export function failedRevisionMessages(): Message[] {
+  const t = 90;
+  const meta = (used: Usage, extra: MessageMeta = {}): MessageMeta => ({ model: 'm', usage: used, latency_ms: 1, ttft_ms: 1, ...extra });
+  return [
+    message({
+      id: 90, turn_id: t, kind: 'question', content: 'Pregunta?', final: true,
+      meta: {
+        mode: 'debate', options: REVISION_DEBATE,
+        outcome: outcome({
+          status: 'completed', usage: usage(70, 25), consensus: REVISION_CONSENSUS, final_message_ids: [94],
+          failures: [{ agent: 'chatgpt', kind: 'timeout', message: 'Temps esgotat.', round: 1 }],
+        }),
+      },
+    }),
+    message({ id: 91, turn_id: t, kind: 'answer', agent: 'claude', content: 'Resposta de Claude', meta: meta(usage(10, 5)) }),
+    message({ id: 92, turn_id: t, kind: 'answer', agent: 'chatgpt', content: 'Resposta de ChatGPT', meta: meta(usage(10, 5)) }),
+    message({
+      id: 93, turn_id: t, kind: 'revision', agent: 'claude', round: 1, content: 'Resposta millorada',
+      meta: meta(usage(20, 5), { critique: '- Falta context', agreement: 70, unchanged: false }),
+    }),
+    message({
+      id: 94, turn_id: t, kind: 'synthesis', agent: 'claude', round: 1, content: 'Síntesi', final: true,
+      meta: meta(usage(30, 10), { consensus: REVISION_CONSENSUS, savings: NO_SAVINGS }),
+    }),
+  ];
+}
+
+/** The outcome of the quick debates above (`quickDebateMessages`), with the calls that failed. */
+export function quickDebateOutcome(failures: TurnOutcome['failures']): TurnOutcome {
+  return outcome({ status: 'completed', usage: usage(40, 20), consensus: NO_CONSENSUS, final_message_ids: [63], failures });
+}
+
+// A solo turn Claude's API served after a fallback (audit A8), with the numbers the real
+// engine produced (ClaudeApiProvider on a mock transport): Fable 5.1 declined and Opus 4.8
+// answered. The declined attempt was billed apart, at its own model's prices: it counts in
+// the turn's total, never in the answer's usage, and the stored answer keeps it in `declined`.
+const SERVED: Usage = {
+  input_tokens: 20_100, output_tokens: 1200, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 90, cost_usd: 0.1305,
+};
+const DECLINED: Usage = {
+  input_tokens: 20_000, output_tokens: 800, cache_read_tokens: 500, cache_write_tokens: 0, reasoning_tokens: 0, cost_usd: 0.240125,
+};
+/** 0.370625 USD, all of it real API spend. */
+export const FALLBACK_TOTAL = addUsage(SERVED, DECLINED);
+
+export function fallbackSoloEvents(requestId = 'req-a8'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 1, turn_id: 1, mode: 'solo', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-fable-5-1' },
+    { type: 'stream.delta', stream_id: 'c', section: 'text', text: 'Resposta de Claude' },
+    {
+      type: 'stream.completed', stream_id: 'c', message_id: 2, usage: SERVED, latency_ms: 196, ttft_ms: 194,
+      agreement: null, unchanged: false, cost_basis: 'api',
+    },
+    {
+      type: 'turn.completed', conversation_id: 1, turn_id: 1, final_message_ids: [2], usage: FALLBACK_TOTAL,
+      savings: NO_SAVINGS, consensus: null, cached: false,
+    },
+  ]);
+}
+
+export function fallbackSoloMessages(): Message[] {
+  return [
+    message({
+      id: 1, turn_id: 1, kind: 'question', content: 'Pregunta?', final: true,
+      meta: { mode: 'solo', target: 'claude', outcome: outcome({ status: 'completed', usage: FALLBACK_TOTAL, final_message_ids: [2] }) },
+    }),
+    message({
+      id: 2, turn_id: 1, kind: 'answer', agent: 'claude', content: 'Resposta de Claude', final: true,
+      meta: {
+        model: 'claude-opus-4-8', usage: SERVED, latency_ms: 196, ttft_ms: 194, cached: false, cost_basis: 'api',
+        declined: [{ model: 'claude-fable-5-1', usage: DECLINED }], savings: NO_SAVINGS, unstored_usage: DECLINED,
+      },
     }),
   ];
 }

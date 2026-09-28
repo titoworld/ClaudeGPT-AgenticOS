@@ -1,6 +1,7 @@
 // Transforms from the API's Stats / ProviderStatus into what the usage
 // dashboard renders (KPIs, chart data, subscription limits).
 
+import { processedTokens } from '../costs';
 import { AGENT_LABEL } from '../format';
 import { limitLevel } from '../limits';
 import { AGENTS, type Agent, type ProviderMode, type ProviderStatus, type SavingKind, type Stats, type TurnMode } from '../protocol';
@@ -44,11 +45,6 @@ export function plural(n: number, one: string, many: string, formatted: string =
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
-/** Tokens a call really spent: input + output (cache reads are reported apart). */
-export function consumed(u: { input_tokens?: number; output_tokens?: number } | null | undefined): number {
-  return positive(u?.input_tokens) + positive(u?.output_tokens);
-}
-
 // ------------------------------------------------------------------ daily series
 
 function daysOf(stats: Stats, today: string, dates: string[]): string[] {
@@ -64,7 +60,10 @@ function emptyDay(day: string, keys: readonly string[]): Datum {
   };
 }
 
-/** Consumed tokens per day and agent, with every day of the range present. */
+/**
+ * Processed tokens (input, cache reads and writes, output: ADR 0008) per day and agent,
+ * with every day of the range present.
+ */
 export function dailyTokens(stats: Stats, today: string = utcDay()): Datum[] {
   const rows = Array.isArray(stats.daily) ? stats.daily : [];
   const days = daysOf(
@@ -76,7 +75,7 @@ export function dailyTokens(stats: Stats, today: string = utcDay()): Datum[] {
   for (const r of rows) {
     const d = byDay.get(r.date);
     if (!d || !(AGENTS as readonly string[]).includes(r.agent)) continue;
-    d.values[r.agent] = (d.values[r.agent] ?? 0) + consumed(r);
+    d.values[r.agent] = (d.values[r.agent] ?? 0) + processedTokens(r);
   }
   return days.map((d) => byDay.get(d)!);
 }
@@ -151,7 +150,18 @@ export function isEmpty(data: Datum[]): boolean {
 // ------------------------------------------------------------------ KPIs
 
 export interface Kpis {
-  consumed: { total: number; byAgent: Record<Agent, number>; calls: number; errors: number; cacheRead: number };
+  /** Processed tokens (ADR 0008), per agent and per kind: input, cache reads and writes, output. */
+  processed: {
+    total: number;
+    byAgent: Record<Agent, number>;
+    calls: number;
+    errors: number;
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    output: number;
+  };
+  /** `ratio`: saved / (processed + saved), tokens of the same kind on both sides. */
   saved: { total: number; byKind: Record<SavingKind, number>; ratio: number | null };
   turns: { total: number; byMode: Record<TurnMode, number> };
   consensus: { debates: number; reached: number; rate: number | null; avgRounds: number | null };
@@ -162,13 +172,15 @@ const finiteOrNull = (v: unknown): number | null => (typeof v === 'number' && Nu
 
 export function kpis(stats: Stats): Kpis {
   const byAgentUsage = stats.totals?.by_agent;
-  const byAgent = Object.fromEntries(AGENTS.map((a) => [a, consumed(byAgentUsage?.[a])])) as Record<Agent, number>;
+  const byAgent = Object.fromEntries(AGENTS.map((a) => [a, processedTokens(byAgentUsage?.[a])])) as Record<Agent, number>;
   const total = AGENTS.reduce((acc, a) => acc + byAgent[a], 0);
-  const cacheRead = AGENTS.reduce((acc, a) => acc + positive(byAgentUsage?.[a]?.cache_read_tokens), 0);
+  type TokenKey = 'input_tokens' | 'cache_read_tokens' | 'cache_write_tokens' | 'output_tokens';
+  const part = (key: TokenKey) => AGENTS.reduce((acc, a) => acc + positive(byAgentUsage?.[a]?.[key]), 0);
 
   const byKind = Object.fromEntries(SAVING_KINDS.map((k) => [k, positive(stats.savings?.[k])])) as Record<SavingKind, number>;
   const kindsSum = SAVING_KINDS.reduce((acc, k) => acc + byKind[k], 0);
   const savedTotal = positive(stats.savings?.total) || kindsSum;
+  // Saved tokens count every kind of token too (ADR 0008): both sides are alike.
   const wouldHaveSpent = total + savedTotal;
 
   const byMode = Object.fromEntries(TURN_MODES.map((m) => [m, num(stats.turns?.[m])])) as Record<TurnMode, number>;
@@ -176,7 +188,16 @@ export function kpis(stats: Stats): Kpis {
   const reached = num(stats.consensus?.reached);
 
   return {
-    consumed: { total, byAgent, calls: num(stats.totals?.calls), errors: num(stats.totals?.errors), cacheRead },
+    processed: {
+      total,
+      byAgent,
+      calls: num(stats.totals?.calls),
+      errors: num(stats.totals?.errors),
+      input: part('input_tokens'),
+      cacheRead: part('cache_read_tokens'),
+      cacheWrite: part('cache_write_tokens'),
+      output: part('output_tokens'),
+    },
     saved: { total: savedTotal, byKind, ratio: wouldHaveSpent > 0 ? savedTotal / wouldHaveSpent : null },
     turns: { total: TURN_MODES.reduce((acc, m) => acc + byMode[m], 0), byMode },
     consensus: {

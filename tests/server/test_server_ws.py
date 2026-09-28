@@ -464,6 +464,7 @@ def test_a_running_turn_of_a_deleted_conversation_is_cancelled_and_forgotten(
             assert end[-1] == {
                 "type": "turn.cancelled",
                 "request_id": "r-run",
+                "usage": Usage().to_dict(),  # nothing was billed before the cancel
                 "seq": len(live) + len(end),
             }
 
@@ -483,7 +484,12 @@ def test_cancel(tmp_path: Path) -> None:
         ws.send_json({"type": "turn.cancel", "request_id": "r1"})
         events += receive_until(ws, is_type("turn.cancelled"))
         assert_contiguous(events)
-        assert events[-1] == {"type": "turn.cancelled", "request_id": "r1", "seq": len(events)}
+        assert events[-1] == {
+            "type": "turn.cancelled",
+            "request_id": "r1",
+            "usage": Usage().to_dict(),  # nothing was billed before the cancel
+            "seq": len(events),
+        }
         assert gate.cancelled == 1
 
         ws.send_json({"type": "turn.cancel", "request_id": "r1"})  # already over: no answer
@@ -708,6 +714,57 @@ def test_a_truncated_answer_and_a_refusal_through_the_socket(tmp_path: Path) -> 
         assert failed["error"]["kind"] == "invalid"
         assert "declinat" in failed["error"]["message"]
         assert not answers_meta(client, state, events[0]["conversation_id"])
+
+
+def test_a_reloaded_turn_has_the_outcome_the_socket_announced(tmp_path: Path) -> None:
+    """ADR 0007 end to end: the terminal event's usage is the stored outcome's, and a
+    reload (GET /api/conversations/{id}) returns it on the question."""
+    providers: dict[AgentName, Provider] = {
+        "claude": FakeProvider("claude", chunk_delay=0, refuse={"answer"}, refuse_after=2),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    with app_client(tmp_path, providers) as (client, _state, token):
+        prices = {"fake-claude": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5}}
+        current = client.get("/api/settings", headers=auth_headers(token)).json()
+        saved = client.put(
+            "/api/settings", headers=auth_headers(token), json={**current, "prices": prices}
+        )
+        assert saved.status_code == 200
+        with connect(client, token) as ws:
+            ws.receive_json()
+            ws.send_json(start("f1"))
+            failed_events = receive_until(ws, is_type("turn.failed", "f1"))
+            ws.send_json(start("d1", mode="duel", text="Una altra pregunta?"))
+            duel_events = receive_until(ws, is_type("turn.completed", "d1"))
+
+        for events in (failed_events, duel_events):
+            terminal = events[-1]
+            assert terminal["usage"]["cost_usd"]  # the refusal was billed, and it shows
+            conversation_id = events[0]["conversation_id"]
+            path = f"/api/conversations/{conversation_id}"
+            detail = client.get(path, headers=auth_headers(token)).json()
+            (question,) = [m for m in detail["messages"] if m["kind"] == "question"]
+            outcome = question["meta"]["outcome"]
+            assert outcome["usage"] == terminal["usage"]
+            assert outcome["failures"] == [
+                {
+                    "agent": "claude",
+                    "kind": "invalid",
+                    "message": "Claude (demostració) ha declinat respondre aquesta petició.",
+                    "round": 0,
+                }
+            ]
+            [stream_failed] = [e for e in events if e["type"] == "stream.failed"]
+            assert stream_failed["usage"]["cost_usd"]
+        assert failed_events[-1]["error"] == {
+            "kind": "invalid",
+            "message": "Claude no ha pogut respondre.",
+        }
+        failed_detail = client.get(
+            f"/api/conversations/{failed_events[0]['conversation_id']}",
+            headers=auth_headers(token),
+        ).json()
+        assert failed_detail["messages"][0]["meta"]["outcome"]["status"] == "failed"
 
 
 def test_a_complete_answer_has_no_truncated_field(tmp_path: Path) -> None:

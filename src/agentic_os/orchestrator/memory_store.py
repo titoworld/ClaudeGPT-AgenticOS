@@ -6,13 +6,17 @@ safe to share between concurrent turns of one event loop.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import cast
 
+from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.orchestrator.store import (
     CachedTurn,
     History,
+    JsonValue,
     NewMessage,
     SavingRecord,
     StoredMessage,
@@ -111,6 +115,16 @@ class InMemoryStore:
             raise KeyError(f"unknown conversation {conversation_id}")
         conversation.summary = summary
         conversation.summary_upto_id = upto_message_id
+
+    async def set_turn_outcome(self, question_message_id: int, outcome: TurnOutcome) -> None:
+        """``meta.outcome`` of the question, as JSON (like the SQLite store, it goes
+        through a JSON round trip); ignored if the id is not a question."""
+        for index, message in enumerate(self.messages):
+            if message.id == question_message_id and message.kind == "question":
+                value = cast(JsonValue, json.loads(json.dumps(outcome.to_wire(), allow_nan=False)))
+                meta = {**message.meta, "outcome": value}
+                self.messages[index] = replace(message, meta=meta)
+                return
 
     async def record_usage(self, record: UsageRecord) -> None:
         self.usage.append(record)

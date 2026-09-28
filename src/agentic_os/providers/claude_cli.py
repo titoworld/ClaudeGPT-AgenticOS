@@ -49,6 +49,7 @@ from typing import Any, Literal, NamedTuple
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.providers.base import (
+    DeclinedAttempt,
     GenerationRequest,
     GenerationResult,
     ModelInfo,
@@ -160,15 +161,22 @@ def redact(text: str) -> str:
     return _SECRET_RE.sub(lambda m: f"{m.group(1) or m.group(2)}***", text)
 
 
-def refusal_error(usage: Usage, model: str, category: str | None) -> RefusalError:
+def refusal_error(
+    usage: Usage,
+    model: str,
+    category: str | None,
+    declined: Sequence[DeclinedAttempt] = (),
+) -> RefusalError:
     """The error of a Claude reply that stopped with ``stop_reason: "refusal"`` (shared
-    with the api provider). ``usage`` is what the call billed."""
+    with the api provider). ``usage`` is what the refusing attempt billed and
+    ``declined`` the billed attempts other models declined before it (api fallbacks)."""
     reason = f" (categoria: {category})" if category else ""
     return RefusalError(
         f"Claude ha declinat respondre aquesta petició{reason}.",
         usage=usage,
         model=model,
         category=category,
+        declined=declined,
     )
 
 

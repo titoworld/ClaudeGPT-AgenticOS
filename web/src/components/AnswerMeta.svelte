@@ -26,7 +26,12 @@
     </span>
     {#if usage.cache_read_tokens > 0}
       <span class="item" title="Tokens d'entrada reaprofitats de la memòria cau del proveïdor">
-        {formatInt(usage.cache_read_tokens)} en memòria cau
+        {formatInt(usage.cache_read_tokens)} llegits de la memòria cau
+      </span>
+    {/if}
+    {#if usage.cache_write_tokens > 0}
+      <span class="item" title="Tokens d'entrada que el proveïdor ha desat a la seva memòria cau per reaprofitar-los">
+        {formatInt(usage.cache_write_tokens)} escrits a la memòria cau
       </span>
     {/if}
   {/if}

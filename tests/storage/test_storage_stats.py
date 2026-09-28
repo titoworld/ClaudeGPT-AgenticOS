@@ -219,6 +219,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 100,
             "output_tokens": 50,
             "cache_read_tokens": 10,
+            "cache_write_tokens": 5,
             "cost_usd": 0.01,
         },
         {
@@ -227,6 +228,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost_usd": 0.0,
         },
         {
@@ -235,6 +237,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost_usd": 0.0,
         },
         {
@@ -243,6 +246,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 200,
             "output_tokens": 100,
             "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost_usd": 0.0,
         },
         {
@@ -251,6 +255,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 300,
             "output_tokens": 150,
             "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost_usd": 0.02,
         },
         {
@@ -259,6 +264,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost_usd": 0.0,
         },
     ]
@@ -291,6 +297,30 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
             "chatgpt": {"api_usd": 0.0, "equivalent_usd": 0.0, "unpriced_calls": 1},
         },
     }
+
+
+async def test_daily_usage_has_every_kind_of_processed_token(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    # A call with context, as the Claude CLI/API reports it: the processed tokens are
+    # 3 + 100 + 10 000 + 20 000 (reasoning is part of the output).
+    case = Usage(3, 100, 10_000, 20_000, reasoning_tokens=50, cost_usd=0.13)
+    clock.now = at(27)
+    await usage(store, "claude", tokens=case, latency_ms=10)
+    await usage(store, "claude", tokens=case, latency_ms=10)
+    stats = await store.stats(1, NOW)
+    (claude,) = [d for d in stats["daily"] if d["agent"] == "claude"]
+    # Before: the day had no cache writes at all (the dashboard could not count them).
+    assert claude["cache_write_tokens"] == 40_000
+    processed = (
+        claude["input_tokens"]
+        + claude["output_tokens"]
+        + claude["cache_read_tokens"]
+        + claude["cache_write_tokens"]
+    )
+    assert processed == 2 * case.processed_tokens == 60_206
+    totals = stats["totals"]["by_agent"]["claude"]
+    assert totals["cache_write_tokens"] == claude["cache_write_tokens"]
 
 
 async def test_consensus_stored_by_the_engine_takes_precedence(store: SqliteStore) -> None:

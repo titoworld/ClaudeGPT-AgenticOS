@@ -12,9 +12,11 @@ from agentic_os.domain import AgentName, DebateOptions, TurnMode, TurnOptions, U
 from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.events import (
     ServerEvent,
+    StreamCompleted,
     StreamDelta,
     StreamFailed,
     TurnCompleted,
+    TurnFailed,
     TurnStarted,
 )
 from agentic_os.orchestrator.memory import EMPTY_SUMMARY_ERROR
@@ -23,6 +25,7 @@ from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import (
+    DeclinedAttempt,
     GenerationRequest,
     GenerationResult,
     ProviderError,
@@ -219,7 +222,7 @@ async def test_a_billed_empty_reply_counts_in_the_turn_usage(store: InMemoryStor
     done = completed(events)
     assert [e.error.kind for e in events if isinstance(e, StreamFailed)] == ["invalid"]
     empty = next(u for u in store.usage if not u.ok)
-    assert empty.usage.total_tokens > 0 and empty.usage.cost_usd
+    assert empty.usage.processed_tokens > 0 and empty.usage.cost_usd
     # TurnCompleted.usage is every billed call of the turn, as in the usage table.
     assert done.usage == records_usage(store, done)
     assert done.usage.cost_usd == pytest.approx(records_usage(store, done).cost_usd)
@@ -249,7 +252,7 @@ async def test_an_empty_summary_keeps_its_billed_usage(store: InMemoryStore) -> 
     claude, chatgpt = (u for u in store.usage if u.purpose == "summary")
     assert (claude.agent, claude.ok, claude.error) == ("claude", False, EMPTY_SUMMARY_ERROR)
     assert claude.model == "fake-claude-mini"
-    assert claude.usage.total_tokens > 0 and claude.usage.cost_usd
+    assert claude.usage.processed_tokens > 0 and claude.usage.cost_usd
     assert (chatgpt.agent, chatgpt.ok) == ("chatgpt", True)
     # Both summary calls are part of the turn's usage (live and reloaded).
     summaries = claude.usage + chatgpt.usage
@@ -279,7 +282,7 @@ async def test_a_summary_that_fails_everywhere_still_counts_what_it_billed(
         )
     )
     claude = next(u for u in store.usage if u.purpose == "summary" and u.agent == "claude")
-    assert claude.usage.total_tokens > 0
+    assert claude.usage.processed_tokens > 0
     assert done.savings.compaction == 0  # nothing was compacted
     assert reloaded_usage(store, done) == done.usage
     assert usage_of(turn_messages(store, done)[0].meta["compaction_usage"]) == claude.usage
@@ -657,7 +660,7 @@ async def test_a_reloaded_turn_adds_up_to_the_live_total(
     assert usage_of(question.meta["compaction_usage"]) == summary.usage
     assert question.meta["compaction_usage"] == summary.usage.to_dict()
     live, reloaded = done.usage, reloaded_usage(store, done)
-    assert reloaded.total_tokens == live.total_tokens
+    assert reloaded.processed_tokens == live.processed_tokens
     assert reloaded.cost_usd == pytest.approx(live.cost_usd)
 
 
@@ -683,3 +686,214 @@ async def test_a_cache_hit_records_the_value_of_the_replayed_turn(
     (record,) = [s for s in store.savings if s.turn_id == done.turn_id]
     assert record.kind == "cache" and record.cost_usd == pytest.approx(first.usage.cost_usd)
     assert done.savings.cost_usd == pytest.approx(first.usage.cost_usd)
+
+
+# -- processed tokens (audit point 7, ADR 0008) ---------------------------------------------------
+
+CASE = Usage(input_tokens=3, output_tokens=100, cache_read_tokens=10_000, cache_write_tokens=20_000)
+"""A call as the Claude CLI/API reports it in a conversation with context."""
+
+
+class CacheHeavy(FakeProvider):
+    """Canned text, but every call reports :data:`CASE`."""
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        async for event in super().stream(request):
+            if isinstance(event, GenerationResult):
+                event = replace(event, usage=CASE)
+            yield event
+
+
+def test_processed_tokens_count_every_billed_token_once() -> None:
+    # Reasoning is part of the output for Anthropic, OpenAI and Codex: never added.
+    assert Usage(3, 100, 10_000, 20_000, reasoning_tokens=50).processed_tokens == 30_103
+    assert Usage().processed_tokens == 0
+
+
+async def test_a_replay_saves_the_processed_tokens_of_the_original_turn(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        agent: CacheHeavy(agent, chunk_delay=0) for agent in ("claude", "chatgpt")
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    first = completed(
+        await collect(engine.run(TurnRequest("a", "Hola", "solo"), price_overrides=PRICES))
+    )
+    done = completed(
+        await collect(engine.run(TurnRequest("b", "Hola", "solo"), price_overrides=PRICES))
+    )
+    assert done.cached
+    # Before: 103 tokens (input + output) valued at what the 30 103 tokens cost.
+    assert done.savings.cache == first.usage.processed_tokens == 30_103
+    assert done.savings.cost_usd == pytest.approx(first.usage.cost_usd)
+    (record,) = [s for s in store.savings if s.turn_id == done.turn_id]
+    assert (record.kind, record.tokens_saved) == ("cache", 30_103)
+
+
+async def test_early_stop_counts_the_processed_tokens_of_the_skipped_rounds(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        agent: CacheHeavy(agent, chunk_delay=0, agreements=[88]) for agent in ("claude", "chatgpt")
+    }
+    options = TurnOptions(debate=DebateOptions(rounds=4, consensus_threshold=85))
+    engine = Engine(providers, store, retry_delay=0)
+    done = completed(
+        await collect(
+            engine.run(TurnRequest("r", "Q?", "debate", options=options), price_overrides=PRICES)
+        )
+    )
+    assert done.consensus is not None and done.consensus.round == 1
+    # 3 skipped rounds of 2 revisions (before: 618 tokens instead of 180 618).
+    assert done.savings.early_stop == 3 * 2 * 30_103
+    saved = {s.kind: s for s in store.savings if s.turn_id == done.turn_id}
+    assert saved["early_stop"].tokens_saved == 3 * 2 * 30_103
+
+
+# -- declined attempts of a server-side fallback (audit point 8) ---------------------------------
+
+BIG = ModelPrice(input=10.0, output=50.0, cache_read=0.25, cache_write=12.5)
+"""The declining model's rates (Fable 5.1's), twice those of the model that serves."""
+FALLBACK_PRICES = {**PRICES, "fake-claude-big": BIG}
+
+
+class FallsBack(FakeProvider):
+    """Every call is first declined by ``fake-claude-big`` (billed ``declined``) and then
+    served by the requested model, as a server-side fallback of the Claude API does."""
+
+    def __init__(self, agent: AgentName, declined: Usage = DECLINED) -> None:
+        super().__init__(agent, chunk_delay=0)
+        self._declined = declined
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        async for event in super().stream(request):
+            if isinstance(event, GenerationResult):
+                attempt = DeclinedAttempt("fake-claude-big", self._declined)
+                event = replace(event, declined=(attempt,))
+            yield event
+
+
+class RefusesAfterAFallback(FakeProvider):
+    """Declined by ``fake-claude-big`` (billed), then refused by the fallback model before
+    any output (not billed)."""
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(request)
+        yield TextDelta("Comença")
+        raise RefusalError(
+            "Claude ha declinat.",
+            usage=Usage(),
+            model="fake-claude",
+            declined=(DeclinedAttempt("fake-claude-big", DECLINED),),
+        )
+
+
+def big(usage: Usage) -> Usage:
+    return replace(usage, cost_usd=estimate_cost_usd("fake-claude-big", usage, FALLBACK_PRICES))
+
+
+async def test_a_declined_attempt_is_a_billed_call_of_its_own_model(store: InMemoryStore) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": FallsBack("claude"),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    request = TurnRequest("r", "Q?", "solo", options=NO_CACHE)
+    events = await collect(engine.run(request, price_overrides=FALLBACK_PRICES))
+    done = completed(events)
+    declined, served = [u for u in store.usage if u.turn_id == done.turn_id]
+    # Before: one row at the serving model's rates, with the declined tokens added to it.
+    assert (declined.model, declined.ok, declined.usage) == (
+        "fake-claude-big",
+        False,
+        big(DECLINED),
+    )
+    assert declined.error is not None and "fake-claude-big" in declined.error
+    assert (served.model, served.ok) == ("fake-claude", True)
+    (answer,) = [m for m in turn_messages(store, done) if m.kind == "answer"]
+    # Tokens of different models are never summed: the answer keeps its own usage...
+    assert usage_of(answer.meta["usage"]) == served.usage
+    (stream_completed,) = [e for e in events if isinstance(e, StreamCompleted)]
+    assert stream_completed.usage == served.usage
+    # ...and says which attempts were declined before it, each with its own cost.
+    assert answer.meta["declined"] == [
+        {"model": "fake-claude-big", "usage": big(DECLINED).to_dict()}
+    ]
+    assert done.usage == declined.usage + served.usage == records_usage(store, done)
+    outcome = turn_messages(store, done)[0].meta["outcome"]
+    assert isinstance(outcome, dict) and outcome["usage"] == done.usage.to_dict()
+
+
+async def test_a_replay_is_worth_the_declined_attempts_at_their_own_prices(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": FallsBack("claude"),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    first = completed(
+        await collect(engine.run(TurnRequest("a", "Hola", "solo"), price_overrides=FALLBACK_PRICES))
+    )
+    done = completed(
+        await collect(engine.run(TurnRequest("b", "Hola", "solo"), price_overrides=FALLBACK_PRICES))
+    )
+    assert done.cached and done.usage == Usage()
+    # The whole original turn: the answer and the attempt declined before it.
+    assert done.savings.cache == first.usage.processed_tokens
+    assert done.savings.cost_usd == pytest.approx(first.usage.cost_usd)
+    (replayed,) = [m for m in turn_messages(store, done) if m.kind == "answer"]
+    assert "declined" not in replayed.meta and replayed.meta["usage"] == Usage().to_dict()
+
+
+async def test_a_refusal_after_a_fallback_is_billed_at_the_declining_model_rates(
+    store: InMemoryStore,
+) -> None:
+    providers: dict[AgentName, FakeProvider] = {
+        "claude": RefusesAfterAFallback("claude", chunk_delay=0),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    engine = Engine(providers, store, retry_delay=0)
+    request = TurnRequest("r", "Q?", "solo", options=NO_CACHE)
+    events = await collect(engine.run(request, price_overrides=FALLBACK_PRICES))
+    failed = events[-1]
+    assert isinstance(failed, TurnFailed)
+    rows = [(u.model, u.ok, u.usage) for u in store.usage]
+    # Before: one row of the fallback model, with the declined tokens at its rates.
+    assert rows == [("fake-claude-big", False, big(DECLINED)), ("fake-claude", False, Usage())]
+    assert failed.usage == big(DECLINED)
+    # The refused call itself billed nothing: its card has no cost.
+    (stream_failed,) = [e for e in events if isinstance(e, StreamFailed)]
+    assert stream_failed.usage is None
+
+
+async def test_a_declined_summary_attempt_counts_in_the_compaction_usage(
+    store: InMemoryStore,
+) -> None:
+    fakes: dict[AgentName, FakeProvider] = {
+        "claude": FakeProvider("claude", chunk_delay=0),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0),
+    }
+    config = EngineConfig(keep_recent_messages=2)
+    conversation_id = await seed_conversation(Engine(fakes, store, config, retry_delay=0))
+    fakes["claude"] = FallsBack("claude")
+    engine = Engine(fakes, store, config, retry_delay=0)
+    request = TurnRequest("x", "Q?", "solo", conversation_id=conversation_id, options=NO_CACHE)
+    done = completed(
+        await collect(
+            engine.run(request, compaction_threshold_tokens=100, price_overrides=FALLBACK_PRICES)
+        )
+    )
+    summaries = [u for u in store.usage if u.purpose == "summary"]
+    assert [(u.model, u.ok) for u in summaries] == [
+        ("fake-claude-big", False),
+        ("fake-claude-mini", True),
+    ]
+    question = turn_messages(store, done)[0]
+    spent = summaries[0].usage + summaries[1].usage
+    assert summaries[0].usage == big(DECLINED)
+    assert usage_of(question.meta["compaction_usage"]) == spent
+    total = spent + records_usage(store, done)
+    assert done.usage.processed_tokens == total.processed_tokens
+    assert done.usage.cost_usd == pytest.approx(total.cost_usd)

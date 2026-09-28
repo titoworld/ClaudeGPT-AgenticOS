@@ -14,7 +14,7 @@ from agentic_os.pricing import ModelPrice, estimate_cost_usd
 
 def is_billed(usage: Usage) -> bool:
     """Whether a call reports any billed token (input, output, cache reads or writes)."""
-    return usage.total_tokens + usage.cache_read_tokens + usage.cache_write_tokens > 0
+    return usage.processed_tokens > 0
 
 
 def failed_call_usage(
@@ -38,6 +38,28 @@ def failed_call_usage(
     return model, replace(usage, cost_usd=estimate_cost_usd(model, usage, price_overrides))
 
 
+def declined_attempts(
+    source: object, price_overrides: Mapping[str, ModelPrice] | None = None
+) -> list[tuple[str, Usage]]:
+    """Model and priced usage of each billed attempt that another model declined before
+    ``source`` (a ``GenerationResult`` or a provider error) was served or refused: a
+    server-side fallback. Each is priced at its own model's rates, never at the model
+    that answered. ``declined`` is read defensively, like :func:`failed_call_usage`."""
+    attempts = getattr(source, "declined", ())
+    if not isinstance(attempts, tuple | list):
+        return []
+    priced: list[tuple[str, Usage]] = []
+    for attempt in attempts:
+        model = getattr(attempt, "model", None)
+        usage = getattr(attempt, "usage", None)
+        if not isinstance(model, str) or not isinstance(usage, Usage) or not is_billed(usage):
+            continue
+        priced.append(
+            (model, replace(usage, cost_usd=estimate_cost_usd(model, usage, price_overrides)))
+        )
+    return priced
+
+
 class TurnAccounting:
     """Accumulates the usage of a turn and the tokens its savings avoided.
 
@@ -51,12 +73,12 @@ class TurnAccounting:
     def __init__(self) -> None:
         self.usage = Usage()
         """Every billed model call of the turn: the messages' calls, the compaction
-        summary and calls that stored no message (failed, refused or empty)."""
-        self.turn_usage = Usage()
-        """Only the calls that produce the turn's messages (what a cache hit replays)."""
+        summary and calls that stored no message (failed, refused or empty, and attempts
+        another model declined)."""
         self.unstored = Usage()
         """Billed calls of the turn that stored no message: failed, refused or empty
-        replies (not the compaction summary, which travels with the question)."""
+        replies and declined attempts (not the compaction summary, which travels with
+        the question)."""
         self.cache = 0
         self.unchanged = 0
         self.early_stop = 0
@@ -96,8 +118,9 @@ class TurnAccounting:
         self._see(usage)
 
     def add_unstored(self, usage: Usage) -> None:
-        """A billed call that stored no message (failed, refused or empty): it counts in
-        the turn's usage and in :attr:`unstored`, never in the savings."""
+        """A billed call that stored no message (failed, refused, empty or declined by
+        its model): it counts in the turn's usage and in :attr:`unstored`, never in the
+        savings."""
         self.usage += usage
         self.unstored += usage
         self._see(usage)
@@ -105,10 +128,9 @@ class TurnAccounting:
     def add_call(self, usage: Usage, purpose: Purpose) -> None:
         """A successful model call that produced a message of the turn."""
         self.usage += usage
-        self.turn_usage += usage
         self._see(usage)
         if purpose == "revision":
-            self._revision_tokens += usage.total_tokens
+            self._revision_tokens += usage.processed_tokens
             self._revision_calls += 1
             if usage.cost_usd is not None:
                 self._revision_cost += usage.cost_usd
@@ -136,7 +158,8 @@ class TurnAccounting:
 
     def add_early_stop(self, rounds_skipped: int) -> None:
         """Rounds skipped by consensus, counted as the average revision pair of this turn
-        and valued at the average cost of its priced revision calls."""
+        (in processed tokens) and valued at the average cost of its priced revision
+        calls."""
         if rounds_skipped <= 0 or self._revision_calls == 0:
             return
         pair_tokens = 2 * self._revision_tokens / self._revision_calls

@@ -6,15 +6,18 @@ import {
   formatMoney,
   fxText,
   monthName,
+  processedTokens,
   savingsEur,
   spendLine,
   streamCost,
+  tokenBreakdown,
   turnCost,
   turnCostTitle,
+  type TurnCost,
 } from './costs';
-import type { AgentSpend, FxRate } from './protocol';
+import type { Agent, AgentSpend, FxRate, TurnMode } from './protocol';
 import { usage } from './test-fixtures';
-import { createLiveTurn, type StreamView, type TurnView } from './turns.svelte';
+import { createLiveTurn, type CostBasis, type StreamView, type TurnView } from './turns.svelte';
 
 // Intl uses a no-break space before "€" and "%" in Catalan.
 const plain = (s: string | null | undefined) => s?.replace(/ | /g, ' ');
@@ -134,12 +137,124 @@ describe('turn cost and savings', () => {
     expect(turnCost(turnWith([stream({ usage: priced(null) })])).totalUsd).toBeNull();
   });
 
+  it('keeps every part of the split when it knows the whole total', () => {
+    const cost = turnCost(turnWith([stream({ usage: priced(0.01), costBasis: 'api' })]));
+    expect(cost).toEqual({ totalUsd: 0.01, apiUsd: 0.01, equivalentUsd: 0, otherUsd: 0 });
+  });
+
   it('converts the value of the saved tokens', () => {
     const base = { cache: 0, compaction: 0, early_stop: 0, unchanged: 10, total: 10 };
     expect(savingsEur({ ...base, cost_usd: 0.1 }, 0.86)).toBeCloseTo(0.086);
     expect(savingsEur({ ...base, cost_usd: null }, 0.86)).toBeNull();
     expect(savingsEur({ ...base, cost_usd: 0 }, 0.86)).toBeNull();
     expect(savingsEur(null, 0.86)).toBeNull();
+  });
+});
+
+// The turn total also has calls no answer shows: a history summary, failed calls and the
+// attempts other models declined before a fallback (A8). The split says what they are when
+// the turn tells it, and never passes them off as one kind of cost when it does not.
+describe('turn cost split: the calls no answer shows (A8)', () => {
+  function turnOf(mode: TurnMode, streams: StreamView[], totalUsd: number, compacted = false): TurnView {
+    const t = createLiveTurn({ requestId: 'r', question: 'q', mode });
+    t.streams = streams;
+    t.usage = priced(totalUsd);
+    t.compacted = compacted;
+    return t;
+  }
+  const answer = (agent: Agent, usd: number, costBasis: CostBasis | null): StreamView =>
+    stream({ id: `${agent}-${usd}`, agent, usage: priced(usd), costBasis });
+  const failed = (agent: Agent, usd: number): StreamView =>
+    stream({ id: `${agent}-failed`, agent, status: 'failed', messageId: null, usage: priced(usd) });
+  /** The parts always add up to the total. */
+  const parts = (c: TurnCost) => c.apiUsd + c.equivalentUsd + c.otherUsd;
+
+  it("a solo turn's other calls are its agent's: the declined attempt is real API spend", () => {
+    // The audit's Fable 5.1 → Opus 4.8 turn: the answer's 0.1305 $ and the 0.240125 $ declined.
+    const cost = turnCost(turnOf('solo', [answer('claude', 0.1305, 'api')], 0.370625));
+    expect(cost.totalUsd).toBe(0.370625);
+    expect(cost.apiUsd).toBeCloseTo(0.370625, 12);
+    expect([cost.equivalentUsd, cost.otherUsd]).toEqual([0, 0]);
+    expect(plain(turnCostTitle(cost, 1))).toBe("Cost del torn a preus d'API · cost real d'API: 0,371 €");
+  });
+
+  it('a duel or a debate whose answers are all one kind of cost has calls of that kind only', () => {
+    // Both agents by subscription: the summary is subscription value too, whoever wrote it.
+    const compacted = turnCost(
+      turnOf('duel', [answer('claude', 0.003063, 'equivalent'), answer('chatgpt', 0.003198, 'equivalent')], 0.009375, true),
+    );
+    expect(compacted.equivalentUsd).toBeCloseTo(0.009375, 12);
+    expect([compacted.apiUsd, compacted.otherUsd]).toEqual([0, 0]);
+    // Both by API: a failed call, which says no kind, was real API spend.
+    const debate = turnCost(
+      turnOf('debate', [answer('claude', 0.01, 'api'), answer('chatgpt', 0.02, 'api'), failed('claude', 0.005)], 0.035),
+    );
+    expect(debate.apiUsd).toBeCloseTo(0.035, 12);
+    expect([debate.equivalentUsd, debate.otherUsd]).toEqual([0, 0]);
+  });
+
+  it("does not guess the kind of calls that may be either agent's", () => {
+    // One agent by API and the other by subscription.
+    const mixed = turnCost(turnOf('duel', [answer('claude', 0.01, 'api'), answer('chatgpt', 0.03, 'equivalent')], 0.06));
+    expect([mixed.apiUsd, mixed.equivalentUsd]).toEqual([0.01, 0.03]);
+    expect(mixed.otherUsd).toBeCloseTo(0.02, 12);
+    expect(plain(turnCostTitle(mixed, 1))).toBe(
+      "Cost del torn a preus d'API · cost real d'API: 0,01 € · valor inclòs a la subscripció: 0,03 € · altres crides: 0,02 €",
+    );
+    // A solo turn that compacted: Claude writes the summary first, even for ChatGPT's turn.
+    const solo = turnCost(turnOf('solo', [answer('chatgpt', 0.003, 'equivalent')], 0.005, true));
+    expect(solo.equivalentUsd).toBe(0.003);
+    expect(solo.otherUsd).toBeCloseTo(0.002, 12);
+    // An agent with no answer: its call's kind is unknown (the audit's late refusal, A9).
+    const late = turnCost(turnOf('duel', [answer('chatgpt', 0.003116, 'equivalent'), failed('claude', 0.0262)], 0.029316));
+    expect(late.equivalentUsd).toBe(0.003116);
+    expect(late.otherUsd).toBeCloseTo(0.0262, 12);
+    for (const c of [mixed, solo, late]) expect(parts(c)).toBeCloseTo(c.totalUsd!, 12);
+  });
+
+  it('takes rounding for what it is, not for a call', () => {
+    const cost = turnCost(turnOf('duel', [answer('claude', 0.1, 'api'), answer('chatgpt', 0.2, 'equivalent')], 0.1 + 0.2));
+    expect(cost.otherUsd).toBe(0);
+    expect(turnCostTitle(cost, 1)).not.toContain('altres crides');
+  });
+
+  it('shows no split when it knows none of it', () => {
+    const cost = turnCost(turnOf('solo', [failed('claude', 0.0262)], 0.0262));
+    expect(cost).toMatchObject({ apiUsd: 0, equivalentUsd: 0 });
+    expect(cost.otherUsd).toBeCloseTo(0.0262, 12);
+    expect(turnCostTitle(cost, 1)).toBe("Cost del torn a preus d'API");
+  });
+});
+
+describe('processed tokens (A7, ADR 0008)', () => {
+  const cached = {
+    input_tokens: 3,
+    output_tokens: 100,
+    cache_read_tokens: 10_000,
+    cache_write_tokens: 20_000,
+    reasoning_tokens: 50,
+    cost_usd: null,
+  };
+
+  it('counts input, cache reads, cache writes and output; the reasoning is part of the output', () => {
+    expect(processedTokens(cached)).toBe(30_103);
+    expect(processedTokens(usage(100, 50, 25))).toBe(175);
+  });
+
+  it('counts missing, negative and non-numeric fields as 0', () => {
+    expect(processedTokens(null)).toBe(0);
+    expect(processedTokens(undefined)).toBe(0);
+    expect(processedTokens({ input_tokens: 5 })).toBe(5);
+    expect(
+      processedTokens({ input_tokens: -5, output_tokens: Number.NaN, cache_read_tokens: 'x' as never, cache_write_tokens: 7 }),
+    ).toBe(7);
+  });
+
+  it('describes each kind of token, in Catalan', () => {
+    expect(plain(tokenBreakdown(cached))).toBe(
+      "3 d'entrada · 10.000 llegits de la memòria cau · 20.000 escrits a la memòria cau · 100 de sortida (50 de raonament)",
+    );
+    expect(tokenBreakdown(usage(1200, 80))).toBe("1.200 d'entrada · 80 de sortida");
   });
 });
 

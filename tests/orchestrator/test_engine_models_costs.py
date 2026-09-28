@@ -169,7 +169,7 @@ async def test_compaction_uses_the_fast_model_of_the_turn(store: InMemoryStore) 
     assert summary.purpose == "summary" and summary.fast and summary.model == "fake-claude-nano"
     record = next(u for u in store.usage if u.purpose == "summary")
     assert record.model == "fake-claude-nano"
-    assert record.usage.cost_usd == pytest.approx(record.usage.total_tokens * 10 / 1e6)
+    assert record.usage.cost_usd == pytest.approx(record.usage.processed_tokens * 10 / 1e6)
     # The summary is part of the turn's usage; the answer (no price) adds nothing.
     assert completed(events).usage.cost_usd == record.usage.cost_usd
 
@@ -322,7 +322,7 @@ async def test_cache_hit_costs_nothing_and_saves_the_original_cost(
     done = completed(events)
     assert done.cached and done.usage == Usage()
     assert all(e.usage == Usage() for e in of_type(events, StreamCompleted))
-    assert done.savings.cache == first.usage.total_tokens
+    assert done.savings.cache == first.usage.processed_tokens
     assert done.savings.cost_usd == pytest.approx(first.usage.cost_usd)
     replayed = finals(store, done)
     assert len(replayed) == 2

@@ -149,14 +149,21 @@ class StreamFailed:
     request_id: str
     stream_id: str
     error: ErrorInfo
+    usage: Usage | None = None
+    """What the failed call billed (a refusal, an empty reply, an output budget spent
+    before any text...), priced; None when nothing is known to be billed. On the wire
+    only when set."""
 
     def to_wire(self) -> Wire:
-        return {
+        wire: Wire = {
             "type": "stream.failed",
             "request_id": self.request_id,
             "stream_id": self.stream_id,
             "error": self.error.to_wire(),
         }
+        if self.usage is not None:
+            wire["usage"] = self.usage.to_dict()
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,19 +233,89 @@ class TurnCompleted:
 class TurnFailed:
     request_id: str
     error: ErrorInfo
+    usage: Usage = field(default_factory=Usage)
+    """The turn's total until it failed, as its :class:`TurnOutcome` (zero when it failed
+    before any call)."""
 
     def to_wire(self) -> Wire:
-        return {"type": "turn.failed", "request_id": self.request_id, "error": self.error.to_wire()}
+        return {
+            "type": "turn.failed",
+            "request_id": self.request_id,
+            "error": self.error.to_wire(),
+            "usage": self.usage.to_dict(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class TurnCancelled:
-    """Emitted by the web layer when the owner cancels a running turn."""
+    """Emitted by the web layer when the owner cancels a running turn (or the server
+    stops), with what the turn had spent (the engine's :class:`TurnOutcome`)."""
 
     request_id: str
+    usage: Usage = field(default_factory=Usage)
 
     def to_wire(self) -> Wire:
-        return {"type": "turn.cancelled", "request_id": self.request_id}
+        return {
+            "type": "turn.cancelled",
+            "request_id": self.request_id,
+            "usage": self.usage.to_dict(),
+        }
+
+
+TurnStatus = Literal["completed", "failed", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnFailure:
+    """A model call of the turn that failed (a ``stream.failed``)."""
+
+    agent: AgentName
+    kind: str
+    message: str
+    round: int
+
+    def to_wire(self) -> Wire:
+        return {
+            "agent": self.agent,
+            "kind": self.kind,
+            "message": self.message,
+            "round": self.round,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TurnOutcome:
+    """How a turn ended (docs/adr/0007-resultat-del-torn.md): what its terminal event
+    said, written once on its question (``meta.outcome``) so that a reloaded turn shows
+    what the live one did."""
+
+    status: TurnStatus
+    usage: Usage
+    """The turn's total: every billed call (the compaction summaries, failed calls,
+    declined attempts and calls that stored no message included)."""
+    savings: Savings
+    """What the turn saved (a failed or cancelled turn records no savings: zero)."""
+    error: ErrorInfo | None = None
+    """Why the turn failed (only when ``status`` is "failed")."""
+    failures: Sequence[TurnFailure] = ()
+    """The stream failures of the turn, in the order they happened."""
+    consensus: Consensus | None = None
+    final_message_ids: Sequence[int] = ()
+    cached: bool = False
+
+    def to_wire(self) -> Wire:
+        wire: Wire = {"status": self.status}
+        if self.status == "failed" and self.error is not None:
+            wire["error"] = self.error.to_wire()
+        wire.update(
+            failures=[failure.to_wire() for failure in self.failures],
+            usage=self.usage.to_dict(),
+            savings=self.savings.to_wire(),
+            consensus=self.consensus.to_wire() if self.consensus else None,
+            final_message_ids=list(self.final_message_ids),
+            cached=self.cached,
+        )
+        return wire
 
 
 ServerEvent = (

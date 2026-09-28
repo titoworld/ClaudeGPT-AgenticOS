@@ -93,8 +93,9 @@ def test_early_stop_is_valued_at_the_average_revision_cost() -> None:
     accounting.add_call(Usage(input_tokens=50, output_tokens=50), "revision")  # no price
     accounting.add_early_stop(2)
     savings = accounting.savings()
-    # Tokens: 2 rounds x a pair of the average revision (input + output).
-    assert savings.early_stop == round(2 * 2 * (305 + 105 + 100) / 3)
+    # Tokens: 2 rounds x a pair of the average revision, in processed tokens (input,
+    # cache reads and writes, output: before, only input + output, 680 tokens).
+    assert savings.early_stop == round(2 * 2 * (20_305 + 10_105 + 100) / 3)
     revision_cost = (first.cost_usd or 0.0) + (second.cost_usd or 0.0)
     assert savings.cost_usd == pytest.approx(2 * 2 * revision_cost / 2)
     (record,) = accounting.saving_records(1, 2)
@@ -149,8 +150,7 @@ def test_calls_without_a_message_count_in_the_usage_only() -> None:
     accounting.add_spent(summary)
     accounting.add_unstored(empty)
     accounting.add_unchanged("x" * 400, OPUS_55)
-    assert accounting.usage.total_tokens == 9750
-    assert accounting.turn_usage.total_tokens == 200
+    assert accounting.usage.processed_tokens == 9750
     # Only the call stored on no message is unstored (the summary is on the question).
     assert accounting.unstored == empty
     assert accounting.savings().cost_usd == pytest.approx(100 * OPUS_55.output / 1e6)

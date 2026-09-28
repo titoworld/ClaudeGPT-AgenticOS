@@ -30,8 +30,8 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | --- | --- | --- |
 | `domain.py` | tipus compartits | `AgentName`, `TurnMode`, `Usage`, opcions de debat |
 | `providers/base.py` | `Provider` | Converteix una `GenerationRequest` en un flux de `TextDelta` + un `GenerationResult` |
-| `orchestrator/store.py` | `Store` | Persistència que necessita el motor (implementada per `storage`) |
-| `orchestrator/events.py` | esdeveniments | Missatges servidor → client d'un torn ([PROTOCOL.md](PROTOCOL.md)) |
+| `orchestrator/store.py` | `Store` | Persistència que necessita el motor (implementada per `storage`), també el resultat de cada torn |
+| `orchestrator/events.py` | esdeveniments, `TurnOutcome` | Missatges servidor → client d'un torn ([PROTOCOL.md](PROTOCOL.md)) i com va acabar |
 | `orchestrator/types.py` | `TurnRequest`, `EngineConfig` | Entrada del motor |
 | `config.py` | `Settings` | Configuració del procés (variables `AOS_*`) |
 | `pricing.py` | `ModelPrice`, `estimate_cost_usd` | Preus per defecte i propis; cost de cada crida |
@@ -49,15 +49,17 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 
 ## Estalvi de tokens
 
+Tots els recomptes de tokens fan servir els **tokens processats** d'una crida: entrada, lectures i escriptures de memòria cau i sortida (el raonament ja és part de la sortida). Així, els tokens estalviats i el seu valor en diners quadren, i la ràtio del tauler té la mateixa definició al numerador i al denominador ([ADR 0008](adr/0008-recompte-de-tokens.md)). Les files d'estalvi desades abans d'aquest canvi conserven la definició antiga: entrada sense memòria cau més sortida, a la memòria cau de torns i a la parada per consens.
+
 | Tècnica | Com funciona | Com es mesura |
 | --- | --- | --- |
 | Prompt de sistema propi | Les CLI s'executen amb un prompt de sistema curt en lloc del d'agent de programació: la de Claude sense cap eina i la de Codex sense les que es poden desactivar ([Seguretat](#seguretat-un-sol-usuari)) | – |
 | Context mínim als debats | Les revisions només veuen la pregunta i les dues últimes respostes, no tota la transcripció | – |
 | Historial canònic | A l'historial de la conversa només hi van la pregunta i la resposta final (la síntesi), no les rondes intermèdies | – |
 | Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | tokens de l'historial original − tokens del context compactat |
-| Parada per consens | S'ometen les rondes que queden | tokens mitjans d'una ronda × rondes omeses |
+| Parada per consens | S'ometen les rondes que queden | tokens processats mitjans d'una ronda × rondes omeses |
 | `UNCHANGED` | Un agent d'acord no reescriu la resposta (com a molt hi afegeix una nota curta) | longitud de la resposta no reescrita |
-| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau | tokens del torn original |
+| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau | tokens processats del torn original, amb els intents declinats abans d'un fallback; el valor, cada crida a les tarifes actuals del seu model |
 | Memòria cau del proveïdor | Prefixos estables (prompt de sistema primer) perquè Anthropic i OpenAI reaprofitin el càlcul | `cache_read_tokens` |
 
 ## Proveïdors
@@ -72,7 +74,17 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 
 - **Models:** cada agent té un model per defecte i un de ràpid (per als resums), configurables des de la interfície. La llista es demana en directe al proveïdor (API de models d'Anthropic i d'OpenAI, `model/list` de Codex; a la CLI de Claude, els àlies `opus`, `sonnet`, `haiku` i `fable`, que sempre apunten a l'última versió). També s'accepta qualsevol identificador, per fer servir un model nou el mateix dia que surt.
 - **Cost:** el motor calcula el cost de cada crida amb la taula de preus (USD per milió de tokens, editable). En mode API és el cost real; en mode subscripció és el *valor equivalent* a preus d'API. La interfície ho mostra en euros amb el tipus del BCE.
+- **Fallbacks de l'API de Claude:** quan un model declina i un altre respon, cada intent es factura a les tarifes del model que l'ha executat, com fa Anthropic. L'intent declinat és una crida facturada a part, amb el seu model i el seu cost, que compta al total del torn; la resposta conserva només l'ús de l'intent que ha respost. Els tokens de models diferents no se sumen mai ([ADR 0008](adr/0008-recompte-de-tokens.md)).
 - **Percentatge usat:** en mode subscripció, les finestres de 5 hores i setmanal que informen Anthropic i OpenAI; en mode API, el pressupost mensual en euros; i, si indiques el preu del pla, quant valor n'has tret aquest mes.
+
+## Resultat del torn
+
+Com acaba cada torn (completat, fallit o cancel·lat) es decideix una sola vegada i es desa a la pregunta (`meta.outcome`) abans de l'esdeveniment final ([ADR 0007](adr/0007-resultat-del-torn.md)). Porta l'estat, l'error, les fallades de cada crida, el total del torn (totes les crides facturades, també la compactació, les fallides i els intents declinats), els estalvis, el consens i els missatges finals. Així, un torn recarregat mostra el mateix que en directe; les estadístiques globals ja eren correctes, perquè surten de la taula d'ús.
+
+- La pregunta es crea amb el resultat obert (`null`). Si el servidor cau o es reinicia a mig torn, queda així, i la interfície el mostra com a no completat.
+- Un torn cancel·lat desa el resultat abans que la cancel·lació continuï, en una tasca pròpia protegida amb `asyncio.shield`. Un torn es cancel·la una sola vegada: un segon «Atura», o l'aturada del servidor, no interromp un torn que ja s'està aturant, i `turn.cancelled` arriba després del resultat desat, amb el mateix total. En aturar-se, el servidor espera que aquests torns acabin abans de tancar la base de dades.
+- Un torn cancel·lat just quan desava els estalvis (ja amb tots els missatges) els acaba d'escriure i el resultat els porta, com les files que compta el tauler. Qualsevol altre torn cancel·lat o fallit no en registra.
+- `turn.failed` i `turn.cancelled` porten el total del torn, com `turn.completed`, i `stream.failed` porta el cost de la crida fallida quan se sap.
 
 ## Integritat de les respostes
 

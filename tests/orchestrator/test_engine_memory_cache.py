@@ -201,10 +201,10 @@ async def test_cache_hit_replays_without_calling_models(
 
     done, first_done = completed(second), completed(first)
     assert done.cached and done.final_message_ids == (replayed.id,)
-    assert done.savings.cache == first_done.usage.total_tokens
+    assert done.savings.cache == first_done.usage.processed_tokens
     assert done.usage == Usage()
     assert [(s.kind, s.tokens_saved) for s in store.savings] == [
-        ("cache", first_done.usage.total_tokens)
+        ("cache", first_done.usage.processed_tokens)
     ]
 
 

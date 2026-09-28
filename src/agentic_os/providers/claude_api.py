@@ -10,10 +10,13 @@ A request with reasoning "off" disables thinking. ``max_tokens`` is the request'
 output budget exactly (thinking included), never raised. Opus 5 / Opus 5.5 / Fable
 requests opt into server-side refusal fallbacks.
 
-Usage is what Anthropic bills: a refusal still bills its input and any streamed output
-(and, before any output, the categories in ``BILLED_BEFORE_OUTPUT``), so a refusal
-raises :class:`RefusalError` carrying that usage, and a turn served by a fallback model
-also counts the billed attempts of the models that declined before it.
+Usage is what Anthropic bills, per attempt: a refusal still bills its input and any
+streamed output (and, before any output, the categories in ``BILLED_BEFORE_OUTPUT``), so
+a refusal raises :class:`RefusalError` carrying that usage. After a server-side fallback
+the result's ``usage`` is the served attempt's only, and the billed attempts of the
+models that declined before it are ``declined``, each with its own model: every attempt
+is billed at the rates of the model that ran it, and tokens of different models are
+never summed.
 
 A reply cut at ``max_tokens`` is a truncated result (an error with its billed usage when
 no text came at all). A stream that drops (anthropic does not wrap the httpx2 errors it
@@ -46,6 +49,7 @@ from anthropic.types.beta import (
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Usage
 from agentic_os.providers.base import (
+    DeclinedAttempt,
     GenerationRequest,
     GenerationResult,
     ModelInfo,
@@ -180,16 +184,28 @@ def _category(reason: object) -> str | None:
     return category if isinstance(category, str) else None
 
 
-def billed_usage(message: BetaMessage) -> Usage:
-    """Tokens Anthropic bills for ``message``, without cost (the engine prices them).
+def _model_name(value: object) -> str:
+    """A model id of the SDK's objects ("" when missing, None or not a string)."""
+    return value if isinstance(value, str) else ""
 
-    Top-level ``usage`` covers only the attempt that produced the message; with
-    server-side fallbacks every earlier attempt is a ``message`` entry of
-    ``usage.iterations`` (the served one is ``fallback_message``), paired in order with
-    the ``fallback`` content blocks that give each decline's category (no tools are
-    sent, so every ``message`` entry is a declined hop, never a tool-loop step). The
-    billed declined attempts are added at their token counts, so the engine prices them
-    at the serving model's rates.
+
+def billed_usage(
+    message: BetaMessage, requested_model: str = ""
+) -> tuple[Usage, tuple[DeclinedAttempt, ...]]:
+    """What Anthropic bills for ``message``, per attempt and without cost (the engine
+    prices every attempt at the rates of the model that ran it).
+
+    The first value is top-level ``usage``, which covers only the attempt that produced
+    the message: the one that served it, or the one whose refusal ended the call (a
+    refusal is billed as "How refusals are billed" says). With server-side fallbacks
+    every earlier attempt is a ``message`` entry of ``usage.iterations`` (the served one
+    is ``fallback_message``), paired in order with the ``fallback`` content blocks that
+    give each decline's category and the model that declined (no tools are sent, so
+    every ``message`` entry is a declined hop, never a tool-loop step). The billed ones
+    are the second value, each with its own model: the entry's ``model``, else its
+    block's ``from``, else the model the previous hop fell back to, else (first hop)
+    ``requested_model``. Tokens of different models are never summed ("Billing and rate
+    limits" of Anthropic's refusals and fallback guide).
 
     Entries and blocks are picked by their ``type``, never by class: the SDK builds an
     entry of a type it does not know as the first variant of the union (the ``message``
@@ -211,24 +227,35 @@ def billed_usage(message: BetaMessage) -> Usage:
             billed = Usage()
     iterations = usage.iterations or []
     if not any(getattr(entry, "type", None) == "fallback_message" for entry in iterations):
-        return billed  # no fallback ran: top-level usage is the whole call
-    categories = [
-        _category(getattr(block, "trigger", None))
-        for block in message.content
-        if getattr(block, "type", None) == "fallback"
-    ]
-    declined = [entry for entry in iterations if getattr(entry, "type", None) == "message"]
-    for index, entry in enumerate(declined):
-        category = categories[index] if index < len(categories) else None
+        return billed, ()  # no fallback ran: top-level usage is the whole call
+    blocks = [block for block in message.content if getattr(block, "type", None) == "fallback"]
+    hops = [entry for entry in iterations if getattr(entry, "type", None) == "message"]
+    declined: list[DeclinedAttempt] = []
+    for index, entry in enumerate(hops):
+        block = blocks[index] if index < len(blocks) else None
+        category = _category(getattr(block, "trigger", None))
         output_tokens = _tokens(entry, "output_tokens")
-        if _attempt_billed(output_tokens, category):
-            billed += Usage(
-                input_tokens=_tokens(entry, "input_tokens"),
-                output_tokens=output_tokens,
-                cache_read_tokens=_tokens(entry, "cache_read_input_tokens"),
-                cache_write_tokens=_tokens(entry, "cache_creation_input_tokens"),
+        if not _attempt_billed(output_tokens, category):
+            continue
+        previous = blocks[index - 1] if 0 < index <= len(blocks) else None
+        model = (
+            _model_name(getattr(entry, "model", None))
+            or _model_name(getattr(getattr(block, "from_", None), "model", None))
+            or _model_name(getattr(getattr(previous, "to", None), "model", None))
+            or requested_model
+        )
+        declined.append(
+            DeclinedAttempt(
+                model=model,
+                usage=Usage(
+                    input_tokens=_tokens(entry, "input_tokens"),
+                    output_tokens=output_tokens,
+                    cache_read_tokens=_tokens(entry, "cache_read_input_tokens"),
+                    cache_write_tokens=_tokens(entry, "cache_creation_input_tokens"),
+                ),
             )
-    return billed
+        )
+    return billed, tuple(declined)
 
 
 def _interrupted() -> ProviderError:
@@ -436,10 +463,10 @@ class ClaudeApiProvider:
         if stop_reason is None:
             # The body ended cleanly but without message_delta/message_stop.
             raise _interrupted()
-        # No cost here: the engine prices every call (owner price overrides included).
-        usage = billed_usage(final)
+        # No cost here: the engine prices every attempt (owner price overrides included).
+        usage, declined = billed_usage(final, model)
         if stop_reason == "refusal":
-            raise refusal_error(usage, final.model, _category(final.stop_details))
+            raise refusal_error(usage, final.model, _category(final.stop_details), declined)
         text = "".join(chunks)
         truncated = stop_reason not in COMPLETE_STOP_REASONS
         if truncated and not text.strip():
@@ -451,6 +478,7 @@ class ClaudeApiProvider:
                 kind="invalid",
                 usage=usage,
                 model=final.model,
+                declined=declined,
             )
         yield GenerationResult(
             text=text,
@@ -460,6 +488,7 @@ class ClaudeApiProvider:
             ttft_ms=ttft_ms,
             truncated=truncated,
             finish_reason=stop_reason if truncated else None,
+            declined=declined,
         )
 
     async def _with_deadline[T](self, operation: Awaitable[T], deadline: float) -> T:

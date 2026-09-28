@@ -20,6 +20,7 @@ from agentic_os.domain import (
     TurnMode,
     Usage,
 )
+from agentic_os.orchestrator.events import TurnOutcome
 
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 
@@ -38,7 +39,8 @@ class NewMessage:
     """True for messages that are part of the canonical history used as context
     (the question, solo/duel answers and the debate synthesis)."""
     meta: Mapping[str, JsonValue] = field(default_factory=dict)
-    """Free-form metadata: usage, model, latency_ms, agreement, critique, cached..."""
+    """Free-form metadata: usage, model, latency_ms, agreement, critique, cached... A
+    question starts with ``outcome: None`` (see :meth:`Store.set_turn_outcome`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +89,9 @@ class SavingRecord:
     turn_id: int | None
     kind: SavingKind
     tokens_saved: int
-    """Estimated tokens avoided (input + output)."""
+    """Estimated processed tokens avoided (input, cache reads and writes, output: see
+    ``Usage.processed_tokens``). Rows stored before docs/adr/0008-recompte-de-tokens.md
+    counted only input + output for the cache and early-stop savings."""
     detail: str = ""
     cost_usd: float | None = None
     """Estimated value of the avoided tokens (None when the turn had no priced call)."""
@@ -101,7 +105,8 @@ class CachedTurn:
     messages: Sequence[NewMessage]
     """Assistant messages of the original turn (conversation/turn ids are rewritten on replay)."""
     tokens: int
-    """Total tokens the original turn consumed (reported as saved on a hit)."""
+    """Processed tokens of the original turn's calls that a hit avoids: every message's
+    call and the attempts declined before it (reported as saved on a hit)."""
 
 
 class Store(Protocol):
@@ -120,6 +125,12 @@ class Store(Protocol):
     async def record_usage(self, record: UsageRecord) -> None: ...
 
     async def record_saving(self, record: SavingRecord) -> None: ...
+
+    async def set_turn_outcome(self, question_message_id: int, outcome: TurnOutcome) -> None:
+        """Store how a turn ended as ``meta.outcome`` of its question (``outcome.to_wire()``
+        as a JSON object, the other keys untouched). The engine calls it once, when the
+        turn ends; an id that is not a question (a deleted conversation) is ignored."""
+        ...
 
     async def cache_get(self, key: str, now: datetime) -> CachedTurn | None: ...
 

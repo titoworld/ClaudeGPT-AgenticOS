@@ -8,6 +8,7 @@ import pytest
 
 from agentic_os.domain import Usage
 from agentic_os.fx import FxRate
+from agentic_os.orchestrator.events import Savings, TurnFailure, TurnOutcome
 from agentic_os.orchestrator.store import (
     CachedTurn,
     NewMessage,
@@ -132,6 +133,63 @@ async def test_add_message_validates_turns(store: SqliteStore) -> None:
     # Nothing half-written after the failures.
     detail = await store.get_conversation(other_id)
     assert detail is not None and detail.messages == ()
+
+
+async def test_the_turn_outcome_is_written_into_the_question_meta(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    conversation_id = await store.create_conversation("Resultat")
+    question_id = await store.add_message(
+        NewMessage(
+            conversation_id=conversation_id,
+            kind="question",
+            content="Pregunta",
+            final=True,
+            meta={"mode": "duel", "target": "claude", "outcome": None},
+        )
+    )
+    answer_id = await store.add_message(
+        NewMessage(
+            conversation_id=conversation_id,
+            kind="answer",
+            content="A",
+            turn_id=question_id,
+            agent="chatgpt",
+            final=True,
+            meta={"usage": {"input_tokens": 1}},
+        )
+    )
+    detail = await store.get_conversation(conversation_id)
+    assert detail is not None and detail.messages[0].meta["outcome"] is None
+    updated_at = detail.conversation.updated_at
+
+    outcome = TurnOutcome(
+        status="cancelled",
+        usage=Usage(input_tokens=10, output_tokens=5, cost_usd=0.25),
+        savings=Savings(cost_usd=0.0),
+        failures=(TurnFailure("claude", "invalid", "Claude ha declinat «això».", 0),),
+        final_message_ids=(answer_id,),
+    )
+    clock.advance(60)
+    await store.set_turn_outcome(question_id, outcome)
+    # Only a question of a turn takes it; an unknown id (a deleted conversation) is ignored.
+    await store.set_turn_outcome(answer_id, outcome)
+    await store.set_turn_outcome(question_id + 999, outcome)
+
+    detail = await store.get_conversation(conversation_id)
+    assert detail is not None
+    question, answer = detail.messages
+    # A JSON object (json_set with json(?)), not a string, next to the other keys.
+    assert question.meta == {"mode": "duel", "target": "claude", "outcome": outcome.to_wire()}
+    assert answer.meta == {"usage": {"input_tokens": 1}}
+    assert detail.conversation.updated_at == updated_at
+    async with store._db.transaction(write=False) as tx:
+        row = await tx.fetchone(
+            "SELECT json_type(meta, '$.outcome') AS kind, "
+            "json_extract(meta, '$.outcome.usage.cost_usd') AS cost FROM messages WHERE id = ?",
+            (question_id,),
+        )
+    assert row is not None and (row["kind"], row["cost"]) == ("object", 0.25)
 
 
 async def test_history_contains_only_final_messages_after_the_summary(

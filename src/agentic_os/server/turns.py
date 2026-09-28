@@ -6,7 +6,11 @@ and handed to the current subscribers. Buffers are kept while the turn runs and
 for :data:`RETENTION_SECONDS` after it ends, so a client that reconnects can ask
 for what it missed (``turn.subscribe``). Only ``turn.cancel`` (or shutdown) stops a
 turn; a subscriber going away does not. Deleting a conversation cancels its turns
-and forgets them, so their content can no longer be replayed.
+and forgets them, so their content can no longer be replayed. A cancelled turn ends
+with ``turn.cancelled`` carrying what it spent, as the engine reported it (its
+outcome, docs/adr/0007-resultat-del-torn.md). A turn is cancelled only once: a
+repeated ``turn.cancel`` or a shutdown while it stops leaves the engine to finish
+stopping it, so ``turn.cancelled`` always follows its stored outcome.
 """
 
 from __future__ import annotations
@@ -14,21 +18,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
+from agentic_os.domain import Usage
 from agentic_os.orchestrator.events import (
     ErrorInfo,
     ServerEvent,
     TurnCancelled,
     TurnFailed,
+    TurnOutcome,
     TurnStarted,
     Wire,
 )
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.pricing import ModelPrice
-from agentic_os.server.tasks import cancel_and_wait
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +70,13 @@ class TurnRunner(Protocol):
         *,
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
-    ) -> AsyncIterator[ServerEvent]: ...
+        on_outcome: Callable[[TurnOutcome], None] | None = None,
+    ) -> AsyncIterator[ServerEvent]:
+        """The turn's events; ``on_outcome`` gets how it ended as soon as that is
+        decided, a cancelled turn included (it has no event of its own). Cancelling the
+        consumer once stops the turn: its ``CancelledError`` comes after ``on_outcome``
+        (the manager never cancels a turn twice)."""
+        ...
 
 
 class TurnRejectedError(Exception):
@@ -92,8 +103,15 @@ class _Turn:
     """Every subscriber that got this turn's events (it started the turn or
     subscribed to it), live or not: a repeated ``subscribe`` is ignored."""
     task: asyncio.Task[None] | None = None
+    usage: Usage = field(default_factory=Usage)
+    """What the turn spent, from its outcome (for a ``turn.cancelled``)."""
     terminal: bool = False
     """A terminal event (completed, failed or cancelled) was published."""
+    stopping: bool = False
+    """Its task was cancelled (``turn.cancel``, a deleted conversation or a shutdown).
+    It is never cancelled again: that would interrupt the engine while it stops the
+    turn's calls and stores how the turn ended, and ``turn.cancelled`` would go out
+    before that, without what the turn spent (see :meth:`TurnManager.cancel`)."""
     finished: bool = False
     """The task has ended (no more events)."""
     forgotten: bool = False
@@ -219,12 +237,15 @@ class TurnManager:
 
     def cancel(self, request_id: str) -> bool:
         """Cancel a running turn (its last event will be ``turn.cancelled``). A turn
-        that already ended is left alone. ``False`` if the turn is unknown."""
+        that already ended is left alone, and so is one that is already stopping (the
+        owner pressing stop again): its ``turn.cancelled`` comes once the engine has
+        stopped its calls and stored how it ended, with what it spent. ``False`` if the
+        turn is unknown."""
         turn = self._turns.get(request_id)
         if turn is None:
             return False
-        if not turn.terminal and turn.task is not None and not turn.task.done():
-            turn.task.cancel()
+        if not turn.terminal:
+            self._stop(turn)
         return True
 
     def cancel_conversation(self, conversation_id: int) -> int:
@@ -257,9 +278,22 @@ class TurnManager:
             turn.receivers.discard(subscriber)
 
     async def aclose(self) -> None:
-        """Cancel every running turn, wait for them and drop all buffers."""
+        """Cancel every running turn (a turn already stopping is not cancelled again),
+        wait for them, so that no turn outlives the store it writes to, and drop all
+        buffers."""
         self._closed = True
-        await cancel_and_wait(turn.task for turn in self._turns.values() if turn.task is not None)
+        for turn in self._turns.values():
+            self._stop(turn)
+        pending = [
+            turn.task
+            for turn in self._turns.values()
+            if turn.task is not None and not turn.task.done()
+        ]
+        if pending:
+            # asyncio.wait, like server.tasks.cancel_and_wait: a caller cancelled
+            # meanwhile gets its own CancelledError. _on_done has retrieved the tasks'
+            # errors by the time the wait ends.
+            await asyncio.wait(pending)
         for turn in self._turns.values():
             if turn.expiry is not None:
                 turn.expiry.cancel()
@@ -267,11 +301,22 @@ class TurnManager:
 
     # -- internals -------------------------------------------------------------------
 
+    @staticmethod
+    def _stop(turn: _Turn) -> None:
+        """Cancel the task of ``turn`` unless it has ended or was already cancelled."""
+        if turn.task is not None and not turn.task.done() and not turn.stopping:
+            turn.stopping = True
+            turn.task.cancel()
+
     async def _run(self, turn: _Turn) -> None:
+        def on_outcome(outcome: TurnOutcome) -> None:
+            turn.usage = outcome.usage
+
         events = self._runner.run(
             turn.request,
             compaction_threshold_tokens=turn.compaction_threshold_tokens,
             price_overrides=turn.price_overrides,
+            on_outcome=on_outcome,
         )
         # Cancelling this task cancels the engine at its current await; the engine
         # then stops every model call of the turn before the error propagates.
@@ -292,15 +337,14 @@ class TurnManager:
     def _on_done(self, turn: _Turn, task: asyncio.Task[None]) -> None:
         if not turn.terminal:
             if task.cancelled():
-                self._publish(turn, TurnCancelled(turn.request_id).to_wire())
+                self._publish(turn, TurnCancelled(turn.request_id, turn.usage).to_wire())
             else:
                 error = task.exception()
                 if error is not None:
                     logger.error("Turn %s crashed", turn.request_id, exc_info=error)
                 message = "S'ha produït un error intern i el torn s'ha aturat."
-                self._publish(
-                    turn, TurnFailed(turn.request_id, ErrorInfo("internal", message)).to_wire()
-                )
+                failed = TurnFailed(turn.request_id, ErrorInfo("internal", message), turn.usage)
+                self._publish(turn, failed.to_wire())
         elif not task.cancelled() and task.exception() is not None:
             logger.error("Turn %s failed after ending", turn.request_id, exc_info=task.exception())
         turn.finished = True

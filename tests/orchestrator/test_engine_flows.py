@@ -334,7 +334,7 @@ async def test_early_stop_on_consensus(store: InMemoryStore) -> None:
     assert isinstance(done, TurnCompleted) and done.consensus is not None
     assert done.consensus.reached and done.consensus.round == 1
     revision_usage = [e.usage for e in of_type(events, StreamCompleted) if e.agreement is not None]
-    pair = sum(u.total_tokens for u in revision_usage)
+    pair = sum(u.processed_tokens for u in revision_usage)
     assert done.savings.early_stop == 3 * pair
     assert ("early_stop", 3 * pair) in [(s.kind, s.tokens_saved) for s in store.savings]
 

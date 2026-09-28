@@ -5,6 +5,7 @@
 import { mount } from 'svelte';
 import '../../styles/tokens.css';
 import Dashboard from '../../views/Dashboard.svelte';
+import { processedTokens } from '../costs';
 import type { Agent, AgentSpend, FxRate, MonthSpend, ProviderMode, ProviderStatus, SavingKind, Stats } from '../protocol';
 import { addDays, utcDay } from './dates';
 
@@ -15,8 +16,8 @@ const MODE: Record<Agent, ProviderMode> = {
   claude: params.has('api') ? 'api' : 'cli',
   chatgpt: params.has('api') || params.has('mixed') ? 'api' : 'cli',
 };
-/** USD per million tokens (input, output, cache read). */
-const PRICE: Record<Agent, [number, number, number]> = { claude: [3, 15, 0.3], chatgpt: [1.25, 10, 0.125] };
+/** USD per million tokens (input, output, cache read, cache write). */
+const PRICE: Record<Agent, [number, number, number, number]> = { claude: [3, 15, 0.3, 3.75], chatgpt: [1.25, 10, 0.125, 0] };
 const SCALE = 12;
 const HISTORY = 90;
 
@@ -49,17 +50,25 @@ function history(): { daily: DailyRow[]; savings: SavingRow[] } {
   const r = rng(90 * 7919);
   const daily: DailyRow[] = [];
   const savings: SavingRow[] = [];
-  const row = (date: string, agent: Agent, load: number, base: [number, number, number]): DailyRow => {
-    const [i, o, c] = base.map((b, k) => Math.round(b * SCALE * load * (k === 2 ? r() : 0.6 + r()))) as [number, number, number];
-    const [pi, po, pc] = PRICE[agent];
-    return { date, agent, input_tokens: i, output_tokens: o, cache_read_tokens: c, cost_usd: (i * pi + o * po + c * pc) / 1e6 };
+  const row = (date: string, agent: Agent, load: number, base: [number, number, number, number]): DailyRow => {
+    const [i, o, c, w] = base.map((b, k) => Math.round(b * SCALE * load * (k >= 2 ? r() : 0.6 + r()))) as [number, number, number, number];
+    const [pi, po, pc, pw] = PRICE[agent];
+    return {
+      date,
+      agent,
+      input_tokens: i,
+      output_tokens: o,
+      cache_read_tokens: c,
+      cache_write_tokens: w,
+      cost_usd: (i * pi + o * po + c * pc + w * pw) / 1e6,
+    };
   };
   for (let i = HISTORY - 1; i >= 0 && !empty; i--) {
     const date = addDays(today, -i);
     if (r() < 0.22) continue; // idle days
     const load = 0.4 + r() * 1.2 + (i < 5 ? 0.6 : 0);
-    daily.push(row(date, 'claude', load, [9000, 3800, 6000]));
-    if (r() < 0.85) daily.push(row(date, 'chatgpt', load, [7600, 3100, 4000]));
+    daily.push(row(date, 'claude', load, [9000, 3800, 6000, 1500]));
+    if (r() < 0.85) daily.push(row(date, 'chatgpt', load, [7600, 3100, 4000, 0]));
     for (const kind of ['cache', 'compaction', 'early_stop', 'unchanged'] as SavingKind[]) {
       if (r() < 0.5) {
         const base = kind === 'early_stop' ? 5200 : kind === 'cache' ? 3800 : 2100;
@@ -115,7 +124,7 @@ function mockStats(days: number): Stats {
   const from = addDays(today, -(days - 1));
   const daily = HISTORY_DATA.daily.filter((d) => d.date >= from);
   const savingsDaily = HISTORY_DATA.savings.filter((s) => s.date >= from);
-  const sum = (agent: Agent, key: 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cost_usd') =>
+  const sum = (agent: Agent, key: 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cache_write_tokens' | 'cost_usd') =>
     sumBy(
       daily.filter((d) => d.agent === agent),
       (d) => d[key],
@@ -124,7 +133,7 @@ function mockStats(days: number): Stats {
     input_tokens: sum(agent, 'input_tokens'),
     output_tokens: sum(agent, 'output_tokens'),
     cache_read_tokens: sum(agent, 'cache_read_tokens'),
-    cache_write_tokens: 0,
+    cache_write_tokens: sum(agent, 'cache_write_tokens'),
     reasoning_tokens: 0,
     cost_usd: empty ? null : sum(agent, 'cost_usd'),
     calls,
@@ -139,13 +148,13 @@ function mockStats(days: number): Stats {
   const byKind = { cache: sav('cache'), compaction: sav('compaction'), early_stop: sav('early_stop'), unchanged: sav('unchanged') };
   const savedTotal = byKind.cache + byKind.compaction + byKind.early_stop + byKind.unchanged;
   const costTotal = (claude.cost_usd ?? 0) + (chatgpt.cost_usd ?? 0);
-  const consumed = claude.input_tokens + claude.output_tokens + chatgpt.input_tokens + chatgpt.output_tokens;
+  const processed = processedTokens(claude) + processedTokens(chatgpt);
   const debates = empty ? 0 : Math.round(days * 1.4);
   const unpriced = Math.max(1, Math.round(days / 10));
   return {
     days,
     totals: { calls: claude.calls + chatgpt.calls, errors: empty ? 0 : 3, cost_usd: costTotal, by_agent: { claude, chatgpt } },
-    savings: { ...byKind, total: savedTotal, cost_usd: consumed > 0 ? (savedTotal * costTotal) / consumed : null },
+    savings: { ...byKind, total: savedTotal, cost_usd: processed > 0 ? (savedTotal * costTotal) / processed : null },
     daily,
     savings_daily: savingsDaily,
     latency: empty

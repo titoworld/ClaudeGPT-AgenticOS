@@ -732,19 +732,32 @@ class App {
         break;
       }
       case 'turn.completed':
-        void this.convs.refresh(BACKGROUND);
-        this.#refreshUsageSoon();
+        this.#turnEnded();
         if (ev.consensus?.reached) sceneHost.flash('consensus');
         break;
       case 'turn.failed':
+        this.#turnEnded();
         sceneHost.flash('error');
         if (turn.conversationId !== this.convs.currentId) {
           toasts.push(`Un torn ha fallat: ${ev.error.message}`, 'error');
         }
         break;
+      case 'turn.cancelled':
+        this.#turnEnded();
+        break;
       default:
         break;
     }
+  }
+
+  /**
+   * A turn ended, however it did: a failed or cancelled one may have billed calls too
+   * (A15). Its conversation moved in the list, and the usage windows and the month spend
+   * change a moment later.
+   */
+  #turnEnded(): void {
+    void this.convs.refresh(BACKGROUND);
+    this.#refreshUsageSoon();
   }
 
   #resubscribe(active: { request_id: string; conversation_id: number | null; last_seq: number }[]): void {

@@ -36,7 +36,11 @@ def other_agent(agent: AgentName) -> AgentName:
 
 @dataclass(frozen=True, slots=True)
 class Usage:
-    """Token usage of one model call. Missing values are 0 (or None for cost)."""
+    """Token usage of one model call. Missing values are 0 (or None for cost).
+
+    ``input_tokens`` is the uncached remainder of the input: cache reads and writes are
+    counted apart, and ``output_tokens`` already includes ``reasoning_tokens`` (so do
+    Anthropic, OpenAI and Codex)."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -46,8 +50,16 @@ class Usage:
     cost_usd: float | None = None
 
     @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+    def processed_tokens(self) -> int:
+        """Every token the call processed and was billed for: input, cache reads, cache
+        writes and output. Reasoning is part of the output, so it is never added again
+        (docs/adr/0008-recompte-de-tokens.md)."""
+        return (
+            self.input_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+            + self.output_tokens
+        )
 
     def __add__(self, other: Usage) -> Usage:
         cost: float | None

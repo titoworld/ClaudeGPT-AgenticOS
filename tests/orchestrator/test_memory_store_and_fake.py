@@ -8,10 +8,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from agentic_os.domain import Usage
+from agentic_os.orchestrator.events import ErrorInfo, Savings, TurnFailure, TurnOutcome
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.prompts import revision_prompt, system_prompt
 from agentic_os.orchestrator.sections import RevisionStreamParser
-from agentic_os.orchestrator.store import CachedTurn, NewMessage, Store
+from agentic_os.orchestrator.store import CachedTurn, JsonValue, NewMessage, Store
 from agentic_os.providers.base import (
     GenerationRequest,
     GenerationResult,
@@ -67,6 +68,33 @@ async def test_store_rejects_unknown_conversations_and_bad_turns() -> None:
         await store.add_message(NewMessage(conversation_id, "answer", "A", agent="claude"))
     history = await store.get_history(9)
     assert history.messages == () and history.summary is None
+
+
+async def test_store_writes_the_turn_outcome_on_its_question() -> None:
+    store: Store = InMemoryStore(clock=lambda: NOW)
+    conversation_id = await store.create_conversation("T")
+    meta: dict[str, JsonValue] = {"mode": "solo", "outcome": None}
+    question = await store.add_message(NewMessage(conversation_id, "question", "Q", meta=meta))
+    answer = await store.add_message(
+        NewMessage(conversation_id, "answer", "A", turn_id=question, agent="claude", final=True)
+    )
+    outcome = TurnOutcome(
+        status="failed",
+        usage=Usage(input_tokens=10, cost_usd=0.5),
+        savings=Savings(),
+        error=ErrorInfo("invalid", "Claude no ha pogut respondre."),
+        failures=(TurnFailure("claude", "invalid", "Claude ha declinat.", 0),),
+        final_message_ids=(answer,),
+    )
+    await store.set_turn_outcome(question, outcome)
+    await store.set_turn_outcome(answer, outcome)  # not a question: nothing happens
+    await store.set_turn_outcome(999, outcome)  # unknown (a deleted conversation): the same
+    assert isinstance(store, InMemoryStore)
+    stored = {m.id: m for m in store.messages}
+    assert stored[question].meta == {"mode": "solo", "outcome": outcome.to_wire()}
+    assert "outcome" not in stored[answer].meta
+    assert stored[question].created_at == NOW
+    assert meta["outcome"] is None  # the caller's meta is not touched
 
 
 async def test_store_cache_expiry() -> None:

@@ -3,7 +3,6 @@ import { LIMIT_WARN_PERCENT } from '../limits';
 import type { ProviderStatus, Stats, Usage } from '../protocol';
 import {
   AGENT_SERIES,
-  consumed,
   dailyCost,
   dailySavings,
   dailyTokens,
@@ -20,11 +19,11 @@ import {
   windowLabel,
 } from './usage';
 
-const usage = (input: number, output: number, cost: number | null = null, cacheRead = 0): Usage & { calls: number } => ({
+const usage = (input: number, output: number, cost: number | null = null, cacheRead = 0, cacheWrite = 0): Usage & { calls: number } => ({
   input_tokens: input,
   output_tokens: output,
   cache_read_tokens: cacheRead,
-  cache_write_tokens: 0,
+  cache_write_tokens: cacheWrite,
   reasoning_tokens: 0,
   cost_usd: cost,
   calls: 3,
@@ -36,13 +35,13 @@ const noSpend = { api_usd: 0, equivalent_usd: 0, unpriced_calls: 0, budget_eur: 
 function stats(overrides: Partial<Stats> = {}): Stats {
   return {
     days: 7,
-    totals: { calls: 6, errors: 1, cost_usd: 0, by_agent: { claude: usage(1000, 500, null, 200), chatgpt: usage(700, 300, null, 50) } },
+    totals: { calls: 6, errors: 1, cost_usd: 0, by_agent: { claude: usage(1000, 500, null, 200, 300), chatgpt: usage(700, 300, null, 50) } },
     savings: { cache: 400, compaction: 100, early_stop: 300, unchanged: 200, total: 1000, cost_usd: 0.5 },
     daily: [
-      { date: '2026-09-27', agent: 'claude', input_tokens: 600, output_tokens: 200, cache_read_tokens: 100, cost_usd: 0.25 },
-      { date: '2026-09-27', agent: 'chatgpt', input_tokens: 700, output_tokens: 300, cache_read_tokens: 50, cost_usd: 0.1 },
-      { date: '2026-09-25', agent: 'claude', input_tokens: 400, output_tokens: 300, cache_read_tokens: 100, cost_usd: 0.05 },
-      { date: '2026-08-01', agent: 'claude', input_tokens: 9, output_tokens: 9, cache_read_tokens: 0, cost_usd: 9 }, // outside range
+      { date: '2026-09-27', agent: 'claude', input_tokens: 600, output_tokens: 200, cache_read_tokens: 100, cache_write_tokens: 40, cost_usd: 0.25 },
+      { date: '2026-09-27', agent: 'chatgpt', input_tokens: 700, output_tokens: 300, cache_read_tokens: 50, cache_write_tokens: 0, cost_usd: 0.1 },
+      { date: '2026-09-25', agent: 'claude', input_tokens: 400, output_tokens: 300, cache_read_tokens: 100, cache_write_tokens: 0, cost_usd: 0.05 },
+      { date: '2026-08-01', agent: 'claude', input_tokens: 9, output_tokens: 9, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 9 }, // outside range
     ],
     savings_daily: [
       { date: '2026-09-27', kind: 'cache', tokens: 400 },
@@ -68,12 +67,13 @@ function stats(overrides: Partial<Stats> = {}): Stats {
 }
 
 describe('daily series', () => {
-  it('fills every day of the range with consumed tokens per agent', () => {
+  it('fills every day of the range with the tokens each agent processed (A7)', () => {
     const d = dailyTokens(stats(), '2026-09-27');
     expect(d).toHaveLength(7);
     expect(d[0]!.key).toBe('2026-09-21');
-    expect(d.at(-1)).toMatchObject({ key: '2026-09-27', label: '27 set.', values: { claude: 800, chatgpt: 1000 } });
-    expect(d.find((x) => x.key === '2026-09-25')!.values).toEqual({ claude: 700, chatgpt: 0 });
+    // Input, cache reads, cache writes and output.
+    expect(d.at(-1)).toMatchObject({ key: '2026-09-27', label: '27 set.', values: { claude: 940, chatgpt: 1050 } });
+    expect(d.find((x) => x.key === '2026-09-25')!.values).toEqual({ claude: 800, chatgpt: 0 });
     expect(d.find((x) => x.key === '2026-09-26')!.values).toEqual({ claude: 0, chatgpt: 0 });
     // Out-of-range rows are ignored rather than stretching the axis.
     expect(d.some((x) => x.key === '2026-08-01')).toBe(false);
@@ -101,8 +101,8 @@ describe('daily series', () => {
     expect(isEmpty(dailyCost(stats(), 0, '2026-09-27'))).toBe(true);
     const garbage = stats({
       daily: [
-        { date: '2026-09-27', agent: 'claude', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: -3 },
-        { date: '2026-09-27', agent: 'chatgpt', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 } as Stats['daily'][number],
+        { date: '2026-09-27', agent: 'claude', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: -3 },
+        { date: '2026-09-27', agent: 'chatgpt', input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0 } as Stats['daily'][number],
       ],
     });
     expect(isEmpty(dailyCost(garbage, 0.9, '2026-09-27'))).toBe(true);
@@ -144,11 +144,21 @@ describe('categorical series', () => {
 });
 
 describe('kpis', () => {
-  it('computes consumption, savings share, turns and consensus', () => {
+  it('computes processed tokens, savings share, turns and consensus', () => {
     const k = kpis(stats());
-    expect(k.consumed).toEqual({ total: 2500, byAgent: { claude: 1500, chatgpt: 1000 }, calls: 6, errors: 1, cacheRead: 250 });
+    expect(k.processed).toEqual({
+      total: 3050,
+      byAgent: { claude: 2000, chatgpt: 1050 },
+      calls: 6,
+      errors: 1,
+      input: 1700,
+      cacheRead: 250,
+      cacheWrite: 300,
+      output: 800,
+    });
     expect(k.saved.total).toBe(1000);
-    expect(k.saved.ratio).toBeCloseTo(1000 / 3500);
+    // The same kind of tokens on both sides: saved / (processed + saved).
+    expect(k.saved.ratio).toBeCloseTo(1000 / 4050);
     expect(k.turns.total).toBe(7);
     expect(k.consensus).toEqual({ debates: 4, reached: 3, rate: 0.75, avgRounds: 1.5 });
     expect(k.latency.chatgpt).toEqual({ p50: null, p95: null, ttft: null });
@@ -161,7 +171,7 @@ describe('kpis', () => {
       consensus: { debates: 0, reached: 0, avg_rounds: null },
     });
     const k = kpis(empty);
-    expect(k.consumed.total).toBe(0);
+    expect(k.processed.total).toBe(0);
     expect(k.saved.ratio).toBeNull();
     expect(k.consensus.rate).toBeNull();
   });
@@ -171,9 +181,37 @@ describe('kpis', () => {
     expect(kpis(s).saved.total).toBe(10);
   });
 
-  it('counts input + output as consumed tokens', () => {
-    expect(consumed({ input_tokens: 3, output_tokens: 4 })).toBe(7);
-    expect(consumed(undefined)).toBe(0);
+  it('counts the cache in the tokens a call processed (A7: 30.103, not 103)', () => {
+    const one = { input_tokens: 3, output_tokens: 100, cache_read_tokens: 10_000, cache_write_tokens: 20_000, reasoning_tokens: 50 };
+    const s = stats({
+      totals: { calls: 1, errors: 0, cost_usd: 0.13, by_agent: { claude: { ...one, cost_usd: 0.13, calls: 1 }, chatgpt: usage(0, 0) } },
+      daily: [{ date: '2026-09-27', agent: 'claude', ...one, cost_usd: 0.13 }],
+    });
+    expect(kpis(s).processed.total).toBe(30_103);
+    expect(dailyTokens(s, '2026-09-27').at(-1)!.values.claude).toBe(30_103);
+  });
+
+  it('measures the savings ratio against processed tokens, cache included (A7)', () => {
+    // The audit's case: a compaction that saved 3.252 tokens in a period that processed 180.618.
+    const s = stats({
+      totals: {
+        calls: 6,
+        errors: 0,
+        cost_usd: 0,
+        by_agent: { claude: usage(15, 500, null, 50_000, 100_000), chatgpt: usage(3, 100, null, 10_000, 20_000) },
+      },
+      savings: { cache: 0, compaction: 3252, early_stop: 0, unchanged: 0, total: 3252, cost_usd: null },
+    });
+    const k = kpis(s);
+    expect(k.processed.total).toBe(180_618);
+    expect(k.saved.ratio).toBeCloseTo(3252 / (180_618 + 3252), 6);
+    expect(k.saved.ratio).toBeLessThan(0.02);
+  });
+
+  it('counts daily rows without cache writes (older servers) as having none', () => {
+    const row = { date: '2026-09-27', agent: 'claude', input_tokens: 10, output_tokens: 5, cache_read_tokens: 20, cost_usd: 0 };
+    const d = dailyTokens(stats({ daily: [row as Stats['daily'][number]] }), '2026-09-27');
+    expect(d.at(-1)!.values.claude).toBe(35);
   });
 });
 
