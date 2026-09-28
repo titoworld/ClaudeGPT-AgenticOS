@@ -132,7 +132,8 @@ def process_gone(pid: int) -> bool:
     """True if the process no longer exists or is a zombie waiting to be reaped."""
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, IndexError):
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        # ProcessLookupError (ESRCH): it exited between opening and reading the file.
         return True
     return state in ("Z", "X")
 

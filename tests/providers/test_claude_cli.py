@@ -84,7 +84,8 @@ def alive(pid: int) -> bool:
     """True while ``pid`` runs (zombies count as dead)."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # ProcessLookupError (ESRCH): it exited between opening and reading the file.
         return False
     return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
 
