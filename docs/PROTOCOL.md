@@ -8,7 +8,7 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 - Dispositiu conegut: cada inici de sessió correcte posa també una cookie `__Host-aos_device` (HttpOnly, Secure, SameSite=Strict, Path=/; sense HTTPS es diu `aos_device` i no és `Secure`) amb un testimoni aleatori que dura 1 any i se substitueix per un de nou a cada inici de sessió. El logout la conserva; `agentic-os init` i `agentic-os reset-sessions` obliden tots els dispositius. Un intent d'inici de sessió que la porta només es limita pel comptador d'errors d'aquell dispositiu (no pel de l'adreça ni pel global), de manera que ningú no pot bloquejar el propietari des d'un navegador on ja ha entrat.
 - Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
 - Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`; si no, `403`.
-- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir), `413` cos massa gran (1 MiB, pel `Content-Length` o comptat mentre arriba), `422` validació (també els nombres fora de rang, per grans que siguin), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
+- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir), `409` si la configuració ha canviat des que el client la va llegir (només `PUT /api/settings`, amb `settings` al cos), `413` cos massa gran (1 MiB, pel `Content-Length` o comptat mentre arriba), `422` validació (també els nombres fora de rang, per grans que siguin), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
 - Una resposta que surt abans que el servidor hagi rebut tot el cos de la petició (`403`, `401`, `413` pel `Content-Length`, `429`, `408`, o un cos enviat a una ruta que no el llegeix) porta `Connection: close` i el servidor tanca la connexió: el client no la pot reutilitzar. Les peticions sense cos o amb el cos llegit sencer mantenen la connexió.
 
 ## REST
@@ -23,8 +23,8 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 | `GET /api/models` | `?refresh=1` opcional (ignora la memòria cau) | `ModelCatalog` |
 | `GET /api/pricing` | – | `Pricing` |
 | `GET /api/spend` | – | `MonthSpend` (mes en curs, per a les barres de pressupost) |
-| `GET /api/settings` | – | `RuntimeSettings` |
-| `PUT /api/settings` | `RuntimeSettings` (les claus que falten prenen el valor per defecte) | `RuntimeSettings` |
+| `GET /api/settings` | – | `RuntimeSettings`, amb la `revision` actual |
+| `PUT /api/settings` | `RuntimeSettings` amb la `revision` en què es basa el canvi (obligatòria; les altres claus que falten prenen el valor per defecte) | `RuntimeSettings` desats (`revision` + 1); `409` o `422` (vegeu «Desament de la configuració») |
 | `GET /api/conversations` | `?limit=50&before=<id>` | `[ConversationSummary]`, les més recents primer |
 | `GET /api/conversations/{id}` | – | `ConversationDetail` |
 | `PATCH /api/conversations/{id}` | `{"title": str}` | `ConversationSummary` |
@@ -87,13 +87,26 @@ interface ModelPrice {         // USD per milió de tokens, com els publiquen el
 
 interface Pricing {
   fx: FxRate;
-  prices: (ModelPrice & { model: string; source: "default" | "custom" })[];
+  prices: (ModelPrice & { model: string; key: string; source: "default" | "custom";
+                          default: ModelPrice | null })[];
 }
 // prices: exactament la taula amb què es calculen els costos, ordenada per model: els
 // preus per defecte amb els del propietari al damunt (un preu propi substitueix el per
 // defecte del mateix model normalitzat, sense prefix de proveïdor, data ni context).
+// key: l'id normalitzat amb què el servidor compara els models (normalize_model: sense
+// espais als extrems i en minúscules, sense el que hi ha fins a l'última "/" ni el prefix
+// "anthropic.", sense un context "[…]" al final i després sense una data "-AAAAMMDD",
+// "@AAAAMMDD" o "-latest" al final). Dues files no tenen mai la mateixa key. Un model
+// la key del qual no té fila paga el preu de la fila amb la key més llarga que sigui un
+// prefix de la seva.
+// Els vectors de tests/fixtures/model_ids.json fixen la normalització per al servidor
+// i per al web.
+// default: a una fila "custom" que substitueix un preu per defecte (la mateixa key),
+// aquell preu per defecte; null a les altres.
 
 interface RuntimeSettings {
+  revision: number;                       // desaments: 0 fins al primer, +1 a cada un
+                                          // (vegeu «Desament de la configuració»)
   default_mode: TurnMode;                 // per defecte "debate"
   default_target: Agent;                  // agent del mode solo
   debate: { rounds: number;               // 0–4, per defecte 2
@@ -167,6 +180,15 @@ interface Stats {
   month: MonthSpend;
 }
 ```
+
+### Desament de la configuració
+
+`revision` compta els desaments de la configuració: val 0 on no s'ha desat mai i augmenta en 1 a cada desament correcte. Una configuració desada per una versió anterior, sense revisió, compta com a revisió 1. Així, només la configuració integrada, que un client té mentre encara no ha llegit la del servidor, és a la revisió 0, i un desament basat en aquesta no pot substituir mai una configuració desada. Es desa amb la configuració, de manera que es conserva en reiniciar, i no torna mai enrere. El client edita a partir de la configuració que ha llegit i envia a `PUT /api/settings` tota la configuració, amb la `revision` que tenia la que va llegir ([ADR 0006](adr/0006-revisio-de-la-configuracio.md)):
+
+- `200`: la revisió és l'actual. La resposta és la configuració desada, amb `revision` + 1.
+- `409`: la revisió no és l'actual, normalment perquè s'ha desat des d'una altra pestanya o dispositiu. No es desa res. El cos és `{"detail": "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.", "settings": RuntimeSettings}`, amb la configuració actual tal com la dona `GET /api/settings`: el client la mostra i el propietari la revisa i la torna a desar.
+- `422`: falta `revision`, no és un enter ≥ 0 o algun altre camp no és vàlid. L'ordre és: el cos ha de ser un objecte JSON, després `revision` i després la resta de camps. La revisió es compara al final, de manera que una edició no vàlida dona `422` encara que es basi en una revisió antiga.
+- La comparació i l'escriptura són atòmiques (una sola transacció d'escriptura de SQLite): de dues peticions basades en la mateixa revisió, una rep `200` i l'altra `409`, encara que vinguin de processos diferents.
 
 ### Metadades de missatge (`meta`)
 

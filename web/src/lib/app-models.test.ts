@@ -62,7 +62,7 @@ describe('default models after the owner clears a saved one (F3)', () => {
   beforeEach(async () => {
     server.modelsFail = false;
     server.runtime = withModels({ claude: 'claude-opus-saved', chatgpt: null }, { claude: 'claude-haiku-saved', chatgpt: null });
-    app.settings = normalizeSettings(await api.settings());
+    expect(await app.loadSettings()).toBe(true); // saving needs them loaded
     app.providers = await api.providers();
     app.catalog = null;
     app.catalogStale = false;

@@ -13,6 +13,7 @@ Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el su
 | 0003 | [Mode Consell i estratègia d'estalvi de tokens](0003-consell-i-estalvi-de-tokens.md)      | Acceptat |
 | 0004 | [Interfície web i desplegament](0004-web-i-desplegament.md)                               | Acceptat |
 | 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-integritat-de-les-respostes.md) | Proposat |
+| 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
 
 ## Plantilla
 

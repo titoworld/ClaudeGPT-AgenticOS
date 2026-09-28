@@ -17,6 +17,7 @@ from agentic_os.storage.models import (
 )
 
 VALID: dict[str, Any] = {
+    "revision": 3,
     "default_mode": "duel",
     "default_target": "chatgpt",
     "debate": {"rounds": 0, "consensus_threshold": 100, "synthesizer": "chatgpt"},
@@ -37,6 +38,7 @@ VALID: dict[str, Any] = {
 def test_defaults_match_the_protocol() -> None:
     settings = RuntimeSettings()
     assert settings.to_wire() == {
+        "revision": 0,
         "default_mode": "debate",
         "default_target": "claude",
         "debate": {"rounds": 2, "consensus_threshold": 85, "synthesizer": "claude"},
@@ -139,6 +141,11 @@ def test_model_ids_are_trimmed_and_empty_means_the_default() -> None:
         ({"plans_eur": {"chatgpt": True}}, "plans_eur.chatgpt"),
         ({"plans_eur": {"chatgpt": float("inf")}}, "plans_eur.chatgpt"),
         ({"plans_eur": None}, "plans_eur"),
+        ({"revision": -1}, "revision"),
+        ({"revision": 1.0}, "revision"),
+        ({"revision": "1"}, "revision"),
+        ({"revision": False}, "revision"),
+        ({"revision": None}, "revision"),
     ],
 )
 def test_invalid_values_raise_catalan_errors(patch: dict[str, object], message: str) -> None:

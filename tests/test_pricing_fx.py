@@ -1,4 +1,6 @@
+import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +37,21 @@ ECB_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 )
 def test_normalize_model(raw: str, expected: str) -> None:
     assert normalize_model(raw) == expected
+
+
+MODEL_IDS = Path(__file__).parent / "fixtures" / "model_ids.json"
+"""Raw model ids and their normalized keys, shared with the web tests, which check the
+TypeScript port of ``normalize_model`` against the same file (ADR 0006)."""
+
+
+def _shared_vectors() -> list[tuple[str, str]]:
+    data = json.loads(MODEL_IDS.read_text(encoding="utf-8"))
+    return [(vector["id"], vector["key"]) for vector in data["vectors"]]
+
+
+@pytest.mark.parametrize(("raw", "key"), _shared_vectors())
+def test_normalize_model_matches_the_vectors_shared_with_the_web(raw: str, key: str) -> None:
+    assert normalize_model(raw) == key
 
 
 def test_longest_prefix_wins() -> None:

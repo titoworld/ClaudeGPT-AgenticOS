@@ -9,9 +9,16 @@ from fastapi.responses import JSONResponse
 from agentic_os.server.catalog import pricing_to_wire
 from agentic_os.server.deps import StateDep, read_json, require_session
 from agentic_os.server.status import status_to_wire
-from agentic_os.storage import MAX_LIST_LIMIT, RuntimeSettings
+from agentic_os.storage import MAX_LIST_LIMIT, RuntimeSettings, SettingsConflictError
 
 NOT_FOUND_DETAIL: Final = "La conversa no existeix."
+REVISION_REQUIRED_DETAIL: Final = (
+    "Cal indicar «revision» (la revisió de la configuració en què es basa el canvi). "
+    "Torna a carregar la pàgina."
+)
+SETTINGS_CONFLICT_DETAIL: Final = (
+    "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar."
+)
 
 public_router = APIRouter(prefix="/api")
 """Routes that never require a session."""
@@ -60,15 +67,27 @@ async def get_settings(state: StateDep) -> JSONResponse:
 
 @router.put("/settings")
 async def put_settings(request: Request, state: StateDep) -> JSONResponse:
+    """Save the settings if they are based on the stored revision (ADR 0006): 422 if
+    the body, or its ``revision``, is not valid; 409 with the stored settings if
+    another tab or device saved since (the comparison and the write are atomic)."""
+    body = await read_json(request)
+    if isinstance(body, dict) and "revision" not in body:
+        raise HTTPException(status_code=422, detail=REVISION_REQUIRED_DETAIL)
     try:
-        settings = RuntimeSettings.from_wire(await read_json(request))
+        settings = RuntimeSettings.from_wire(body)
     except (ValueError, OverflowError) as exc:  # OverflowError: a backstop for huge ints
         detail = str(exc) if isinstance(exc, ValueError) else "Hi ha un nombre massa gran."
         raise HTTPException(status_code=422, detail=detail) from None
-    await state.store.put_runtime_settings(settings)
-    if settings.fx.mode == "auto":
+    try:
+        stored = await state.store.put_runtime_settings(settings, base_revision=settings.revision)
+    except SettingsConflictError as exc:
+        return JSONResponse(
+            {"detail": SETTINGS_CONFLICT_DETAIL, "settings": exc.current.to_wire()},
+            status_code=409,
+        )
+    if stored.fx.mode == "auto":
         state.fx.poke()  # fetch the ECB rate now if there is no recent one
-    return JSONResponse(settings.to_wire())
+    return JSONResponse(stored.to_wire())
 
 
 @router.get("/conversations")

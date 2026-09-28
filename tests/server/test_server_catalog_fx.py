@@ -238,17 +238,22 @@ def test_pricing_merges_the_owner_prices() -> None:
     assert "claude-opus-5" not in by_model
     assert by_model["Claude-Opus-5-20260101"] == {
         "model": "Claude-Opus-5-20260101",
+        "key": "claude-opus-5",
         **custom.to_wire(),
         "source": "custom",
+        "default": DEFAULT_PRICES["claude-opus-5"].to_wire(),
     }
     assert by_model["gpt-7-nova"]["source"] == "custom"
+    assert by_model["gpt-7-nova"]["default"] is None
     assert by_model["gpt-6-luna"] == {
         "model": "gpt-6-luna",
+        "key": "gpt-6-luna",
         "input": 0.10,
         "output": 0.50,
         "cache_read": 0.01,
         "cache_write": 0.125,
         "source": "default",
+        "default": None,
     }
 
 
@@ -266,12 +271,24 @@ def test_pricing_lists_exactly_the_effective_price_table() -> None:
     prices = pricing_to_wire(ECB, overrides)["prices"]
     assert isinstance(prices, list)
     table = price_table(overrides)
-    assert prices == [
-        {"model": entry.model, **entry.price.to_wire(), "source": entry.source}
-        for entry in sorted(table.values(), key=lambda entry: entry.model)
+    assert prices == [  # no owner price here replaces a default one
+        {
+            "model": entry.model,
+            "key": key,
+            **entry.price.to_wire(),
+            "source": entry.source,
+            "default": None,
+        }
+        for key, entry in sorted(table.items(), key=lambda item: item[1].model)
     ]
     assert len(prices) == len(DEFAULT_PRICES) + 1
-    assert {"model": "gpt-7-nova", **last.to_wire(), "source": "custom"} in prices
+    assert {
+        "model": "gpt-7-nova",
+        "key": "gpt-7-nova",
+        **last.to_wire(),
+        "source": "custom",
+        "default": None,
+    } in prices
     assert not [row for row in prices if row["model"] in ("openai/", "x/[1m]", "GPT-7-Nova")]
 
 

@@ -32,6 +32,14 @@ describe('normalizeSettings', () => {
     expect(s.budgets_eur).toEqual({ claude: null, chatgpt: null });
   });
 
+  it('keeps the revision, and gives 0 for a missing or invalid one', () => {
+    expect(normalizeSettings({ ...DEFAULT_SETTINGS, revision: 12 }).revision).toBe(12);
+    expect(normalizeSettings({ default_mode: 'solo' }).revision).toBe(0);
+    for (const revision of [-1, 1.5, Number.NaN, '3']) {
+      expect(normalizeSettings({ revision } as unknown as Partial<RuntimeSettings>).revision).toBe(0);
+    }
+  });
+
   it('deep-copies nested objects', () => {
     const src = valid();
     src.prices['x-1'] = { input: 1, output: 2, cache_read: 0.1, cache_write: 1.25 };

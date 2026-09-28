@@ -3,6 +3,7 @@ plus the persistence needed by the web layer and the security primitives."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import math
@@ -39,6 +40,7 @@ from agentic_os.storage.models import (
     as_utc,
     effective_fx,
     format_ts,
+    is_revision,
     parse_ts,
     utc_now,
 )
@@ -72,6 +74,16 @@ class ConversationNotFoundError(LookupError):
     def __init__(self, conversation_id: int) -> None:
         super().__init__(f"La conversa {conversation_id} no existeix.")
         self.conversation_id = conversation_id
+
+
+class SettingsConflictError(Exception):
+    """A save of the runtime settings based on a revision that is no longer the stored
+    one: another tab or device saved first. Nothing was written."""
+
+    def __init__(self, current: RuntimeSettings) -> None:
+        super().__init__(f"The runtime settings are at revision {current.revision}")
+        self.current = current
+        """The stored settings, as ``GET /api/settings`` returns them."""
 
 
 def _dump_json(value: object) -> str:
@@ -523,14 +535,32 @@ class SqliteStore:
     # ------------------------------------------------------------------
 
     async def get_runtime_settings(self) -> RuntimeSettings:
-        """Stored settings, or the defaults if never saved (or no longer valid).
-        Keys added by newer versions take their defaults on older stored values."""
+        """Stored settings with their revision, or the defaults if never saved (revision
+        0) or no longer valid (with the stored revision). Saved settings are always at
+        revision 1 or more, also the ones saved before revisions existed. Keys added by
+        newer versions take their defaults on older stored values."""
         async with self._db.transaction(write=False) as tx:
             return await _read_runtime_settings(tx)
 
-    async def put_runtime_settings(self, settings: RuntimeSettings) -> None:
+    async def put_runtime_settings(
+        self, settings: RuntimeSettings, *, base_revision: int | None = None
+    ) -> RuntimeSettings:
+        """Store ``settings`` as the next revision and return them as stored.
+
+        The stored revision is always the previous one plus 1 (``settings.revision`` is
+        ignored), so it only grows. With ``base_revision`` (``PUT /api/settings``) this
+        is a compare-and-swap: the read, the comparison and the write are one write
+        transaction (``BEGIN IMMEDIATE``, which also excludes other processes), and if
+        the stored revision is not ``base_revision`` nothing is written and
+        :class:`SettingsConflictError` carries the stored settings. Without it the write
+        is unconditional (tools and tests)."""
         async with self._db.transaction() as tx:
-            await _put_setting(tx, _RUNTIME_SETTINGS_KEY, settings.to_wire())
+            current = await _read_runtime_settings(tx)
+            if base_revision is not None and base_revision != current.revision:
+                raise SettingsConflictError(current)
+            stored = dataclasses.replace(settings, revision=current.revision + 1)
+            await _put_setting(tx, _RUNTIME_SETTINGS_KEY, stored.to_wire())
+        return stored
 
     # ------------------------------------------------------------------
     # Exchange rate
@@ -831,13 +861,11 @@ async def _put_setting(tx: Tx, key: str, value: JsonValue) -> None:
     )
 
 
-def _legacy_prices(stored: object) -> object:
+def _legacy_prices(stored: Mapping[str, object]) -> Mapping[str, object]:
     """``stored`` without the owner prices that older versions accepted and are now
     refused: ids that normalize to nothing (they were never applied) and repeated
     ids of one model (only the last one was applied, and it is the one kept). So the
     rest of the owner's settings survive the stricter validation."""
-    if not isinstance(stored, Mapping):
-        return stored
     prices = stored.get("prices")
     if not isinstance(prices, Mapping):
         return stored
@@ -862,11 +890,28 @@ async def _read_runtime_settings(tx: Tx) -> RuntimeSettings:
     stored = await _get_setting(tx, _RUNTIME_SETTINGS_KEY)
     if stored is None:
         return RuntimeSettings()
+    # Settings that were saved are at least at revision 1, so an edit of the built-in
+    # defaults (revision 0: settings never loaded) can never overwrite them. That covers
+    # settings saved before revisions existed (no "revision") and the ones only a hand
+    # edit can leave (not an object, or a revision that is not valid or is 0).
+    if not isinstance(stored, Mapping):
+        logger.warning("Stored runtime settings are invalid; using the defaults")
+        return RuntimeSettings(revision=1)
+    # The revision never goes back, not even when the rest no longer validates and
+    # loads as the defaults: an edit based on an older revision must never match it
+    # again.
+    value = stored.get("revision")
+    if is_revision(value) and value >= 1:
+        revision = value
+    else:
+        if value is not None:
+            logger.warning("The stored runtime settings have an invalid revision; using 1")
+        revision = 1
     try:
-        return RuntimeSettings.from_wire(_legacy_prices(stored))
+        return RuntimeSettings.from_wire({**_legacy_prices(stored), "revision": revision})
     except ValueError:
         logger.warning("Stored runtime settings are invalid; using the defaults")
-        return RuntimeSettings()
+        return RuntimeSettings(revision=revision)
 
 
 async def _read_ecb_rate(tx: Tx) -> StoredFxRate | None:
@@ -880,4 +925,10 @@ async def _read_ecb_rate(tx: Tx) -> StoredFxRate | None:
         return None
 
 
-__all__ = ["DEFAULT_TITLE", "MAX_LIST_LIMIT", "ConversationNotFoundError", "SqliteStore"]
+__all__ = [
+    "DEFAULT_TITLE",
+    "MAX_LIST_LIMIT",
+    "ConversationNotFoundError",
+    "SettingsConflictError",
+    "SqliteStore",
+]

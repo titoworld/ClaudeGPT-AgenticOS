@@ -27,6 +27,7 @@ from agentic_os.storage.store import (
     DEFAULT_TITLE,
     MAX_LIST_LIMIT,
     ConversationNotFoundError,
+    SettingsConflictError,
     SqliteStore,
 )
 
@@ -44,6 +45,7 @@ __all__ = [
     "RuntimeSettings",
     "SchemaVersionError",
     "SessionRecord",
+    "SettingsConflictError",
     "SqliteStore",
     "Stats",
     "StoredFxRate",

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { app } from '../lib/app.svelte';
+  import { app, SettingsConflictError } from '../lib/app.svelte';
   import { errorMessage } from '../lib/conversations.svelte';
   import { fxText } from '../lib/costs';
   import { lightDismiss, syncDialog } from '../lib/dialog';
@@ -22,10 +22,18 @@
   const QUALITIES: SceneQuality[] = ['high', 'low', 'off'];
 
   let dialog: HTMLDialogElement | undefined = $state();
+  /**
+   * The form shows the settings fetched when the drawer opened: until they arrive it
+   * cannot be edited or saved, so a save never stands in the built-in defaults or an
+   * older copy for what is stored (audit A11, N5).
+   */
+  let formState: 'loading' | 'ready' | 'error' = $state('loading');
   let form: RuntimeSettings = $state(copy(app.settings));
   let submitted = $state(false);
   let saving = $state(false);
-  let result: { ok: boolean; text: string } | null = $state(null);
+  let result: { kind: 'ok' | 'warn' | 'error'; text: string } | null = $state(null);
+  /** Bumped at every opening: answers meant for an earlier one leave the form alone. */
+  let opening = 0;
   /** Model pickers with a custom id that is not valid yet. */
   let pickerInvalid: Record<string, boolean> = $state(noInvalidPickers());
 
@@ -57,31 +65,69 @@
 
   $effect(() => syncDialog(dialog, app.settingsOpen));
 
-  // Fresh copy of the server settings every time the drawer opens.
+  // Every opening fetches the settings (and prices) again and builds the form from
+  // them, so a change saved in another tab or device since is not undone (N5).
   $effect(() => {
     if (!app.settingsOpen) return;
-    form = copy(untrack(() => app.settings));
-    submitted = false;
-    result = null;
-    pickerInvalid = noInvalidPickers();
     // Untracked: a catalog refresh from inside the drawer must not reset the form.
     untrack(() => {
+      void reload();
       void app.loadModels();
       void app.loadPricing();
     });
   });
 
+  // A load that works while the drawer shows the error (an automatic retry, the
+  // composer's button) fills the form.
+  $effect(() => {
+    const settings = app.settings;
+    untrack(() => {
+      if (app.settingsOpen && formState === 'error' && app.settingsStatus === 'ready') fill(settings);
+    });
+  });
+
+  async function reload(): Promise<void> {
+    const ticket = ++opening;
+    formState = 'loading';
+    result = null;
+    const loaded = await app.loadSettings();
+    if (ticket !== opening || !app.settingsOpen) return;
+    if (loaded) fill(app.settings);
+    else formState = 'error';
+  }
+
+  /** Shows `settings` (the stored ones) in the form, ready to edit. */
+  function fill(settings: RuntimeSettings): void {
+    form = copy(settings);
+    submitted = false;
+    pickerInvalid = noInvalidPickers();
+    formState = 'ready';
+  }
+
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    if (formState !== 'ready' || saving) return;
     submitted = true;
     result = null;
     if (hasErrors) return;
     saving = true;
+    const ticket = opening;
     try {
-      await app.saveSettings(cleanSettings($state.snapshot(form)));
-      result = { ok: true, text: 'Configuració desada.' };
+      // The form carries the revision it was loaded with: the server refuses it (409)
+      // if the settings changed since.
+      const saved = await app.saveSettings(cleanSettings($state.snapshot(form)));
+      if (ticket !== opening) return;
+      fill(saved); // with the new revision, for the next save
+      result = { kind: 'ok', text: 'Configuració desada.' };
     } catch (err) {
-      result = { ok: false, text: errorMessage(err, "No s'ha pogut desar la configuració.") };
+      if (ticket !== opening) return;
+      if (err instanceof SettingsConflictError) {
+        // Show what is stored now, to review and save again, instead of overwriting it.
+        fill(app.settings);
+        result = { kind: 'warn', text: err.message };
+      } else {
+        result = { kind: 'error', text: errorMessage(err, "No s'ha pogut desar la configuració.") };
+      }
     } finally {
       saving = false;
     }
@@ -104,247 +150,262 @@
 
     <form class="form" onsubmit={save} novalidate>
       <div class="body">
-        <section>
-          <h3>Per defecte</h3>
-          <fieldset class="field">
-            <legend class="field-label">Mode</legend>
-            <div class="segmented">
-              {#each MODES as mode (mode)}
-                <label>
-                  <input type="radio" name="{uid}-mode" value={mode} bind:group={form.default_mode} />
-                  <Icon name="mode-{mode}" size={15} />{MODE_LABEL[mode]}
-                </label>
-              {/each}
-            </div>
-          </fieldset>
-          <fieldset class="field">
-            <legend class="field-label">Agent del mode Solo</legend>
-            <div class="segmented">
-              {#each AGENTS as agent (agent)}
-                <label>
-                  <input type="radio" name="{uid}-target" value={agent} bind:group={form.default_target} />
-                  <AgentIcon {agent} size={15} />{AGENT_LABEL[agent]}
-                </label>
-              {/each}
-            </div>
-          </fieldset>
-          <label class="toggle">
-            <input type="checkbox" class="switch" bind:checked={form.use_cache} />
-            <span>
-              <strong>Memòria cau de respostes</strong>
-              <small class="hint">Una pregunta idèntica en el mateix context es respon sense cridar cap model.</small>
-            </span>
-          </label>
-        </section>
-
-        <section>
-          <h3>Consell</h3>
-          <label class="field">
-            <span>Rondes de revisió ({LIMITS.rounds.min}–{LIMITS.rounds.max})</span>
-            <input
-              class="input"
-              type="number"
-              inputmode="numeric"
-              min={LIMITS.rounds.min}
-              max={LIMITS.rounds.max}
-              step="1"
-              bind:value={form.debate.rounds}
-              aria-invalid={!!shownErrors.rounds}
-              aria-describedby="{uid}-rounds-err" />
-            <small class="error-text" id="{uid}-rounds-err">{shownErrors.rounds ?? ''}</small>
-          </label>
-          <label class="field">
-            <span>Llindar de consens ({LIMITS.consensus_threshold.min}–{LIMITS.consensus_threshold.max})</span>
-            <input
-              class="input"
-              type="number"
-              inputmode="numeric"
-              min={LIMITS.consensus_threshold.min}
-              max={LIMITS.consensus_threshold.max}
-              step="1"
-              bind:value={form.debate.consensus_threshold}
-              aria-invalid={!!shownErrors.consensus_threshold}
-              aria-describedby="{uid}-thr-err {uid}-thr-hint" />
-            <small class="hint" id="{uid}-thr-hint">Si tots dos agents arriben a aquest acord, s'aturen les rondes.</small>
-            <small class="error-text" id="{uid}-thr-err">{shownErrors.consensus_threshold ?? ''}</small>
-          </label>
-          <fieldset class="field">
-            <legend class="field-label">Sintetitzador</legend>
-            <div class="segmented">
-              {#each AGENTS as agent (agent)}
-                <label>
-                  <input type="radio" name="{uid}-synth" value={agent} bind:group={form.debate.synthesizer} />
-                  <AgentIcon {agent} size={15} />{AGENT_LABEL[agent]}
-                </label>
-              {/each}
-            </div>
-          </fieldset>
-        </section>
-
-        <section>
-          <h3>Historial</h3>
-          <label class="field">
-            <span>Compacta l'historial a partir de (tokens)</span>
-            <input
-              class="input"
-              type="number"
-              inputmode="numeric"
-              min={LIMITS.compaction_threshold_tokens.min}
-              max={LIMITS.compaction_threshold_tokens.max}
-              step="500"
-              bind:value={form.compaction_threshold_tokens}
-              aria-invalid={!!shownErrors.compaction_threshold_tokens}
-              aria-describedby="{uid}-comp-err {uid}-comp-hint" />
-            <small class="hint" id="{uid}-comp-hint">
-              Entre {LIMITS.compaction_threshold_tokens.min.toLocaleString('ca-ES')} i {LIMITS.compaction_threshold_tokens.max.toLocaleString(
-                'ca-ES',
-              )}. Els missatges antics es resumeixen per gastar menys.
-            </small>
-            <small class="error-text" id="{uid}-comp-err">{shownErrors.compaction_threshold_tokens ?? ''}</small>
-          </label>
-        </section>
-
-        <section>
-          <div class="section-head">
-            <h3>Models</h3>
-            <button
-              type="button"
-              class="link-btn"
-              onclick={() => void app.loadModels(true)}
-              disabled={app.catalogLoading}>
-              <Icon name="refresh" size={13} />{app.catalogLoading ? 'Actualitzant…' : 'Actualitza la llista'}
-            </button>
+        {#if formState !== 'ready'}
+          <div class="load-state" class:error={formState === 'error'} role={formState === 'error' ? 'alert' : 'status'}>
+            {#if formState === 'loading'}
+              <span class="spinner" aria-hidden="true"></span>
+              <p>Carregant la configuració…</p>
+            {:else}
+              <Icon name="alert" size={16} />
+              <p><strong>No s'ha pogut carregar la configuració.</strong> {app.settingsError ?? ''}</p>
+              <button type="button" class="btn" disabled={app.settingsLoading} onclick={() => void reload()}>
+                <Icon name="refresh" size={14} />{app.settingsLoading ? 'Provant…' : 'Torna-ho a provar'}
+              </button>
+            {/if}
           </div>
-          <p class="hint">
-            La llista es consulta al proveïdor. Un model nou que encara no hi surti es pot escriure a
-            «Personalitzat…». El principal respon les preguntes; el ràpid fa les tasques internes, com resumir l'historial.
-          </p>
-          {#each AGENTS as agent (agent)}
-            {@const models = app.catalog?.[agent] ?? null}
-            {@const mode = modeOf(agent)}
-            <div class="agent-block">
-              <div class="agent-head">
-                <AgentLabel {agent} size={15} />
-                {#if mode}<span class="chip">{PROVIDER_MODE_LABEL[mode]}</span>{/if}
-                {#if models && !models.live}
-                  <span class="chip warn" title="No s'ha pogut consultar el proveïdor.">llista de reserva</span>
-                {/if}
+        {:else}
+          <section>
+            <h3>Per defecte</h3>
+            <fieldset class="field">
+              <legend class="field-label">Mode</legend>
+              <div class="segmented">
+                {#each MODES as mode (mode)}
+                  <label>
+                    <input type="radio" name="{uid}-mode" value={mode} bind:group={form.default_mode} />
+                    <Icon name="mode-{mode}" size={15} />{MODE_LABEL[mode]}
+                  </label>
+                {/each}
               </div>
-              <div class="pair">
-                <ModelPicker
-                  inline
-                  label="Principal"
-                  value={form.models[agent]}
-                  onchange={(v) => (form.models[agent] = v)}
-                  {models}
-                  defaultModel={providerDefault(agent)}
-                  bind:invalid={pickerInvalid[`models.${agent}`]}
-                  showErrors={submitted} />
-                <ModelPicker
-                  inline
-                  label="Ràpid"
-                  value={form.fast_models[agent]}
-                  onchange={(v) => (form.fast_models[agent] = v)}
-                  {models}
-                  defaultModel={providerFastDefault(agent)}
-                  bind:invalid={pickerInvalid[`fast_models.${agent}`]}
-                  showErrors={submitted} />
+            </fieldset>
+            <fieldset class="field">
+              <legend class="field-label">Agent del mode Solo</legend>
+              <div class="segmented">
+                {#each AGENTS as agent (agent)}
+                  <label>
+                    <input type="radio" name="{uid}-target" value={agent} bind:group={form.default_target} />
+                    <AgentIcon {agent} size={15} />{AGENT_LABEL[agent]}
+                  </label>
+                {/each}
               </div>
+            </fieldset>
+            <label class="toggle">
+              <input type="checkbox" class="switch" bind:checked={form.use_cache} />
+              <span>
+                <strong>Memòria cau de respostes</strong>
+                <small class="hint">Una pregunta idèntica en el mateix context es respon sense cridar cap model.</small>
+              </span>
+            </label>
+          </section>
+
+          <section>
+            <h3>Consell</h3>
+            <label class="field">
+              <span>Rondes de revisió ({LIMITS.rounds.min}–{LIMITS.rounds.max})</span>
+              <input
+                class="input"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.rounds.min}
+                max={LIMITS.rounds.max}
+                step="1"
+                bind:value={form.debate.rounds}
+                aria-invalid={!!shownErrors.rounds}
+                aria-describedby="{uid}-rounds-err" />
+              <small class="error-text" id="{uid}-rounds-err">{shownErrors.rounds ?? ''}</small>
+            </label>
+            <label class="field">
+              <span>Llindar de consens ({LIMITS.consensus_threshold.min}–{LIMITS.consensus_threshold.max})</span>
+              <input
+                class="input"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.consensus_threshold.min}
+                max={LIMITS.consensus_threshold.max}
+                step="1"
+                bind:value={form.debate.consensus_threshold}
+                aria-invalid={!!shownErrors.consensus_threshold}
+                aria-describedby="{uid}-thr-err {uid}-thr-hint" />
+              <small class="hint" id="{uid}-thr-hint">Si tots dos agents arriben a aquest acord, s'aturen les rondes.</small>
+              <small class="error-text" id="{uid}-thr-err">{shownErrors.consensus_threshold ?? ''}</small>
+            </label>
+            <fieldset class="field">
+              <legend class="field-label">Sintetitzador</legend>
+              <div class="segmented">
+                {#each AGENTS as agent (agent)}
+                  <label>
+                    <input type="radio" name="{uid}-synth" value={agent} bind:group={form.debate.synthesizer} />
+                    <AgentIcon {agent} size={15} />{AGENT_LABEL[agent]}
+                  </label>
+                {/each}
+              </div>
+            </fieldset>
+          </section>
+
+          <section>
+            <h3>Historial</h3>
+            <label class="field">
+              <span>Compacta l'historial a partir de (tokens)</span>
+              <input
+                class="input"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.compaction_threshold_tokens.min}
+                max={LIMITS.compaction_threshold_tokens.max}
+                step="500"
+                bind:value={form.compaction_threshold_tokens}
+                aria-invalid={!!shownErrors.compaction_threshold_tokens}
+                aria-describedby="{uid}-comp-err {uid}-comp-hint" />
+              <small class="hint" id="{uid}-comp-hint">
+                Entre {LIMITS.compaction_threshold_tokens.min.toLocaleString('ca-ES')} i {LIMITS.compaction_threshold_tokens.max.toLocaleString(
+                  'ca-ES',
+                )}. Els missatges antics es resumeixen per gastar menys.
+              </small>
+              <small class="error-text" id="{uid}-comp-err">{shownErrors.compaction_threshold_tokens ?? ''}</small>
+            </label>
+          </section>
+
+          <section>
+            <div class="section-head">
+              <h3>Models</h3>
+              <button
+                type="button"
+                class="link-btn"
+                onclick={() => void app.loadModels(true)}
+                disabled={app.catalogLoading}>
+                <Icon name="refresh" size={13} />{app.catalogLoading ? 'Actualitzant…' : 'Actualitza la llista'}
+              </button>
             </div>
-          {/each}
-          {#if app.catalogError}
-            <p class="error-text" role="status">{app.catalogError}</p>
-          {/if}
-        </section>
-
-        <section>
-          <h3>Costos i moneda</h3>
-          <fieldset class="field">
-            <legend class="field-label">Tipus de canvi de dòlars a euros</legend>
-            <div class="segmented">
-              <label>
-                <input type="radio" name="{uid}-fxmode" value="auto" bind:group={form.fx.mode} />Automàtic (BCE)
-              </label>
-              <label>
-                <input type="radio" name="{uid}-fxmode" value="manual" bind:group={form.fx.mode} />Manual
-              </label>
-            </div>
-          </fieldset>
-          <label class="field">
-            <span>{form.fx.mode === 'auto' ? 'Tipus de reserva' : 'Tipus de canvi'} (€ per 1 $)</span>
-            <input
-              class="input narrow"
-              type="number"
-              inputmode="decimal"
-              min={LIMITS.eur_per_usd.min}
-              max={LIMITS.eur_per_usd.max}
-              step="0.0001"
-              bind:value={form.fx.eur_per_usd}
-              aria-invalid={!!shownErrors.eur_per_usd}
-              aria-describedby="{uid}-fx-hint {uid}-fx-err" />
-            <small class="hint" id="{uid}-fx-hint">
-              {form.fx.mode === 'auto'
-                ? "Cada dia es fa servir el tipus de referència del Banc Central Europeu; aquest només s'aplica si no es pot obtenir."
-                : 'Tots els imports en euros es calculen amb aquest tipus.'}
-            </small>
-            <small class="error-text" id="{uid}-fx-err">{shownErrors.eur_per_usd ?? ''}</small>
-          </label>
-          {#if currentFx}
-            <p class="note"><Icon name="info" size={15} /><span>Ara: {fxText(currentFx)}</span></p>
-          {/if}
-        </section>
-
-        <section>
-          <h3>Preus</h3>
-          <p class="hint">
-            Dòlars per milió de tokens, com els publiquen els proveïdors. En mode subscripció serveixen per
-            calcular el valor equivalent. Edita un preu per crear-ne un de propi.
-          </p>
-          <PriceTable
-            bind:prices={form.prices}
-            pricing={app.pricing}
-            errors={shownErrors}
-            loadError={app.pricing ? null : app.pricingError} />
-        </section>
-
-        <section>
-          <h3>Pressupostos i plans</h3>
-          <p class="hint">Imports mensuals en euros (p. ex. 50,5). Deixa-ho en blanc si no en tens.</p>
-          <div class="money-grid">
-            <span></span>
-            <span class="col-head" id="{uid}-budget-head">Pressupost d'API</span>
-            <span class="col-head" id="{uid}-plan-head">Preu de la subscripció</span>
+            <p class="hint">
+              La llista es consulta al proveïdor. Un model nou que encara no hi surti es pot escriure a
+              «Personalitzat…». El principal respon les preguntes; el ràpid fa les tasques internes, com resumir l'historial.
+            </p>
             {#each AGENTS as agent (agent)}
-              {@const budgetErr = shownErrors[`budgets_eur.${agent}`]}
-              {@const planErr = shownErrors[`plans_eur.${agent}`]}
-              <AgentLabel {agent} size={15} />
-              <div class="money">
-                <AmountInput
-                  class="input"
-                  placeholder="—"
-                  bind:value={form.budgets_eur[agent]}
-                  aria-label="Pressupost mensual d'API de {AGENT_LABEL[agent]}, en euros"
-                  aria-invalid={!!budgetErr} />
-                <span class="unit" aria-hidden="true">€</span>
-                {#if budgetErr}<small class="error-text">{budgetErr}</small>{/if}
-              </div>
-              <div class="money">
-                <AmountInput
-                  class="input"
-                  placeholder="—"
-                  bind:value={form.plans_eur[agent]}
-                  aria-label="Preu mensual de la subscripció de {AGENT_LABEL[agent]}, en euros"
-                  aria-invalid={!!planErr} />
-                <span class="unit" aria-hidden="true">€</span>
-                {#if planErr}<small class="error-text">{planErr}</small>{/if}
+              {@const models = app.catalog?.[agent] ?? null}
+              {@const mode = modeOf(agent)}
+              <div class="agent-block">
+                <div class="agent-head">
+                  <AgentLabel {agent} size={15} />
+                  {#if mode}<span class="chip">{PROVIDER_MODE_LABEL[mode]}</span>{/if}
+                  {#if models && !models.live}
+                    <span class="chip warn" title="No s'ha pogut consultar el proveïdor.">llista de reserva</span>
+                  {/if}
+                </div>
+                <div class="pair">
+                  <ModelPicker
+                    inline
+                    label="Principal"
+                    value={form.models[agent]}
+                    onchange={(v) => (form.models[agent] = v)}
+                    {models}
+                    defaultModel={providerDefault(agent)}
+                    bind:invalid={pickerInvalid[`models.${agent}`]}
+                    showErrors={submitted} />
+                  <ModelPicker
+                    inline
+                    label="Ràpid"
+                    value={form.fast_models[agent]}
+                    onchange={(v) => (form.fast_models[agent] = v)}
+                    {models}
+                    defaultModel={providerFastDefault(agent)}
+                    bind:invalid={pickerInvalid[`fast_models.${agent}`]}
+                    showErrors={submitted} />
+                </div>
               </div>
             {/each}
-          </div>
-          <p class="hint">
-            El pressupost és per a l'ús per API; l'indicador de la barra lateral avisa a partir del 80&nbsp;%.
-            El preu del pla serveix per comparar-lo amb el valor aprofitat en mode subscripció.
-          </p>
-        </section>
+            {#if app.catalogError}
+              <p class="error-text" role="status">{app.catalogError}</p>
+            {/if}
+          </section>
+
+          <section>
+            <h3>Costos i moneda</h3>
+            <fieldset class="field">
+              <legend class="field-label">Tipus de canvi de dòlars a euros</legend>
+              <div class="segmented">
+                <label>
+                  <input type="radio" name="{uid}-fxmode" value="auto" bind:group={form.fx.mode} />Automàtic (BCE)
+                </label>
+                <label>
+                  <input type="radio" name="{uid}-fxmode" value="manual" bind:group={form.fx.mode} />Manual
+                </label>
+              </div>
+            </fieldset>
+            <label class="field">
+              <span>{form.fx.mode === 'auto' ? 'Tipus de reserva' : 'Tipus de canvi'} (€ per 1 $)</span>
+              <input
+                class="input narrow"
+                type="number"
+                inputmode="decimal"
+                min={LIMITS.eur_per_usd.min}
+                max={LIMITS.eur_per_usd.max}
+                step="0.0001"
+                bind:value={form.fx.eur_per_usd}
+                aria-invalid={!!shownErrors.eur_per_usd}
+                aria-describedby="{uid}-fx-hint {uid}-fx-err" />
+              <small class="hint" id="{uid}-fx-hint">
+                {form.fx.mode === 'auto'
+                  ? "Cada dia es fa servir el tipus de referència del Banc Central Europeu; aquest només s'aplica si no es pot obtenir."
+                  : 'Tots els imports en euros es calculen amb aquest tipus.'}
+              </small>
+              <small class="error-text" id="{uid}-fx-err">{shownErrors.eur_per_usd ?? ''}</small>
+            </label>
+            {#if currentFx}
+              <p class="note"><Icon name="info" size={15} /><span>Ara: {fxText(currentFx)}</span></p>
+            {/if}
+          </section>
+
+          <section>
+            <h3>Preus</h3>
+            <p class="hint">
+              Dòlars per milió de tokens, com els publiquen els proveïdors. En mode subscripció serveixen per
+              calcular el valor equivalent. Edita un preu per crear-ne un de propi.
+            </p>
+            <PriceTable
+              bind:prices={form.prices}
+              pricing={app.pricing}
+              errors={shownErrors}
+              loadError={app.pricing ? null : app.pricingError} />
+          </section>
+
+          <section>
+            <h3>Pressupostos i plans</h3>
+            <p class="hint">Imports mensuals en euros (p. ex. 50,5). Deixa-ho en blanc si no en tens.</p>
+            <div class="money-grid">
+              <span></span>
+              <span class="col-head" id="{uid}-budget-head">Pressupost d'API</span>
+              <span class="col-head" id="{uid}-plan-head">Preu de la subscripció</span>
+              {#each AGENTS as agent (agent)}
+                {@const budgetErr = shownErrors[`budgets_eur.${agent}`]}
+                {@const planErr = shownErrors[`plans_eur.${agent}`]}
+                <AgentLabel {agent} size={15} />
+                <div class="money">
+                  <AmountInput
+                    class="input"
+                    placeholder="—"
+                    bind:value={form.budgets_eur[agent]}
+                    aria-label="Pressupost mensual d'API de {AGENT_LABEL[agent]}, en euros"
+                    aria-invalid={!!budgetErr} />
+                  <span class="unit" aria-hidden="true">€</span>
+                  {#if budgetErr}<small class="error-text">{budgetErr}</small>{/if}
+                </div>
+                <div class="money">
+                  <AmountInput
+                    class="input"
+                    placeholder="—"
+                    bind:value={form.plans_eur[agent]}
+                    aria-label="Preu mensual de la subscripció de {AGENT_LABEL[agent]}, en euros"
+                    aria-invalid={!!planErr} />
+                  <span class="unit" aria-hidden="true">€</span>
+                  {#if planErr}<small class="error-text">{planErr}</small>{/if}
+                </div>
+              {/each}
+            </div>
+            <p class="hint">
+              El pressupost és per a l'ús per API; l'indicador de la barra lateral avisa a partir del 80&nbsp;%.
+              El preu del pla serveix per comparar-lo amb el valor aprofitat en mode subscripció.
+            </p>
+          </section>
+        {/if}
 
         <section class="local">
           <h3>Efectes visuals</h3>
@@ -378,13 +439,13 @@
 
       <footer class="save-row">
         {#if result}
-          <p class="result" class:ok={result.ok} role="status">
-            <Icon name={result.ok ? 'check' : 'alert'} size={15} />{result.text}
+          <p class="result {result.kind}" role="status">
+            <Icon name={result.kind === 'ok' ? 'check' : 'alert'} size={15} />{result.text}
           </p>
-        {:else if submitted && hasErrors}
-          <p class="result" role="status"><Icon name="alert" size={15} />Revisa els camps marcats.</p>
+        {:else if formState === 'ready' && submitted && hasErrors}
+          <p class="result error" role="status"><Icon name="alert" size={15} />Revisa els camps marcats.</p>
         {/if}
-        <button type="submit" class="btn primary" disabled={saving}>
+        <button type="submit" class="btn primary" disabled={saving || formState !== 'ready'}>
           {saving ? 'Desant…' : 'Desa la configuració'}
         </button>
       </footer>
@@ -502,8 +563,58 @@
     color: #ffb3ba;
   }
 
+  .result :global(.icon) {
+    flex: none;
+  }
+
   .result.ok {
     color: #9ff0c9;
+  }
+
+  .result.warn {
+    color: var(--warning);
+  }
+
+  .load-state {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .load-state.error {
+    flex-wrap: wrap;
+    border-color: rgb(255 93 108 / 0.45);
+    background: rgb(255 93 108 / 0.08);
+  }
+
+  .load-state p {
+    flex: 1;
+    min-width: 12rem;
+  }
+
+  .load-state strong {
+    color: #ffc9ce;
+    font-weight: 600;
+  }
+
+  .load-state.error > :global(.icon) {
+    flex: none;
+    color: var(--critical);
+  }
+
+  .spinner {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid rgb(255 255 255 / 0.15);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
   }
 
   .section-head {

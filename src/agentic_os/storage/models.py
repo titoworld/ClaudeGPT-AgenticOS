@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Final, Literal
+from typing import Final, Literal, TypeGuard
 
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
@@ -94,6 +94,17 @@ def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"«{name}» ha de ser un booleà (true o false).")
     return value
+
+
+def is_revision(value: object) -> TypeGuard[int]:
+    """A revision of the settings: an integer from 0 (a ``bool`` is not one)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _revision(value: object) -> int:
+    if is_revision(value):
+        return value
+    raise ValueError("«revision» ha de ser un enter igual o més gran que 0.")
 
 
 def _format_number(value: float) -> str:
@@ -272,8 +283,13 @@ class RuntimeSettings:
     """Monthly budget of the api-mode usage."""
     plans_eur: Mapping[AgentName, float | None] = field(default_factory=_no_amounts)
     """Monthly price of the subscription (cli mode)."""
+    revision: int = 0
+    """How many times the settings have been saved: 0 until the first save, and 1 for
+    settings saved before revisions existed. The store sets it; in a ``PUT
+    /api/settings`` it is the revision the edit is based on (ADR 0006)."""
 
     def __post_init__(self) -> None:
+        _revision(self.revision)
         _mode(self.default_mode, "default_mode")
         _agent(self.default_target, "default_target")
         if not isinstance(self.debate, DebateOptions):
@@ -308,10 +324,13 @@ class RuntimeSettings:
 
     @classmethod
     def from_wire(cls, data: object) -> RuntimeSettings:
-        """Build from decoded JSON. Missing keys take their defaults; unknown keys are
-        ignored. Raises :class:`ValueError` (Catalan message) on invalid values."""
+        """Build from decoded JSON. Missing keys take their defaults (``revision``: 0;
+        the store reads settings saved before revisions existed as revision 1); unknown
+        keys are ignored. Raises :class:`ValueError` (Catalan message) on invalid
+        values, the revision first."""
         if not isinstance(data, Mapping):
             raise ValueError("La configuració ha de ser un objecte JSON.")
+        revision = _revision(data.get("revision", 0))
         defaults = cls()
         debate_raw = data.get("debate", {})
         if not isinstance(debate_raw, Mapping):
@@ -347,6 +366,7 @@ class RuntimeSettings:
             fx=FxSettings.from_wire(data.get("fx", {})),
             budgets_eur=_agent_map(data.get("budgets_eur", {}), "budgets_eur", _optional_amount),
             plans_eur=_agent_map(data.get("plans_eur", {}), "plans_eur", _optional_amount),
+            revision=revision,
         )
 
     def to_wire(self) -> Wire:
@@ -354,6 +374,7 @@ class RuntimeSettings:
         for model in sorted(self.prices):
             prices[model] = {key: value for key, value in self.prices[model].to_wire().items()}
         return {
+            "revision": self.revision,
             "default_mode": self.default_mode,
             "default_target": self.default_target,
             "debate": {

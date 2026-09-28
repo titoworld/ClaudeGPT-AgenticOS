@@ -22,8 +22,10 @@
   const c = app.composer;
   const running = $derived(!!app.runningTurn);
   const connected = $derived(app.conn.status === 'open');
+  /** A turn only starts with the owner's saved settings loaded (audit A11). */
+  const settingsReady = $derived(app.settingsStatus === 'ready');
   const tokens = $derived(estimateTokens(c.draft.trim()));
-  const canSubmit = $derived(running || (connected && c.draft.trim().length > 0));
+  const canSubmit = $derived(running || (connected && settingsReady && c.draft.trim().length > 0));
   const supportsFieldSizing = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
 
   function autosize(): void {
@@ -71,6 +73,19 @@
     }
   }
 </script>
+
+{#if app.settingsStatus === 'error'}
+  <div class="settings-error glass" role="alert">
+    <Icon name="alert" size={16} />
+    <p>
+      <strong>No s'ha pogut carregar la configuració.</strong>
+      {app.settingsError ?? ''} Mentre no es carregui no es pot enviar cap pregunta; es torna a provar automàticament.
+    </p>
+    <button type="button" class="btn" disabled={app.settingsLoading} onclick={() => void app.loadSettings()}>
+      <Icon name="refresh" size={14} />{app.settingsLoading ? 'Provant…' : 'Torna-ho a provar'}
+    </button>
+  </div>
+{/if}
 
 <form
   class="composer glass"
@@ -139,9 +154,13 @@
     </div>
 
     <div class="actions">
-      <span class="kbd-hint" class:idle={connected && !c.draft.trim()} id="{uid}-hint">
+      <span class="kbd-hint" class:idle={connected && settingsReady && !c.draft.trim()} id="{uid}-hint">
         {#if !connected}
           Sense connexió
+        {:else if app.settingsStatus === 'loading'}
+          Carregant la configuració…
+        {:else if !settingsReady}
+          Sense configuració
         {:else if c.draft.trim()}
           ≈ {formatK(tokens)} tokens
         {:else}
@@ -155,7 +174,13 @@
         class:stop={running}
         disabled={!canSubmit}
         aria-label={running ? 'Atura el torn (Esc)' : 'Envia'}
-        title={running ? 'Atura (Esc)' : connected ? 'Envia (Enter)' : 'Sense connexió'}>
+        title={running
+          ? 'Atura (Esc)'
+          : !connected
+            ? 'Sense connexió'
+            : settingsReady
+              ? 'Envia (Enter)'
+              : 'Cal la configuració desada per enviar'}>
         <Icon name={running ? 'stop' : 'send'} size={18} />
       </button>
     </div>
@@ -292,6 +317,38 @@
     align-items: center;
     gap: 0.6rem;
     flex: none;
+  }
+
+  .settings-error {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.5rem;
+    padding: 0.55rem 0.6rem 0.55rem 0.85rem;
+    border-radius: var(--radius-md);
+    border-color: rgb(255 93 108 / 0.45);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .settings-error > :global(.icon) {
+    flex: none;
+    color: var(--critical);
+  }
+
+  .settings-error p {
+    flex: 1;
+  }
+
+  .settings-error strong {
+    color: #ffc9ce;
+    font-weight: 600;
+  }
+
+  .settings-error .btn {
+    flex: none;
+    min-height: 2rem;
+    padding: 0.3rem 0.7rem;
   }
 
   .kbd-hint {

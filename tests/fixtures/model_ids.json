@@ -1,0 +1,141 @@
+{
+  "_comment": "Raw model ids and the key agentic_os.pricing.normalize_model gives them. Shared by the Python and TypeScript tests so both normalizations provably agree.",
+  "vectors": [
+    {
+      "id": "claude-opus-5",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "anthropic/claude-opus-5",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "Anthropic/Claude-Opus-5",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "  claude-sonnet-5  ",
+      "key": "claude-sonnet-5"
+    },
+    {
+      "id": "anthropic.claude-opus-5",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "us.anthropic.claude-opus-5",
+      "key": "us.anthropic.claude-opus-5"
+    },
+    {
+      "id": "claude-opus-4-20250514",
+      "key": "claude-opus-4"
+    },
+    {
+      "id": "claude-sonnet-4@20250514",
+      "key": "claude-sonnet-4"
+    },
+    {
+      "id": "claude-3-5-sonnet-latest",
+      "key": "claude-3-5-sonnet"
+    },
+    {
+      "id": "claude-opus-5[1m]",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "claude-opus-5-5[1m]",
+      "key": "claude-opus-5-5"
+    },
+    {
+      "id": "claude-opus-5-latest[1m]",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "CLAUDE-OPUS-5@20260101",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "anthropic.claude-haiku-4-20251001",
+      "key": "claude-haiku-4"
+    },
+    {
+      "id": "claude-opus-5-2026",
+      "key": "claude-opus-5-2026"
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "key": "gpt-6-sol"
+    },
+    {
+      "id": "gpt-6-luna-20260901",
+      "key": "gpt-6-luna"
+    },
+    {
+      "id": "gpt-6-sol[high]",
+      "key": "gpt-6-sol"
+    },
+    {
+      "id": "a/b/gpt-6-astra",
+      "key": "gpt-6-astra"
+    },
+    {
+      "id": "openai/",
+      "key": ""
+    },
+    {
+      "id": "",
+      "key": ""
+    },
+    {
+      "id": "   ",
+      "key": ""
+    },
+    {
+      "id": "claude-opus-5-20250101[1m]",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "claude-opus-5[1m]-20250101",
+      "key": "claude-opus-5[1m]"
+    },
+    {
+      "id": "claude-opus-5[1m][2m]",
+      "key": "claude-opus-5[1m]"
+    },
+    {
+      "id": "claude-opus-5-latest-20250101",
+      "key": "claude-opus-5-latest"
+    },
+    {
+      "id": "claude-opus-5-123456789",
+      "key": "claude-opus-5-123456789"
+    },
+    {
+      "id": "claude-opus-5@latest",
+      "key": "claude-opus-5@latest"
+    },
+    {
+      "id": "anthropic.anthropic.claude-opus-5",
+      "key": "anthropic.claude-opus-5"
+    },
+    {
+      "id": "vertex/anthropic.claude-opus-5",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "CLAUDE-OPUS-5[1M]",
+      "key": "claude-opus-5"
+    },
+    {
+      "id": "claude-opus-5/",
+      "key": ""
+    },
+    {
+      "id": "x/[1m]",
+      "key": ""
+    },
+    {
+      "id": "a/-latest",
+      "key": ""
+    }
+  ]
+}

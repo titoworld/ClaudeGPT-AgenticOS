@@ -185,7 +185,7 @@ async def test_requests_whose_body_was_read_keep_the_connection(tmp_path: Path) 
         token = await state.sessions.create(state.clock(), ip=None, user_agent=None)
         reader, writer = await asyncio.open_connection("127.0.0.1", running.port)
         try:
-            body = b"{}"
+            body = b'{"revision": 0}'
             put = (
                 f"PUT /api/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {ORIGIN}\r\n"
                 f"Cookie: {state.cookie_name}={token}\r\nContent-Type: application/json\r\n"

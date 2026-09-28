@@ -306,7 +306,7 @@ async def test_extra_origins_are_allowed(tmp_path: Path) -> None:
     async with running(settings) as h:
         await h.login_session()
         response = await h.client.put(
-            "/api/settings", json={}, headers={"origin": "http://localhost:5173"}
+            "/api/settings", json={"revision": 0}, headers={"origin": "http://localhost:5173"}
         )
     assert response.status_code == 200
 
@@ -593,18 +593,20 @@ async def test_settings_roundtrip_and_validation(h: Harness) -> None:
         use_cache=False,
         compaction_threshold_tokens=9000,
     ).to_wire()
+    assert wanted["revision"] == 0  # the revision the edit is based on
     response = await h.client.put("/api/settings", json=wanted, headers=ORIGIN_HEADERS)
     assert response.status_code == 200
-    assert response.json() == wanted
-    assert (await h.client.get("/api/settings")).json() == wanted
+    saved = {**wanted, "revision": 1}
+    assert response.json() == saved
+    assert (await h.client.get("/api/settings")).json() == saved
 
-    invalid = {**wanted, "debate": {"rounds": 9}}
+    invalid = {**saved, "debate": {"rounds": 9}}
     response = await h.client.put("/api/settings", json=invalid, headers=ORIGIN_HEADERS)
     assert response.status_code == 422
     assert response.json() == {"detail": "«debate.rounds» ha de ser un enter entre 0 i 4."}
     response = await h.client.put("/api/settings", content=b"nope", headers=ORIGIN_HEADERS)
     assert response.status_code == 422
-    assert (await h.client.get("/api/settings")).json() == wanted
+    assert (await h.client.get("/api/settings")).json() == saved
 
 
 async def add_conversation(h: Harness, title: str, question: str) -> int:
@@ -809,10 +811,13 @@ MONEY_SETTINGS: dict[str, Any] = {
 
 async def test_settings_with_models_prices_and_money(h: Harness) -> None:
     await h.login_session()
-    response = await h.client.put("/api/settings", json=MONEY_SETTINGS, headers=ORIGIN_HEADERS)
+    response = await h.client.put(
+        "/api/settings", json={**MONEY_SETTINGS, "revision": 0}, headers=ORIGIN_HEADERS
+    )
     assert response.status_code == 200
     saved = response.json()
     assert saved == {**RuntimeSettings().to_wire(), **saved}
+    assert saved["revision"] == 1
     assert saved["models"] == MONEY_SETTINGS["models"]
     assert saved["prices"]["gpt-7-nova"] == {
         "input": 3.0,
@@ -836,14 +841,14 @@ async def test_settings_with_models_prices_and_money(h: Harness) -> None:
         ),
     ):
         response = await h.client.put(
-            "/api/settings", json={**MONEY_SETTINGS, **patch}, headers=ORIGIN_HEADERS
+            "/api/settings", json={**saved, **patch}, headers=ORIGIN_HEADERS
         )
         assert response.status_code == 422
         assert response.json() == {"detail": detail}
     # JSON NaN is not a number the settings accept.
     response = await h.client.put(
         "/api/settings",
-        content=b'{"budgets_eur": {"claude": NaN}}',
+        content=b'{"revision": 1, "budgets_eur": {"claude": NaN}}',
         headers={**ORIGIN_HEADERS, "content-type": "application/json"},
     )
     assert response.status_code == 422
@@ -858,29 +863,31 @@ async def test_settings_refuse_huge_integers_and_ambiguous_prices(
     price = {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}
     cases: list[tuple[bytes, str]] = [
         (
-            f'{{"budgets_eur": {{"claude": {huge}}}}}'.encode(),
+            f'{{"revision": 0, "budgets_eur": {{"claude": {huge}}}}}'.encode(),
             "«budgets_eur.claude» ha de ser un nombre entre 0 i 100.000.",
         ),
         (
-            f'{{"plans_eur": {{"chatgpt": {huge}}}}}'.encode(),
+            f'{{"revision": 0, "plans_eur": {{"chatgpt": {huge}}}}}'.encode(),
             "«plans_eur.chatgpt» ha de ser un nombre entre 0 i 100.000.",
         ),
         (
-            f'{{"fx": {{"eur_per_usd": {huge}}}}}'.encode(),
+            f'{{"revision": 0, "fx": {{"eur_per_usd": {huge}}}}}'.encode(),
             "«fx.eur_per_usd» ha de ser un nombre entre 0,2 i 5.",
         ),
         (
-            f'{{"prices": {{"m": {{"input": {huge}, "output": 1, "cache_read": 0, '
-            f'"cache_write": 0}}}}}}'.encode(),
+            f'{{"revision": 0, "prices": {{"m": {{"input": {huge}, "output": 1, '
+            f'"cache_read": 0, "cache_write": 0}}}}}}'.encode(),
             "«prices.m»: Preu invàlid per a «input»: ha de ser un nombre ≥ 0.",
         ),
         (
-            json.dumps({"prices": {"openai/": price}}).encode(),
+            json.dumps({"revision": 0, "prices": {"openai/": price}}).encode(),
             "«prices»: «openai/» no identifica cap model (sense el prefix del proveïdor, la "
             "data o el context no en queda res).",
         ),
         (
-            json.dumps({"prices": {"Claude-Opus-5": price, "claude-opus-5": price}}).encode(),
+            json.dumps(
+                {"revision": 0, "prices": {"Claude-Opus-5": price, "claude-opus-5": price}}
+            ).encode(),
             "«prices»: «Claude-Opus-5» i «claude-opus-5» són el mateix model "
             "(«claude-opus-5»). Deixa'n només un.",
         ),
@@ -903,13 +910,14 @@ async def test_pricing_lists_the_table_the_engine_charges_with(h: Harness) -> No
     custom = {"input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5}
     response = await h.client.put(
         "/api/settings",
-        json={"prices": {"Claude-Opus-5-20260101": custom, "gpt-7-nova": custom}},
+        json={"revision": 0, "prices": {"Claude-Opus-5-20260101": custom, "gpt-7-nova": custom}},
         headers=ORIGIN_HEADERS,
     )
     assert response.status_code == 200
     runtime = await h.state.store.get_runtime_settings()
     rows = (await h.client.get("/api/pricing")).json()["prices"]
-    assert rows == [
+    fields = ("model", "input", "output", "cache_read", "cache_write", "source")
+    assert [{field: row[field] for field in fields} for row in rows] == [
         {"model": entry.model, **entry.price.to_wire(), "source": entry.source}
         for entry in sorted(price_table(runtime.prices).values(), key=lambda e: e.model)
     ]
@@ -930,7 +938,7 @@ async def test_answers_given_before_the_body_ask_to_close_the_connection(h: Harn
     assert (await h.login(password=WRONG_PASSWORD)).status_code == 401
     assert "connection" not in (await h.login(password=WRONG_PASSWORD)).headers
     await h.login_session()
-    response = await h.client.put("/api/settings", json={}, headers=ORIGIN_HEADERS)
+    response = await h.client.put("/api/settings", json={"revision": 0}, headers=ORIGIN_HEADERS)
     assert response.status_code == 200
     assert "connection" not in response.headers
 
@@ -1032,14 +1040,18 @@ async def test_pricing(h: Harness) -> None:
     assert len(by_model) == len(DEFAULT_PRICES) + 1
     assert by_model["gpt-6-luna"] == {
         "model": "gpt-6-luna",
+        "key": "gpt-6-luna",
         "input": 0.2,
         "output": 1.0,
         "cache_read": 0.02,
         "cache_write": 0.0,
         "source": "custom",
+        "default": DEFAULT_PRICES["gpt-6-luna"].to_wire(),
     }
     assert by_model["gpt-7-nova"]["source"] == "custom"
+    assert by_model["gpt-7-nova"]["default"] is None
     assert by_model["gpt-6-sol"]["source"] == "default"
+    assert by_model["gpt-6-sol"]["default"] is None
 
 
 async def test_spend_of_the_current_month(h: Harness) -> None:
@@ -1150,8 +1162,11 @@ async def test_switching_to_auto_fetches_the_rate_now(tmp_path: Path) -> None:
         await h.login_session()
         await asyncio.sleep(0.05)
         assert calls == []  # manual mode: never downloaded
+        current = (await h.client.get("/api/settings")).json()
         response = await h.client.put(
-            "/api/settings", json={"fx": {"mode": "auto"}}, headers=ORIGIN_HEADERS
+            "/api/settings",
+            json={**current, "fx": {**current["fx"], "mode": "auto"}},
+            headers=ORIGIN_HEADERS,
         )
         assert response.status_code == 200
 

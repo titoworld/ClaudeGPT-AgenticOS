@@ -61,9 +61,19 @@ export interface ModelPrice {
   cache_write: number;
 }
 
+/** A row of the effective price table: the default prices with the owner's over them. */
+export interface PriceRow extends ModelPrice {
+  model: string;
+  source: 'default' | 'custom';
+  /** Family id the server matches models on (pricing.normalize_model; see models.ts normalizeModel). */
+  key: string;
+  /** The default price a custom row replaces (same key); null otherwise. */
+  default: ModelPrice | null;
+}
+
 export interface Pricing {
   fx: FxRate;
-  prices: (ModelPrice & { model: string; source: 'default' | 'custom' })[];
+  prices: PriceRow[];
 }
 
 export interface AgentSpend {
@@ -103,6 +113,11 @@ export interface TurnOptions {
 }
 
 export interface RuntimeSettings {
+  /**
+   * Version of the stored settings, +1 on every save. PUT /api/settings carries the
+   * revision the edit was based on: 409 (SettingsConflict) if they changed since.
+   */
+  revision: number;
   default_mode: TurnMode;
   default_target: Agent;
   debate: DebateOptions;
@@ -114,6 +129,12 @@ export interface RuntimeSettings {
   fx: { mode: 'auto' | 'manual'; eur_per_usd: number };
   budgets_eur: Record<Agent, number | null>; // monthly API budget
   plans_eur: Record<Agent, number | null>; // monthly subscription price
+}
+
+/** Body of the 409 answer to PUT /api/settings: the settings are the current ones. */
+export interface SettingsConflict {
+  detail: string;
+  settings: RuntimeSettings;
 }
 
 export interface ConversationSummary {

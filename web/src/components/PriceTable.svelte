@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { validateModelId } from '../lib/models';
+  import { normalizeModel, validateModelId } from '../lib/models';
   import type { ModelPrice, Pricing } from '../lib/protocol';
   import type { SettingsErrors } from '../lib/settings';
   import { LIMITS } from '../lib/settings';
@@ -9,7 +9,10 @@
   interface Props {
     /** The owner's prices being edited (RuntimeSettings.prices of the form). */
     prices: Record<string, ModelPrice>;
-    /** Server price list; its `default` rows are shown read-only. */
+    /**
+     * The server's price table (defaults with the saved own prices over them): its
+     * default prices, and those the own prices replace, are shown read-only.
+     */
     pricing: Pricing | null;
     /** Validation errors to show (`price:<model>` keys). */
     errors: SettingsErrors;
@@ -28,37 +31,63 @@
 
   interface Row {
     model: string;
+    /** The family id the server prices the model by (normalizeModel). */
+    key: string;
     price: ModelPrice;
     custom: boolean;
-    /** A default price exists for this model (so "restore" makes sense). */
-    hasDefault: boolean;
+    /** Of an own price: the default price it replaces, which "restore" brings back. */
+    base: ModelPrice | null;
   }
+
+  const ZERO: ModelPrice = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const NO_MODEL =
+    'Aquest identificador no correspon a cap model (sense el prefix del proveïdor, la data o el context no en queda res).';
 
   const uid = $props.id();
   let table: HTMLTableElement | undefined = $state();
   let newModel = $state('');
   let addError: string | null = $state(null);
+  /** Where the prices of the model just added come from. */
+  let addNote: string | null = $state(null);
 
-  const key = (model: string) => model.trim().toLowerCase();
-  const defaults = $derived((pricing?.prices ?? []).filter((p) => p.source === 'default'));
+  const copyPrice = (p: ModelPrice): ModelPrice => ({
+    input: p.input,
+    output: p.output,
+    cache_read: p.cache_read,
+    cache_write: p.cache_write,
+  });
 
-  const rows = $derived.by(() => {
-    const own = new Map(Object.keys(prices).map((m) => [key(m), m]));
-    const out: Row[] = [];
-    const seen = new Set<string>();
-    for (const d of defaults) {
-      const model = own.get(key(d.model));
-      if (model) {
-        seen.add(model);
-        out.push({ model, price: prices[model]!, custom: true, hasDefault: true });
-      } else {
-        out.push({ model: d.model, price: d, custom: false, hasDefault: true });
-      }
-    }
-    for (const model of Object.keys(prices)) {
-      if (!seen.has(model)) out.push({ model, price: prices[model]!, custom: true, hasDefault: false });
+  /**
+   * Default prices by the family id the server matches models on: the default rows,
+   * and the default a saved own price replaces (sent with its row, audit A21).
+   */
+  const defaults = $derived.by(() => {
+    const out = new Map<string, { model: string; price: ModelPrice }>();
+    for (const row of pricing?.prices ?? []) {
+      if (row.source === 'default') out.set(row.key, { model: row.model, price: copyPrice(row) });
+      else if (row.default) out.set(row.key, { model: row.key, price: copyPrice(row.default) });
     }
     return out;
+  });
+
+  // Own prices are matched to defaults as the server does (normalize_model, N13):
+  // "anthropic/claude-opus-5" replaces the default of claude-opus-5.
+  const rows = $derived.by(() => {
+    const replacing = new Map<string, string>();
+    const added: Row[] = [];
+    for (const model of Object.keys(prices)) {
+      const key = normalizeModel(model);
+      if (defaults.has(key) && !replacing.has(key)) replacing.set(key, model);
+      else added.push({ model, key, price: prices[model]!, custom: true, base: null });
+    }
+    const known = [...defaults].map(([key, d]): Row => {
+      const model = replacing.get(key);
+      return model
+        ? { model, key, price: prices[model]!, custom: true, base: d.price }
+        : { model: d.model, key, price: d.price, custom: false, base: null };
+    });
+    known.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return [...known, ...added];
   });
 
   const num = (n: number) => n.toLocaleString('ca-ES', { maximumFractionDigits: 4 });
@@ -82,31 +111,50 @@
   }
 
   function edit(model: string, price: ModelPrice): void {
-    prices[model] = {
-      input: price.input,
-      output: price.output,
-      cache_read: price.cache_read,
-      cache_write: price.cache_write,
-    };
+    prices[model] = copyPrice(price);
     void focusRow(model);
   }
 
+  /** Drops an own price: a model with a default price gets it back at once. */
   function remove(model: string): void {
     delete prices[model];
   }
 
   function add(): void {
     const model = newModel.trim();
+    addNote = null;
     addError = validateModelId(model);
     if (addError) return;
-    if (Object.keys(prices).some((m) => key(m) === key(model))) {
-      addError = 'Aquest model ja té un preu propi a la taula.';
+    const key = normalizeModel(model);
+    if (!key) {
+      addError = NO_MODEL;
       return;
     }
-    const known = defaults.find((d) => key(d.model) === key(model));
     newModel = '';
-    if (known) edit(known.model, known);
-    else edit(model, { input: 0, output: 0, cache_read: 0, cache_write: 0 });
+    // Another id of a model in the table (a vendor prefix, a date...): the server
+    // prices both alike, so that row is edited instead of adding a second one.
+    const same = rows.find((r) => r.key === key);
+    if (same) {
+      // Says why the typed id gets no row of its own.
+      const alias = model === same.model ? null : `El servidor tracta «${model}» com a «${same.model}»`;
+      if (same.custom) {
+        addNote = alias ? `${alias}, que ja té un preu propi.` : `«${same.model}» ja té un preu propi.`;
+        void focusRow(same.model);
+      } else {
+        addNote = alias ? `${alias}: se n'edita el preu.` : null;
+        edit(same.model, same.price);
+      }
+      return;
+    }
+    // A new model starts from the price the server gives it now, that of the longest
+    // family id its own starts with (pricing.lookup_price), or else from zero.
+    const family = rows
+      .filter((r) => r.key && key.startsWith(r.key))
+      .reduce<Row | null>((best, r) => (best && best.key.length >= r.key.length ? best : r), null);
+    if (family) {
+      addNote = `Comença amb els preus de ${family.model}, que són els que s'hi aplicaven fins ara. Revisa'ls.`;
+    }
+    edit(model, family?.price ?? ZERO);
   }
 
   function onAddKeydown(e: KeyboardEvent): void {
@@ -135,7 +183,11 @@
         <tr class:custom={row.custom}>
           <th scope="row" class="model" title={row.model}>
             <span class="id">{row.model}</span>
-            {#if row.custom}<span class="tag">{row.hasDefault ? 'propi' : 'afegit'}</span>{/if}
+            {#if row.base}
+              <span class="tag" title="Preu propi. A sota de cada preu, el per defecte.">propi</span>
+            {:else if row.custom}
+              <span class="tag" title="Model sense preu per defecte.">afegit</span>
+            {/if}
           </th>
           {#each COLUMNS as col (col.key)}
             <td class="num">
@@ -149,8 +201,13 @@
                   step="any"
                   data-model={row.model}
                   bind:value={() => prices[row.model]?.[col.key], (v) => setPrice(row.model, col.key, v)}
-                  aria-label="{col.long}: {row.model}, en dòlars per milió de tokens"
+                  aria-label="{col.long}: {row.model}, en dòlars per milió de tokens{row.base
+                    ? ` (per defecte, ${num(row.base[col.key])})`
+                    : ''}"
                   aria-invalid={!!error && !validCell(prices[row.model]?.[col.key])} />
+                {#if row.base}
+                  <small class="base" title="Preu per defecte" aria-hidden="true">{num(row.base[col.key])}</small>
+                {/if}
               {:else}
                 {num(row.price[col.key])}
               {/if}
@@ -166,7 +223,7 @@
                 title="Edita (crea un preu propi)">
                 <Icon name="edit" size={14} />
               </button>
-            {:else if row.hasDefault}
+            {:else if row.base}
               <button
                 type="button"
                 class="icon-btn small"
@@ -219,13 +276,19 @@
     autocomplete="off"
     autocapitalize="off"
     bind:value={newModel}
-    oninput={() => (addError = null)}
+    oninput={() => {
+      addError = null;
+      addNote = null;
+    }}
     onkeydown={onAddKeydown}
     aria-invalid={!!addError}
     aria-describedby="{uid}-add-err" />
   <button type="button" class="btn" onclick={add}><Icon name="plus" size={15} />Afegeix</button>
 </div>
-<small class="error-text" id="{uid}-add-err">{addError ?? ''}</small>
+<small class="error-text add-error" id="{uid}-add-err">{addError ?? ''}</small>
+{#if addNote}
+  <small class="hint add-note" role="status">{addNote}</small>
+{/if}
 
 <style>
   .wrap {
@@ -319,6 +382,15 @@
 
   .cell[aria-invalid='true'] {
     border-color: var(--critical);
+  }
+
+  .base {
+    display: block;
+    margin-top: 0.15rem;
+    padding-right: 0.3rem;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    cursor: help;
   }
 
   .actions {

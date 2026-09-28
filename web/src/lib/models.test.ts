@@ -5,6 +5,7 @@ import {
   modelHint,
   modelOptionLabel,
   modelOverridesPayload,
+  normalizeModel,
   parseOverrides,
   shortModel,
   validateModelId,
@@ -112,5 +113,40 @@ describe('labels', () => {
     expect(modelOptionLabel(catalog.models[1]!)).toBe('haiku');
     expect(modelHint(catalog.models[0]!)).toBe('El més capaç · 1M tokens de context');
     expect(modelHint(catalog.models[1]!)).toBe('');
+  });
+});
+
+describe('normalizeModel (pricing.normalize_model, N13)', () => {
+  // tests/fixtures/model_ids.json: the vectors pytest checks agentic_os.pricing.normalize_model with.
+  const node = globalThis as unknown as {
+    process: { getBuiltinModule(id: 'node:fs'): { readFileSync(path: string, encoding: 'utf8'): string } };
+  };
+  const dir = (import.meta as ImportMeta & { dirname: string }).dirname;
+  const file = `${dir}/../../../tests/fixtures/model_ids.json`;
+  const { vectors } = JSON.parse(node.process.getBuiltinModule('node:fs').readFileSync(file, 'utf8')) as {
+    vectors: { id: string; key: string }[];
+  };
+
+  it('has the shared vectors', () => {
+    expect(vectors.length).toBeGreaterThan(20);
+  });
+
+  it.each(vectors)('gives $id the key $key, like the server', ({ id, key }) => {
+    expect(normalizeModel(id)).toBe(key);
+  });
+
+  // What the Python function gives beyond valid ids: str.strip() whitespace, any
+  // Unicode digit for \d, and `$` that also matches before a final newline.
+  it.each([
+    ['\x1cclaude-opus-5\x85', 'claude-opus-5'],
+    ['\ufeffclaude-opus-5', '\ufeffclaude-opus-5'],
+    ['claude-opus-5-\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668', 'claude-opus-5'],
+    ['foo-latest\n[1m]', 'foo\n'],
+    ['a[b][c]', 'a[b]'],
+    ['x/[1m]', ''],
+    ['claude-opus-5[1m]-latest', 'claude-opus-5[1m]'],
+    ['claude-opus-5-latest-latest', 'claude-opus-5-latest'],
+  ])('keeps the Python semantics for %j', (id, key) => {
+    expect(normalizeModel(id)).toBe(key);
   });
 });

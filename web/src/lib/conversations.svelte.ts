@@ -1,6 +1,6 @@
 // Conversation list and the open conversation (REST), mapped to turn views.
 
-import { api, ApiError } from './api';
+import { api, ApiError, RequestTimeoutError } from './api';
 import type { ConversationDetail, ConversationSummary } from './protocol';
 import { turnsFromMessages, type TurnView } from './turns.svelte';
 
@@ -11,6 +11,7 @@ export function errorMessage(err: unknown, fallback: string): string {
     if (err.status === 0 || err.status >= 500) return fallback;
     return err.message || fallback;
   }
+  if (err instanceof RequestTimeoutError) return err.message;
   if (err instanceof TypeError) return 'No es pot connectar amb el servidor.';
   return fallback;
 }

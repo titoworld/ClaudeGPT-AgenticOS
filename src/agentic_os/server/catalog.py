@@ -172,9 +172,23 @@ class ModelCatalog:
 def pricing_to_wire(fx: FxRate, overrides: Mapping[str, ModelPrice]) -> Wire:
     """``Pricing`` of PROTOCOL.md: exactly the rows of the effective price table the
     engine charges with (:func:`~agentic_os.pricing.price_table`: the default prices
-    with the owner's over them), sorted by model id."""
-    entries = sorted(price_table(overrides).values(), key=lambda entry: entry.model)
-    prices = [
-        {"model": entry.model, **entry.price.to_wire(), "source": entry.source} for entry in entries
-    ]
+    with the owner's over them), sorted by model id.
+
+    Each row also carries ``key``, the normalized id models are matched on, and
+    ``default``: for an owner price that replaces a default one (same key), that
+    default price, so it can still be shown and restored; ``None`` otherwise."""
+    defaults = price_table()
+    rows = sorted(price_table(overrides).items(), key=lambda item: item[1].model)
+    prices: list[Wire] = []
+    for key, entry in rows:
+        replaced = defaults.get(key) if entry.source == "custom" else None
+        prices.append(
+            {
+                "model": entry.model,
+                "key": key,
+                **entry.price.to_wire(),
+                "source": entry.source,
+                "default": replaced.price.to_wire() if replaced is not None else None,
+            }
+        )
     return {"fx": fx.to_wire(), "prices": prices}

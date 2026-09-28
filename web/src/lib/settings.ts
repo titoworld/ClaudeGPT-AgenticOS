@@ -19,6 +19,9 @@ export const DEFAULT_EUR_PER_USD = 0.86;
 const perAgent = <T>(value: T): Record<Agent, T> => ({ claude: value, chatgpt: value });
 
 export const DEFAULT_SETTINGS: RuntimeSettings = {
+  // The built-in settings are revision 0: once the owner has saved settings (always
+  // revision 1 or more on the server), a save based on these gets 409 (ADR 0006).
+  revision: 0,
   default_mode: 'debate',
   default_target: 'claude',
   debate: { rounds: 2, consensus_threshold: 85, synthesizer: 'claude' },
@@ -32,6 +35,9 @@ export const DEFAULT_SETTINGS: RuntimeSettings = {
   plans_eur: perAgent(null),
 };
 
+const isRevision = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
 /**
  * Deep copy of plain settings with every key present (an older server may omit
  * the newer ones). Pass `$state.snapshot(...)` when the source is reactive.
@@ -41,6 +47,7 @@ export function normalizeSettings(s: Partial<RuntimeSettings>): RuntimeSettings 
   const prices: Record<string, ModelPrice> = {};
   for (const [model, p] of Object.entries(s.prices ?? {})) prices[model] = { ...p };
   return {
+    revision: isRevision(s.revision) ? s.revision : d.revision,
     default_mode: s.default_mode ?? d.default_mode,
     default_target: s.default_target ?? d.default_target,
     debate: { ...d.debate, ...s.debate },

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
@@ -391,8 +392,9 @@ async def test_runtime_settings_default_and_roundtrip(store: SqliteStore) -> Non
             "compaction_threshold_tokens": 1000,
         }
     )
-    await store.put_runtime_settings(custom)
-    assert await store.get_runtime_settings() == custom
+    stored = await store.put_runtime_settings(custom)
+    assert stored == dataclasses.replace(custom, revision=1)
+    assert await store.get_runtime_settings() == stored
 
 
 async def test_invalid_stored_runtime_settings_fall_back_to_defaults(store: SqliteStore) -> None:
@@ -400,7 +402,8 @@ async def test_invalid_stored_runtime_settings_fall_back_to_defaults(store: Sqli
         await tx.execute(
             "INSERT INTO settings (key, value) VALUES ('runtime', '{\"default_mode\": \"x\"}')"
         )
-    assert await store.get_runtime_settings() == RuntimeSettings()
+    # Saved settings are at revision 1 at least, also when they load as the defaults.
+    assert await store.get_runtime_settings() == RuntimeSettings(revision=1)
 
 
 async def test_stored_prices_refused_by_the_new_rules_are_dropped_not_the_settings(
@@ -437,8 +440,9 @@ async def test_models_prices_and_money_settings_roundtrip(store: SqliteStore) ->
         budgets_eur={"claude": 20.0, "chatgpt": None},
         plans_eur={"claude": 90.0, "chatgpt": 23.0},
     )
-    await store.put_runtime_settings(custom)
-    assert await store.get_runtime_settings() == custom
+    stored = await store.put_runtime_settings(custom)
+    assert stored == dataclasses.replace(custom, revision=1)
+    assert await store.get_runtime_settings() == stored
 
 
 async def test_settings_stored_by_the_previous_version_get_the_new_defaults(
@@ -449,7 +453,7 @@ async def test_settings_stored_by_the_previous_version_get_the_new_defaults(
         await tx.execute("INSERT INTO settings (key, value) VALUES ('runtime', ?)", (old,))
     settings = await store.get_runtime_settings()
     assert settings == RuntimeSettings(
-        default_mode="solo", default_target="chatgpt", use_cache=False
+        default_mode="solo", default_target="chatgpt", use_cache=False, revision=1
     )
     assert settings.fx == FxSettings(mode="auto", eur_per_usd=0.86)
 

@@ -3,6 +3,7 @@
 // call its methods; nothing else talks to the network.
 
 import { api, ApiError, setUnauthorizedHandler } from './api';
+import { ComposerState } from './composer.svelte';
 import { Conversations, errorMessage } from './conversations.svelte';
 import { inferCostBasis } from './costs';
 import { modelOverridesPayload } from './models';
@@ -19,7 +20,6 @@ import {
   type RuntimeSettings,
   type ServerMessage,
   type TurnEvent,
-  type TurnMode,
   type TurnOptions,
 } from './protocol';
 import { router, type Route } from './router.svelte';
@@ -33,14 +33,23 @@ import { Connection } from './ws.svelte';
 
 export type AuthPhase = 'checking' | 'login' | 'setup' | 'ready' | 'unreachable';
 
-export interface ComposerState {
-  mode: TurnMode;
-  target: Agent;
-  rounds: number;
-  threshold: number;
-  synthesizer: Agent;
-  useCache: boolean;
-  draft: string;
+/** Whether the server's settings are loaded: `ready` once a load has worked. */
+export type SettingsStatus = 'loading' | 'ready' | 'error';
+
+/** Waits between automatic retries of a failed settings load (the last one repeats). */
+const SETTINGS_RETRY_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+const SETTINGS_NOT_LOADED = "La configuració encara no s'ha carregat.";
+
+const SETTINGS_CONFLICT =
+  'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.';
+
+/** A save based on settings that changed elsewhere (409): `app.settings` holds the current ones now. */
+export class SettingsConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SettingsConflictError';
+  }
 }
 
 class App {
@@ -49,6 +58,15 @@ class App {
   fatal: string | null = $state(null);
   providers: ProviderStatus[] = $state([]);
   settings: RuntimeSettings = $state(normalizeSettings(DEFAULT_SETTINGS));
+  /**
+   * Whether `settings` holds the server's settings. Until it does nothing is sent or
+   * saved, since the built-in defaults would stand in for the owner's (audit A11).
+   */
+  settingsStatus: SettingsStatus = $state('loading');
+  /** Why the last load of the settings failed (Catalan). */
+  settingsError: string | null = $state(null);
+  /** A request for the settings is under way. */
+  settingsLoading = $state(false);
   /** Models each agent can use (live from the vendor when possible), cached per session. */
   catalog: ModelCatalog | null = $state(null);
   /**
@@ -65,15 +83,7 @@ class App {
   fx: FxRate | null = $state(null);
   /** Month-to-date spend for the sidebar bars. */
   spend: MonthSpend | null = $state(null);
-  composer: ComposerState = $state({
-    mode: DEFAULT_SETTINGS.default_mode,
-    target: DEFAULT_SETTINGS.default_target,
-    rounds: DEFAULT_SETTINGS.debate.rounds,
-    threshold: DEFAULT_SETTINGS.debate.consensus_threshold,
-    synthesizer: DEFAULT_SETTINGS.debate.synthesizer,
-    useCache: DEFAULT_SETTINGS.use_cache,
-    draft: '',
-  });
+  readonly composer = new ComposerState();
   paletteOpen = $state(false);
   settingsOpen = $state(false);
   /** Mobile drawer state (desktop collapse lives in prefs). */
@@ -110,6 +120,11 @@ class App {
   #catalogRequest: Promise<void> | null = null;
   #catalogTicket = 0;
   #spendRequest: Promise<void> | null = null;
+  #settingsRequest: Promise<boolean> | null = null;
+  #settingsRetry: ReturnType<typeof setTimeout> | undefined;
+  #settingsAttempt = 0;
+  /** Bumped when the session ends or a save answers: a request started before is stale. */
+  #settingsTicket = 0;
 
   // ------------------------------------------------------------ auth
 
@@ -158,6 +173,13 @@ class App {
     this.pricing = null;
     this.spend = null;
     this.fx = null;
+    this.#settingsTicket++;
+    this.#settingsRequest = null;
+    clearTimeout(this.#settingsRetry);
+    this.#settingsAttempt = 0;
+    this.settingsStatus = 'loading';
+    this.settingsError = null;
+    this.settingsLoading = false;
     this.paletteOpen = false;
     this.settingsOpen = false;
     this.auth = 'login';
@@ -170,44 +192,116 @@ class App {
     // The open conversation follows the route (App.svelte effect on auth + route).
     void this.loadModels();
     await Promise.allSettled([
-      this.#loadSettings(),
+      this.loadSettings(),
       this.refreshProviders(),
       this.refreshSpend(),
       this.convs.refresh(),
     ]);
   }
 
-  async #loadSettings(): Promise<void> {
+  // ------------------------------------------------------------ settings
+
+  /**
+   * Fetches the saved settings (one request at a time). Until they have loaded, a
+   * failure is shown and retried with backoff, and at once on every `hello`.
+   * Resolves true when `settings` holds what the server has now.
+   */
+  loadSettings(): Promise<boolean> {
+    if (this.#settingsRequest) return this.#settingsRequest;
+    const request = this.#fetchSettings().finally(() => {
+      if (this.#settingsRequest !== request) return;
+      this.#settingsRequest = null;
+      this.settingsLoading = false;
+    });
+    this.#settingsRequest = request;
+    this.settingsLoading = true;
+    return request;
+  }
+
+  async #fetchSettings(): Promise<boolean> {
+    clearTimeout(this.#settingsRetry);
+    const ticket = this.#settingsTicket;
     try {
-      const s = normalizeSettings(await api.settings());
-      this.settings = s;
-      this.applyDefaults(s);
-    } catch {
-      // keep defaults; the settings drawer reports errors when saving
+      const settings = normalizeSettings(await api.settings());
+      // Stale: the session ended (not ready), or a save answered with newer settings.
+      if (ticket !== this.#settingsTicket) return this.settingsStatus === 'ready';
+      this.#takeSettings(settings);
+      return true;
+    } catch (err) {
+      if (ticket !== this.#settingsTicket) return this.settingsStatus === 'ready';
+      this.settingsError = errorMessage(err, 'El servidor ha respost amb un error.');
+      if (this.settingsStatus !== 'ready') {
+        this.settingsStatus = 'error';
+        this.#retrySettingsLater();
+      }
+      return false;
     }
   }
 
-  applyDefaults(s: RuntimeSettings): void {
-    this.composer.mode = s.default_mode;
-    this.composer.target = s.default_target;
-    this.composer.rounds = s.debate.rounds;
-    this.composer.threshold = s.debate.consensus_threshold;
-    this.composer.synthesizer = s.debate.synthesizer;
-    this.composer.useCache = s.use_cache;
+  #retrySettingsLater(): void {
+    clearTimeout(this.#settingsRetry);
+    if (this.auth !== 'ready') return;
+    const delay = SETTINGS_RETRY_MS[Math.min(this.#settingsAttempt, SETTINGS_RETRY_MS.length - 1)];
+    this.#settingsAttempt++;
+    this.#settingsRetry = setTimeout(() => void this.loadSettings(), delay);
   }
 
-  async saveSettings(s: RuntimeSettings): Promise<void> {
+  /** The server's current settings become the ones this tab works with. */
+  #takeSettings(next: RuntimeSettings): void {
+    const first = this.settingsStatus !== 'ready';
     const before = this.settings;
-    const saved = normalizeSettings(await api.saveSettings(s));
-    this.settings = saved;
-    this.applyDefaults(saved);
-    // Prices, the exchange rate mode and budgets change what these report.
-    void this.loadPricing();
-    void this.refreshSpend();
-    if (savedModelsChanged(before, saved)) {
+    this.settings = next;
+    this.settingsStatus = 'ready';
+    this.settingsError = null;
+    this.#settingsAttempt = 0;
+    clearTimeout(this.#settingsRetry);
+    // Saved defaults never overwrite an option the owner changed in this tab (A11, N11).
+    this.composer.applyDefaults(next);
+    if (!first && savedModelsChanged(before, next)) {
       this.catalogStale = true;
       void this.reloadModels();
     }
+  }
+
+  /**
+   * Saves settings edited from revision `s.revision` and returns the stored ones.
+   * If they changed elsewhere since (409), the current ones become this tab's and
+   * SettingsConflictError says so: nothing is overwritten.
+   */
+  async saveSettings(s: RuntimeSettings): Promise<RuntimeSettings> {
+    if (this.settingsStatus !== 'ready') throw new Error(SETTINGS_NOT_LOADED);
+    const ticket = this.#settingsTicket;
+    let saved: RuntimeSettings;
+    try {
+      saved = normalizeSettings(await api.saveSettings(s));
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 409) throw err;
+      if (ticket === this.#settingsTicket) await this.#takeCurrent(err.body);
+      throw new SettingsConflictError(conflictDetail(err.body));
+    }
+    if (ticket !== this.#settingsTicket) return saved; // the session ended meanwhile
+    this.#settingsTicket++; // a load started before this save may answer with older settings
+    this.#takeSettings(saved);
+    this.#afterSettingsChange();
+    return saved;
+  }
+
+  /** The settings a 409 answer carries (fetched again if it has none) become this tab's. */
+  async #takeCurrent(body: unknown): Promise<void> {
+    const current = conflictSettings(body);
+    if (current) {
+      this.#settingsTicket++;
+      this.#takeSettings(current);
+    } else {
+      await this.loadSettings();
+    }
+    this.#afterSettingsChange();
+  }
+
+  /** Prices, the exchange rate mode and budgets change what these report. */
+  #afterSettingsChange(): void {
+    void this.loadPricing();
+    void this.refreshSpend();
   }
 
   /**
@@ -376,7 +470,7 @@ class App {
   // ------------------------------------------------------------ turns
 
   canSend(): boolean {
-    return this.conn.status === 'open' && !this.runningTurn;
+    return this.conn.status === 'open' && !this.runningTurn && this.settingsStatus === 'ready';
   }
 
   send(text: string): boolean {
@@ -384,6 +478,16 @@ class App {
     if (!question || this.runningTurn) return false;
     if (this.conn.status !== 'open') {
       toasts.push('Sense connexió amb el servidor. Espera que es reconnecti.', 'error');
+      return false;
+    }
+    if (this.settingsStatus !== 'ready') {
+      // Never with the built-in defaults instead of the owner's (A11); the composer waits too.
+      toasts.push(
+        this.settingsStatus === 'error'
+          ? "No s'ha pogut carregar la configuració: fins que no es carregui no es pot enviar cap pregunta."
+          : 'Encara es carrega la configuració. Torna-ho a provar en un moment.',
+        'error',
+      );
       return false;
     }
     const c = this.composer;
@@ -439,6 +543,11 @@ class App {
         if (msg.fx) this.fx = msg.fx;
         this.#resubscribe(msg.active_turns);
         void this.refreshSpend();
+        if (this.settingsStatus !== 'ready') {
+          // The server answers again: retry a failed load now, and soon after if it fails.
+          this.#settingsAttempt = 0;
+          void this.loadSettings();
+        }
         return;
       case 'turn.unknown':
         void this.#onUnknown(msg.request_id);
@@ -563,11 +672,24 @@ class App {
   }
 }
 
-/** Whether a save changed the saved default or fast model of any agent. */
+/** Whether new settings changed the saved default or fast model of any agent. */
 function savedModelsChanged(before: RuntimeSettings, after: RuntimeSettings): boolean {
   return AGENTS.some(
     (a) => before.models[a] !== after.models[a] || before.fast_models[a] !== after.fast_models[a],
   );
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The current settings in the body of a 409 answer to PUT /api/settings, if any. */
+function conflictSettings(body: unknown): RuntimeSettings | null {
+  if (!isObject(body) || !isObject(body.settings)) return null;
+  return normalizeSettings(body.settings as Partial<RuntimeSettings>);
+}
+
+function conflictDetail(body: unknown): string {
+  return isObject(body) && typeof body.detail === 'string' && body.detail ? body.detail : SETTINGS_CONFLICT;
 }
 
 export const app = new App();

@@ -60,6 +60,26 @@ export function parseOverrides(raw: string | null): ModelOverrides {
 const DATE_SUFFIX = /(-\d{8}|@\d{8}|-latest)$/;
 const CONTEXT_TAG = /\[[^\]]*\]$/;
 
+// normalizeModel follows the Python function exactly: str.strip() removes these
+// characters (str.isspace, not quite String.prototype.trim's set), \d is any Unicode
+// digit and `$` also matches just before a final newline.
+const PY_SPACE = '\\t-\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+const PY_STRIP = new RegExp(`^[${PY_SPACE}]+|[${PY_SPACE}]+$`, 'g');
+const PRICE_CONTEXT_TAG = /\[[^\]]*\](?=\n?$)/;
+const PRICE_DATE_SUFFIX = /(?:-\p{Nd}{8}|@\p{Nd}{8}|-latest)(?=\n?$)/u;
+
+/**
+ * The family id the server prices a model by (agentic_os.pricing.normalize_model):
+ * lower case, without vendor prefix, context tag or date suffix. The vectors of
+ * tests/fixtures/model_ids.json check that both give the same key.
+ */
+export function normalizeModel(model: string): string {
+  let name = model.replace(PY_STRIP, '').toLowerCase();
+  name = name.slice(name.lastIndexOf('/') + 1); // e.g. "anthropic/claude-opus-5"
+  if (name.startsWith('anthropic.')) name = name.slice('anthropic.'.length);
+  return name.replace(PRICE_CONTEXT_TAG, '').replace(PRICE_DATE_SUFFIX, '');
+}
+
 /** Compact label for tight spots: "claude-opus-5-5-20260101" -> "opus-5-5". */
 export function shortModel(id: string): string {
   let s = id.trim();
