@@ -65,6 +65,7 @@ EFFORT_BY_PURPOSE: dict[Purpose, Effort] = {
     "revision": "low",
     "synthesis": "medium",
     "summary": "low",
+    "check": "low",
 }
 """Never "none" here: gpt-6-astra rejects it. No temperature/top_p either (unsupported)."""
 

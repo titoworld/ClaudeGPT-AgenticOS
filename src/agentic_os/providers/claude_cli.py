@@ -95,6 +95,7 @@ EFFORT_BY_PURPOSE: dict[Purpose, Effort] = {
     "revision": "medium",
     "synthesis": "high",
     "summary": "low",
+    "check": "low",
 }
 """Thinking effort per call purpose (shared with the api provider)."""
 

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.pdf_facts import PdfCheck, PdfNotes, PdfPage, pdf_notes
 
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
 """Billed output budget of answers, revisions and syntheses (reasoning included)."""
@@ -83,6 +84,19 @@ class Attachment:
     """When it was uploaded, if the store says (the question's ``meta.attachments``)."""
     has_thumbnail: bool = False
     """Whether the browser uploaded a thumbnail of it, if the store says."""
+    pdf_pages: tuple[PdfPage, ...] | None = None
+    """PDFs: what the server's reader found on each page (None when not analysed)."""
+    pdf_check: PdfCheck | None = None
+    """PDFs that ChatGPT reads as text (Codex): Claude's check of that text, when this
+    call has one (the engine sets it)."""
+
+    @property
+    def pdf_notes(self) -> PdfNotes | None:
+        """The warnings of a PDF's pages (``pdf_facts.pdf_notes``), None when it was not
+        analysed or is not a PDF."""
+        if self.kind != "pdf" or self.pdf_pages is None:
+            return None
+        return pdf_notes(self.pdf_pages)
 
     def read(self) -> bytes:
         """The stored file's bytes, checked against ``sha256`` (blocking: run it in a
@@ -332,3 +346,11 @@ class Provider(Protocol):
         ...
 
     async def aclose(self) -> None: ...
+
+
+def reads_pdfs(provider: Provider) -> bool:
+    """Whether a provider sends a PDF itself. ChatGPT through Codex (the app-server, mode
+    "cli") cannot: it gets the text the server extracted, page by page
+    (``prompt_format.pdf_view``), checked by Claude when the engine can
+    (docs/adr/0009-adjunts.md)."""
+    return not (provider.agent == "chatgpt" and provider.mode == "cli")

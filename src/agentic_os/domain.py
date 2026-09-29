@@ -25,7 +25,9 @@ MessageKind = Literal["question", "answer", "revision", "synthesis"]
 revision: critique + revised answer of an agent in a debate round.
 synthesis: final answer of a debate."""
 
-Purpose = Literal["answer", "revision", "synthesis", "summary"]
+Purpose = Literal["answer", "revision", "synthesis", "summary", "check"]
+"""Why a model is called: a message of the turn (answer, revision, synthesis), the
+compaction summary, or Claude's check of a PDF's text for ChatGPT (docs/adr/0009-adjunts.md)."""
 
 SavingKind = Literal["cache", "compaction", "early_stop", "unchanged"]
 

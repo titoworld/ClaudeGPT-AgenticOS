@@ -30,8 +30,10 @@ Attachments go before the transcript as items of the turn's input, in order
 image travels through the JSON-RPC pipe) at a link to the stored file whose extension
 gives its type, because Codex guesses a local image's type from the file name
 (:func:`named_image`); a text file as text; and a
-PDF, which Codex cannot take, as the text the server extracted from it, labelled as not
-checked (:func:`pdf_text`). Codex joins the text items into one message: a file's text
+PDF, which Codex cannot take, as the text the server extracted from it, page by page,
+with Claude's reading of the pages whose text it found missing or unreliable when the
+engine had Claude check it, and every page marked checked or not
+(``prompt_format.pdf_view``). Codex joins the text items into one message: a file's text
 is enclosed and neutralized (``prompt_format.enclosed``), so it cannot pass for the
 transcript that follows.
 
@@ -83,9 +85,7 @@ from agentic_os.providers.base import (
 )
 from agentic_os.providers.prompt_format import (
     attachment_text,
-    enclosed,
-    neutralize_tags,
-    pages_label,
+    pdf_view,
     render_transcript,
 )
 
@@ -117,6 +117,7 @@ EFFORT_BY_PURPOSE: dict[Purpose, str] = {
     "revision": "low",
     "synthesis": "medium",
     "summary": "low",
+    "check": "low",
 }
 LOWEST_EFFORT = "low"
 """Effort of a request with reasoning "off": the lowest level every model of the 0.157.1
@@ -741,19 +742,6 @@ def remove_log_databases(state_dir: Path) -> list[str]:
     return sorted(removed)
 
 
-def pdf_text(attachment: Attachment) -> str:
-    """What ChatGPT reads of a PDF: the text the server extracted, unchecked (Codex has no
-    PDF input), enclosed under a header that says so (``prompt_format.enclosed``); or a
-    notice when there is none."""
-    name = neutralize_tags(attachment.name)
-    text = attachment.text
-    if text is None or not text.strip():
-        return f"[PDF «{name}»: no se n'ha pogut extreure el text]\n"
-    pages = f", {pages_label(attachment.pages)}" if attachment.pages else ""
-    header = f"PDF «{name}»{pages}: text extret pel servidor, sense contrastar"
-    return enclosed(header, text, attachment)
-
-
 def _text_item(text: str) -> JsonObject:
     return {"type": "text", "text": text, "text_elements": []}
 
@@ -795,7 +783,7 @@ def input_items(
 ) -> list[JsonObject]:
     """``UserInput`` items of a call's turn: one per attachment, in order (an image as a
     ``localImage``, at its path in ``images`` (by SHA-256, see :func:`named_image`) or
-    else its stored path; a PDF as :func:`pdf_text`; a text file as its ``[Fitxer: ...]``
+    else its stored path; a PDF as ``prompt_format.pdf_view``; a text file as its ``[Fitxer: ...]``
     text), then the rendered transcript."""
     items: list[JsonObject] = []
     for attachment in request.attachments:
@@ -803,7 +791,7 @@ def input_items(
             path = (images or {}).get(attachment.sha256, attachment.path)
             items.append({"type": "localImage", "path": str(path)})
         elif attachment.kind == "pdf":
-            items.append(_text_item(pdf_text(attachment)))
+            items.append(_text_item(pdf_view(attachment)))
         else:
             items.append(_text_item(attachment_text(attachment)))
     items.append(_text_item(render_transcript(request)))
