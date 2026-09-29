@@ -60,10 +60,20 @@ API (no real model), with the ids and fields of ``stream_success.jsonl``:
 On SIGTERM the real CLI shuts down gracefully: it still printed the ``user`` follow-up
 and ``system``/``status`` events and exited about 20 ms later, usually after its next
 request had left (``sigterm_grace`` models that). SIGKILL stops it at once.
+
+The stdin message: its ``content`` is a string, or a list of content blocks as the
+stream-json input of the CLI 2.1.283 takes them (``text``; ``image`` with a base64
+source of image/jpeg, png, gif or webp; ``document`` with a base64 PDF source and an
+optional ``title``), the last one the text of the turn. Any other shape, an unknown key
+or data that is not base64 makes the fake fail; each block is recorded in ``blocks``
+(images and documents by the SHA-256 of their decoded bytes).
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 import signal
@@ -96,6 +106,60 @@ PREFIXED = ("--system-prompt=", "--model=")
 FORBIDDEN = ("--append-system-prompt", "--bare", "--system-prompt-file")
 STARTUP_TYPES = ("active_goal", "autocompact_state")
 """Events the real CLI prints before it reads stdin (see "Start-up lines")."""
+IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+
+
+def decoded(source: object, media_types: tuple[str, ...]) -> bytes | None:
+    """The bytes of a base64 ``source`` of one of ``media_types`` (None if it is not one)."""
+    if not isinstance(source, dict) or set(source) != {"type", "media_type", "data"}:
+        return None
+    if source["type"] != "base64" or source["media_type"] not in media_types:
+        return None
+    if not isinstance(source["data"], str):
+        return None
+    try:
+        return base64.b64decode(source["data"], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def block_record(block: object) -> dict[str, Any] | None:
+    """What a content block carries (None for a block the CLI would not take)."""
+    if not isinstance(block, dict):
+        return None
+    kind = block.get("type")
+    if kind == "text" and set(block) == {"type", "text"} and isinstance(block["text"], str):
+        return {"type": "text", "text": block["text"]}
+    if kind == "image" and set(block) == {"type", "source"}:
+        data = decoded(block["source"], IMAGE_TYPES)
+        media_type = block["source"]["media_type"] if data is not None else None
+    elif kind == "document" and set(block) <= {"type", "source", "title"}:
+        if not isinstance(block.get("title", ""), str):
+            return None
+        data = decoded(block["source"], ("application/pdf",))
+        media_type = "application/pdf"
+    else:
+        return None
+    if data is None:
+        return None
+    record = {"type": kind, "media_type": media_type, "sha256": hashlib.sha256(data).hexdigest()}
+    if "title" in block:
+        record["title"] = block["title"]
+    return record
+
+
+def content_blocks(content: object) -> list[dict[str, Any]] | None:
+    """The records of a list of content blocks that ends with a text block (None if the
+    CLI would not take it)."""
+    if not isinstance(content, list) or not content:
+        return None
+    records: list[dict[str, Any]] = []
+    for block in content:
+        found = block_record(block)
+        if found is None:
+            return None
+        records.append(found)
+    return records if records[-1]["type"] == "text" else None
 
 
 def record(entry: dict[str, Any]) -> None:
@@ -213,7 +277,13 @@ def main() -> None:
     message = json.loads(line)
     if message.get("type") != "user" or message.get("client_composed") is not True:
         fail("stdin message must be a client_composed user message")
-    if message["message"]["role"] != "user" or not isinstance(message["message"]["content"], str):
+    content = message["message"]["content"]
+    if not isinstance(content, str):
+        blocks = content_blocks(content)
+        if blocks is None:
+            fail("bad content blocks")
+        entry["blocks"] = blocks
+    if message["message"]["role"] != "user":
         fail("bad user message")
     entry["stdin"] = message
     record({**entry, "phase": "input"})

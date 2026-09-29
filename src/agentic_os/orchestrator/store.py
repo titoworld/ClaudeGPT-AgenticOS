@@ -21,8 +21,17 @@ from agentic_os.domain import (
     Usage,
 )
 from agentic_os.orchestrator.events import TurnOutcome
+from agentic_os.providers.base import Attachment
 
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+class AttachmentNotFoundError(LookupError):
+    """:meth:`Store.get_attachments` was asked for an attachment that does not exist."""
+
+    def __init__(self, attachment_id: int) -> None:
+        super().__init__(f"L'adjunt {attachment_id} no existeix.")
+        self.attachment_id = attachment_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +50,10 @@ class NewMessage:
     meta: Mapping[str, JsonValue] = field(default_factory=dict)
     """Free-form metadata: usage, model, latency_ms, agreement, critique, cached... A
     question starts with ``outcome: None`` (see :meth:`Store.set_turn_outcome`)."""
+    attachments: tuple[int, ...] = ()
+    """Ids of a question's attachments, in order (docs/adr/0009-adjunts.md): linked in
+    the same transaction that stores the question, so a question never exists without
+    the attachments its ``meta.attachments`` describes. Only a question takes any."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +125,22 @@ class CachedTurn:
 class Store(Protocol):
     async def create_conversation(self, title: str) -> int: ...
 
+    async def discard_conversation(self, conversation_id: int) -> bool:
+        """Delete a conversation that has no messages (one a turn created and then could
+        not store its question in); ``False``, and nothing changes, if it has any or does
+        not exist."""
+        ...
+
     async def conversation_exists(self, conversation_id: int) -> bool: ...
 
     async def get_history(self, conversation_id: int) -> History: ...
 
-    async def add_message(self, message: NewMessage) -> int: ...
+    async def add_message(self, message: NewMessage) -> int:
+        """Store a message and return its id. A question with ``attachments`` is stored
+        with its links or not at all: :class:`AttachmentNotFoundError` with the first id
+        that does not exist, :class:`ValueError` if an id repeats or the message is not a
+        question."""
+        ...
 
     async def set_summary(
         self, conversation_id: int, summary: str, upto_message_id: int
@@ -135,3 +159,16 @@ class Store(Protocol):
     async def cache_get(self, key: str, now: datetime) -> CachedTurn | None: ...
 
     async def cache_put(self, key: str, value: CachedTurn, expires_at: datetime) -> None: ...
+
+    async def get_attachments(self, ids: Sequence[int]) -> list[Attachment]:
+        """The uploaded attachments with these ids, in the given order (``mode``
+        "full"); raises :class:`AttachmentNotFoundError` with the first id that does
+        not exist."""
+        ...
+
+    async def link_attachments(self, message_id: int, ids: Sequence[int]) -> None:
+        """Link attachments to a question message already stored, in the given order
+        (their position): a linked attachment is kept while its conversation exists. The
+        engine stores a question and its links together instead
+        (:attr:`NewMessage.attachments`)."""
+        ...

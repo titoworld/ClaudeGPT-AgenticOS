@@ -32,6 +32,7 @@ VALID: dict[str, Any] = {
     "fx": {"mode": "manual", "eur_per_usd": 0.91},
     "budgets_eur": {"claude": 25.0, "chatgpt": None},
     "plans_eur": {"claude": 100.0, "chatgpt": 0.0},
+    "pdf_in_revisions": "full",
 }
 
 
@@ -50,6 +51,7 @@ def test_defaults_match_the_protocol() -> None:
         "fx": {"mode": "auto", "eur_per_usd": 0.86},
         "budgets_eur": {"claude": None, "chatgpt": None},
         "plans_eur": {"claude": None, "chatgpt": None},
+        "pdf_in_revisions": "text",
     }
     assert settings.to_turn_options() == TurnOptions()
     assert settings.chosen_models() == {}
@@ -141,6 +143,9 @@ def test_model_ids_are_trimmed_and_empty_means_the_default() -> None:
         ({"plans_eur": {"chatgpt": True}}, "plans_eur.chatgpt"),
         ({"plans_eur": {"chatgpt": float("inf")}}, "plans_eur.chatgpt"),
         ({"plans_eur": None}, "plans_eur"),
+        ({"pdf_in_revisions": "document"}, "pdf_in_revisions"),
+        ({"pdf_in_revisions": None}, "pdf_in_revisions"),
+        ({"pdf_in_revisions": True}, "pdf_in_revisions"),
         ({"revision": -1}, "revision"),
         ({"revision": 1.0}, "revision"),
         ({"revision": "1"}, "revision"),
@@ -244,6 +249,16 @@ def test_direct_construction_is_validated() -> None:
         RuntimeSettings(prices={"m": ModelPrice(1, float("nan"), 0, 0)})
     with pytest.raises(ValueError, match=r"budgets_eur\.chatgpt"):
         RuntimeSettings(budgets_eur={"chatgpt": -1.0})
+    with pytest.raises(
+        ValueError, match=re.escape("«pdf_in_revisions» ha de ser «full» o «text».")
+    ):
+        RuntimeSettings(pdf_in_revisions="pdf")  # type: ignore[arg-type]
+
+
+def test_revisions_get_the_pdfs_text_by_default() -> None:
+    assert RuntimeSettings().pdf_in_revisions == "text"
+    assert RuntimeSettings.from_wire({}).pdf_in_revisions == "text"  # settings saved before
+    assert RuntimeSettings.from_wire({"pdf_in_revisions": "full"}).pdf_in_revisions == "full"
 
 
 NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)

@@ -10,6 +10,7 @@ import { AGENT_LABEL } from './format';
 import { AGENTS } from './protocol';
 import type {
   Agent,
+  Attachment,
   Consensus,
   ErrorInfo,
   Message,
@@ -70,6 +71,8 @@ export interface TurnView {
   target: Agent | null;
   options: TurnOptions | null;
   question: string;
+  /** The question's attachments, in order (live: those sent; stored: `meta.attachments`). */
+  attachments: Attachment[];
   createdAt: string;
   status: TurnStatus;
   phase: Phase | null;
@@ -124,6 +127,7 @@ export interface NewTurnInput {
   options?: TurnOptions | null;
   conversationId?: number | null;
   createdAt?: string;
+  attachments?: readonly Attachment[];
 }
 
 /** A turn the client just sent (or is resubscribing to), before any event. */
@@ -137,6 +141,7 @@ export function createLiveTurn(input: NewTurnInput): TurnView {
     target: input.target ?? null,
     options: input.options ?? null,
     question: input.question,
+    attachments: [...(input.attachments ?? [])],
     createdAt: input.createdAt ?? new Date().toISOString(),
     status: 'pending',
     phase: null,
@@ -471,6 +476,34 @@ function asOptions(v: unknown): TurnOptions | null {
   };
 }
 
+const ATTACHMENT_KINDS: readonly string[] = ['image', 'pdf', 'text'];
+
+/** An attachment of a stored question (`meta.attachments`), or null when it is not one. */
+function asAttachment(v: unknown): Attachment | null {
+  if (!isRecord(v)) return null;
+  const id = asNumber(v.id);
+  if (id == null || id < 1 || !Number.isInteger(id)) return null;
+  if (typeof v.name !== 'string' || typeof v.kind !== 'string' || !ATTACHMENT_KINDS.includes(v.kind)) return null;
+  return {
+    id,
+    name: v.name,
+    kind: v.kind as Attachment['kind'],
+    mime: typeof v.mime === 'string' ? v.mime : '',
+    size: asNumber(v.size) ?? 0,
+    pages: asNumber(v.pages),
+    width: asNumber(v.width),
+    height: asNumber(v.height),
+    sha256: typeof v.sha256 === 'string' ? v.sha256 : '',
+    created_at: typeof v.created_at === 'string' ? v.created_at : '',
+    has_thumbnail: v.has_thumbnail === true,
+    text_available: v.text_available === true,
+    estimated_tokens: asNumber(v.estimated_tokens) ?? 0,
+  };
+}
+
+const asAttachments = (v: unknown): Attachment[] =>
+  Array.isArray(v) ? v.map(asAttachment).filter((a): a is Attachment => a != null) : [];
+
 /** Consensus of a stored debate, from its last revision round. */
 export function deriveConsensus(turn: TurnView): Consensus | null {
   const rounds = revisionRounds(turn);
@@ -696,6 +729,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       target,
       options: asOptions(qmeta.options),
       question: question?.content ?? '',
+      attachments: asAttachments(qmeta.attachments),
       createdAt: question?.created_at ?? group[0]!.created_at,
       status,
       phase: last ? (last.kind === 'revision' ? 'revision' : last.kind === 'synthesis' ? 'synthesis' : 'answer') : null,

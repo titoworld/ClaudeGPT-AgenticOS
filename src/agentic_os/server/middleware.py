@@ -6,6 +6,10 @@ state-changing requests and the request body limit.
 Order, outermost first: security headers -> unread body -> Origin check -> body
 limit -> app, so the 403 and 413 answers of the inner two also carry the security
 headers and close the connection when their body was never read.
+
+The upload of an attachment (``PUT /api/attachments``) is the one body that is a file:
+it gets its own size limit and deadline (:data:`LARGE_BODY_PATHS`). Its route is read
+only with a session, so no anonymous client can hold such a body open.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from agentic_os.attachments import MAX_UPLOAD_BYTES
 
 CONTENT_SECURITY_POLICY: Final = "; ".join(
     (
@@ -45,6 +51,12 @@ SMALL_BODY_PATHS: Final[Mapping[str, int]] = {"/api/auth/login": 4096}
 cannot pile up memory while they wait for the deadline."""
 BODY_TIMEOUT_SECONDS: Final = 15.0
 """Time allowed to receive a whole request body, from the app's first read."""
+UPLOAD_PATH: Final = "/api/attachments"
+LARGE_BODY_PATHS: Final[Mapping[str, int]] = {UPLOAD_PATH: MAX_UPLOAD_BYTES}
+"""Routes whose body is a file (the route cuts each type at its own limit, lower)."""
+UPLOAD_TIMEOUT_SECONDS: Final = 120.0
+"""Time allowed to receive a file of :data:`LARGE_BODY_PATHS`: 20 MB take it at about
+170 kB/s (1.4 Mbit/s)."""
 STATE_CHANGING_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 FORBIDDEN_ORIGIN_DETAIL: Final = "Origen no permès."
@@ -52,8 +64,9 @@ TOO_SLOW_DETAIL: Final = "La petició ha trigat massa a arribar. Torna-ho a prov
 
 
 def size_text(size: int) -> str:
-    """A number of bytes as the docs write it: ``1 MiB``, ``4 KiB``, ``1000 bytes``."""
-    for factor, unit in ((1024 * 1024, "MiB"), (1024, "KiB")):
+    """A number of bytes as the docs write it: ``1 MiB``, ``4 KiB``, ``20 MB``,
+    ``1000 bytes``."""
+    for factor, unit in ((1024 * 1024, "MiB"), (1024, "KiB"), (1_000_000, "MB")):
         if size >= factor and size % factor == 0:
             return f"{size // factor} {unit}"
     return f"{size} bytes"
@@ -207,10 +220,12 @@ class RequestTimeoutError(BodyError):
 
 class BodyLimitMiddleware:
     """Limits HTTP request bodies to ``max_bytes`` (FastAPI ignores Starlette's own
-    ``max_body_size``) and ``timeout`` seconds. A larger ``Content-Length`` is
-    refused before reading; a chunked body is counted as it arrives. The deadline
-    starts with the app's first read of the body, so a client that trickles it (or
-    stops sending) cannot hold a connection: it gets ``408`` and is disconnected."""
+    ``max_body_size``) and ``timeout`` seconds, except the paths with their own limit
+    (``small_paths``, and ``large_paths`` with ``upload_timeout``). A larger
+    ``Content-Length`` is refused before reading; a chunked body is counted as it
+    arrives. The deadline starts with the app's first read of the body, so a client
+    that trickles it (or stops sending) cannot hold a connection: it gets ``408`` and
+    is disconnected."""
 
     def __init__(
         self,
@@ -219,17 +234,22 @@ class BodyLimitMiddleware:
         max_bytes: int = MAX_BODY_BYTES,
         timeout: float | None = None,
         small_paths: Mapping[str, int] = SMALL_BODY_PATHS,
+        large_paths: Mapping[str, int] = LARGE_BODY_PATHS,
+        upload_timeout: float | None = None,
     ) -> None:
         self.app = app
         self._max = max_bytes
         self._timeout = BODY_TIMEOUT_SECONDS if timeout is None else timeout
-        self._small = small_paths
+        self._limits = {**small_paths, **large_paths}
+        long_timeout = UPLOAD_TIMEOUT_SECONDS if upload_timeout is None else upload_timeout
+        self._timeouts = dict.fromkeys(large_paths, long_timeout)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        limit = self._small.get(scope["path"], self._max)
+        limit = self._limits.get(scope["path"], self._max)
+        timeout = self._timeouts.get(scope["path"], self._timeout)
         declared = Headers(raw=scope["headers"]).get("content-length")
         if declared is not None and declared.strip().isdigit() and int(declared) > limit:
             await self._reject(scope, receive, send, RequestTooLargeError(limit))
@@ -245,7 +265,7 @@ class BodyLimitMiddleware:
             if body_done:  # e.g. waiting for http.disconnect while streaming
                 return await receive()
             if deadline is None:
-                deadline = asyncio.get_running_loop().time() + self._timeout
+                deadline = asyncio.get_running_loop().time() + timeout
             try:
                 async with asyncio.timeout_at(deadline):
                     message = await receive()

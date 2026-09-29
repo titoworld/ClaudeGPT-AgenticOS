@@ -16,7 +16,9 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
    ├── security/     contrasenya argon2id, TOTP, sessions, dispositius coneguts, límits d'intents
    ├── orchestrator/ motor de torns: solo · duel · debat, compactació, memòria cau, comptabilitat
    ├── providers/    Claude i ChatGPT, cadascun en mode cli · api · fake
-   ├── storage/      SQLite (WAL): converses, missatges, ús, estalvis, memòria cau, sessions
+   ├── storage/      SQLite (WAL): converses, missatges, adjunts, ús, estalvis, memòria cau,
+   │                 sessions; els fitxers adjunts, al costat, adreçats pel contingut
+   ├── attachments   adjunts: límits, tipus pel contingut, text dels PDF (en un procés a part)
    └── pricing · fx  preus per model (USD/MTok) i canvi USD→EUR del BCE
         │
         ├── CLI oficial de Claude Code  (subscripció Pro/Max, OAuth)   ─┐ mode "cli"
@@ -29,13 +31,14 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | Mòdul | Contracte | Responsabilitat |
 | --- | --- | --- |
 | `domain.py` | tipus compartits | `AgentName`, `TurnMode`, `Usage`, opcions de debat |
-| `providers/base.py` | `Provider` | Converteix una `GenerationRequest` en un flux de `TextDelta` + un `GenerationResult` |
-| `orchestrator/store.py` | `Store` | Persistència que necessita el motor (implementada per `storage`), també el resultat de cada torn |
+| `providers/base.py` | `Provider`, `Attachment` | Converteix una `GenerationRequest` (amb els seus adjunts) en un flux de `TextDelta` + un `GenerationResult` |
+| `orchestrator/store.py` | `Store` | Persistència que necessita el motor (implementada per `storage`), també el resultat de cada torn i els adjunts de la pregunta |
 | `orchestrator/events.py` | esdeveniments, `TurnOutcome` | Missatges servidor → client d'un torn ([PROTOCOL.md](PROTOCOL.md)) i com va acabar |
 | `orchestrator/types.py` | `TurnRequest`, `EngineConfig` | Entrada del motor |
 | `config.py` | `Settings` | Configuració del procés (variables `AOS_*`) |
 | `pricing.py` | `ModelPrice`, `estimate_cost_usd` | Preus per defecte i propis; cost de cada crida |
 | `fx.py` | `FxRate` | Tipus de canvi diari del BCE amb valor manual de reserva |
+| `attachments.py` | límits, `PdfReader` | Límits dels adjunts, tipus d'un fitxer pel contingut, dimensions d'una imatge, nom net, tokens estimats i lectura dels PDF en un procés a part |
 
 ## Modes de torn
 
@@ -69,6 +72,16 @@ Cada agent té tres modes, escollits amb `AOS_CLAUDE_MODE` i `AOS_CHATGPT_MODE`:
 - **`cli`** (per defecte): executa la CLI oficial (`claude`, `codex`) amb el prompt per l'entrada estàndard, en un directori buit i amb un entorn mínim: Claude sense cap eina i Codex en mode només lectura, sense les eines que es poden desactivar ([Seguretat](#seguretat-un-sol-usuari)). Autenticada amb la teva subscripció (OAuth) un sol cop al VPS.
 - **`api`**: SDK oficial amb clau d'API (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) i *prompt caching*.
 - **`fake`**: respostes deterministes per a proves i per provar la interfície sense gastar res.
+
+## Adjunts
+
+El propietari pot adjuntar a una pregunta imatges (PNG, JPEG, GIF, WebP), PDF i fitxers de text, com a molt 5 i 20 MB entre tots ([ADR 0009](adr/0009-adjunts.md), límits i rutes a [PROTOCOL.md](PROTOCOL.md#adjunts)).
+
+- **Pujada:** cada fitxer es puja sol (`PUT /api/attachments`), abans d'enviar la pregunta, i `turn.start` en porta els `id`. El tipus surt del contingut, mai del nom: les imatges i els PDF per la seva signatura, el text per ser UTF-8 amb una extensió permesa. Tota la resta, també l'SVG, es rebutja. El servidor llegeix les dimensions d'una imatge de les capçaleres, sense descodificar-la, i el navegador ja redueix les imatges grans abans de pujar-les.
+- **PDF:** el llegeix pypdf en un procés a part (Python aïllat, sense l'entorn del servidor, 60 s, 512 MiB d'espai d'adreces, sense escriure fitxers ni crear processos), que en compta les pàgines i n'extreu el text, amb un bloc per pàgina. El procés del servidor no analitza mai cap PDF, i si el contenidor es queda sense memòria, el nucli mata primer el lector (la pujada falla), no una CLI a mig torn ni el servidor.
+- **Emmagatzematge:** cada fitxer es desa un sol cop, adreçat pel seu `sha256`, a `<data_dir>/attachments` (directoris 0700, fitxers 0600), al costat de la base de dades i dins de les mateixes còpies de seguretat. La base de dades en desa la descripció i el text (el contingut d'un fitxer de text, el text extret d'un PDF) i quines preguntes els porten. Un adjunt que no s'envia s'esborra al cap de 24 h; esborrar una conversa esborra els que només feia servir ella; cada hora, una escombrada esborra els fitxers que cap fila no fa servir.
+- **Lliurament:** el motor els carrega en començar el torn (un que no existeix fa fallar el torn) i desa la pregunta lligada a ells, en una sola transacció, amb la descripció a `meta.attachments`. Les respostes i la síntesi reben tots els adjunts sencers; les revisions, les imatges i el text sencers i els PDF com diu `pdf_in_revisions` (per defecte, el text extret, que costa molts menys tokens; un PDF sense text, com un d'escanejat, hi va sencer). Els torns posteriors només en veuen una referència. Cada proveïdor els envia amb els seus blocs (imatges i documents a Claude; `input_image` i `input_file` a l'API d'OpenAI); Codex rep les imatges pel camí (el d'un enllaç amb l'extensió del tipus, que és d'on Codex el dedueix) i els PDF com a text extret, marcat sense contrastar. Els models han de tractar el contingut dels adjunts com a dades, mai com a instruccions: el text d'un fitxer passa per `neutralize_tags` i va entre dues línies amb un codi que el fitxer no pot contenir (`[Fitxer: nom · codi]` i `[Fi del fitxer codi]`), així que no es pot fer passar per part del prompt.
+- **Miniatures:** les fa el navegador (les imatges amb un `canvas`, la primera pàgina d'un PDF amb PDF.js) i les puja, perquè es vegin a tots els dispositius.
 
 ## Models, costos i límits
 
@@ -113,12 +126,13 @@ Cada proveïdor ho aplica així:
 
 ## Seguretat (un sol usuari)
 
-- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió, l'única ruta que es llegeix sense sessió): Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 s (Caddy talla als 30 s), així que una pujada lenta no ocupa cap connexió gaire estona; els WebSockets no passen per aquest límit.
+- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió, l'única ruta que es llegeix sense sessió): Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 s (Caddy talla als 30 s), així que una pujada lenta no ocupa cap connexió gaire estona; els WebSockets no passen per aquest límit. La pujada d'un adjunt, que només es llegeix amb sessió, té un límit propi: 20 MB i 120 s (Caddy talla als 150 s).
 - Inici de sessió amb contrasenya (argon2id) **i** codi TOTP; bloqueig exponencial després d'intents fallits. Un navegador on ja s'ha entrat (cookie de dispositiu conegut) només es bloqueja pels seus propis errors; `agentic-os reset-throttle` aixeca tots els bloquejos. L'inici de sessió acaba en una sola transacció d'escriptura, condicionada al propietari amb què s'han comprovat les credencials: si `agentic-os init` el canvia mentrestant, l'intent falla, no en queda cap sessió ni dispositiu i la contrasenya antiga no pot substituir mai la nova.
 - Sessions al servidor (només se'n desa el hash), cookie `__Host-` HttpOnly, Secure, SameSite=Strict, caducitat per inactivitat i absoluta. Només les accions del propietari compten com a activitat: les peticions que el client fa pel seu compte (amb `X-AOS-Background: 1`), les reconnexions del WebSocket, els *pings* i les resubscripcions comproven la sessió sense allargar-la, de manera que una pestanya oberta sense ús no la manté viva. Com que la cookie és HttpOnly, només el servidor pot tancar la sessió: el client només dona el logout per fet quan el servidor el confirma. Fins aleshores, la pàgina queda bloquejada localment, sense cap dada de la sessió en memòria, i en tornar-la a carregar es torna a provar el logout abans de res més.
 - L'entrada es valida a les fronteres: els identificadors han de cabre a SQLite i el text ha de ser UTF-8 vàlid. Si no, la resposta és un `422` (o un error `invalid` al WebSocket) en català, mai un error intern ni un missatge intern de Python.
 - Comprovació d'`Origin` a totes les peticions que canvien estat i al WebSocket.
 - CSP estricta (`script-src 'self'`), HSTS, `frame-ancestors 'none'`; el markdown dels models es neteja amb DOMPurify.
+- Adjunts: el tipus surt del contingut i l'SVG es rebutja. Cap fitxer pujat no es serveix com a HTML: les imatges es mostren amb el seu tipus, els PDF i el text es descarreguen (`Content-Disposition: attachment`), i tots porten `nosniff` i una CSP `default-src 'none'; sandbox`. Els PDF només els llegeix un procés limitat, i els fitxers es desen amb un nom que surt del seu hash, mai del nom que dona el navegador. El nom del fitxer viatja a la consulta de l'URL de la pujada, però cap registre (ni el d'accés de l'aplicació ni els de Caddy) no desa la consulta de cap URL, tampoc el text de les cerques.
 - Les CLI s'executen sense *shell* ni accés als secrets de l'aplicació, amb temps màxim i matant tot el grup de processos en cancel·lar. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina de codi en un procés fill (entorn aïllat V8, sense fitxers ni xarxa) i eines de subagents: l'aplicació només en deixa córrer un alhora (`agents.max_threads=1`), interromp de seguida els torns que no són de cap crida en curs, atura la crida que en fa servir més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun ([ADR 0002](adr/0002-subscripcions-via-cli-oficials.md)). L'estat i els registres de Codex, que contenen els prompts, viuen en un tmpfs privat, i els registres s'esborren cada vegada que s'engega Codex. Per això `agentic-os doctor` engega el seu propi Codex amb un directori d'estat temporal, que esborra en acabar: mai no comparteix el de l'aplicació en marxa. També `claude --version` i `codex --version` s'executen amb la llista tancada de variables d'entorn de cada CLI.
 - Contenidors sense root (l'aplicació amb l'usuari 10001 i Caddy amb el 10002; només `caddy-init` corre uns segons com a root, sense xarxa i amb només les *capabilities* que necessita `chown`, per donar els volums de Caddy al seu usuari), `no-new-privileges`, sense *capabilities* efectives i amb límits de memòria, CPU i processos.
 

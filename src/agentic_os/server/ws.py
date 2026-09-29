@@ -33,6 +33,7 @@ from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketState
 
 from agentic_os import __version__
+from agentic_os.attachments import MAX_ATTACHMENTS
 from agentic_os.domain import AGENTS, AgentName, TurnMode, TurnOptions
 from agentic_os.orchestrator.events import Wire
 from agentic_os.orchestrator.types import TurnRequest
@@ -70,6 +71,9 @@ ACTIVITY_MESSAGES: Final = frozenset({"turn.start", "turn.cancel"})
 The others check the session read-only: ``ping`` and ``turn.subscribe`` are sent by
 the client by itself (heartbeats, resubscriptions after a reconnection)."""
 INVALID_TEXT_MESSAGE: Final = "El missatge conté text que no és UTF-8 vàlid."
+ATTACHMENTS_MESSAGE: Final = (
+    "«attachments» ha de ser una llista d'identificadors d'adjunt (enters positius)."
+)
 
 
 class ProtocolError(Exception):
@@ -158,11 +162,35 @@ def turn_models(models: object, runtime: RuntimeSettings) -> dict[AgentName, str
     return chosen
 
 
+def turn_attachments(value: object) -> tuple[int, ...]:
+    """Client ``attachments``: the ids of uploaded files, in order, at most
+    :data:`~agentic_os.attachments.MAX_ATTACHMENTS` and each once. Whether they exist
+    (and their total size) is checked by the engine, which answers with
+    ``turn.failed``."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProtocolError(ATTACHMENTS_MESSAGE)
+    ids: list[int] = []
+    for item in value:
+        attachment_id = _int(item)
+        if attachment_id is None or not 1 <= attachment_id <= MAX_SQLITE_ID:
+            raise ProtocolError(ATTACHMENTS_MESSAGE)
+        ids.append(attachment_id)
+    if len(ids) > MAX_ATTACHMENTS:
+        raise ProtocolError(f"Un missatge pot portar com a màxim {MAX_ATTACHMENTS} adjunts.")
+    if len(set(ids)) != len(ids):
+        raise ProtocolError("Un mateix adjunt no pot anar dues vegades al missatge.")
+    return tuple(ids)
+
+
 def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> TurnRequest:
     """A ``turn.start`` message as a :class:`TurnRequest`; ``mode``, ``target``,
     ``options`` and ``models`` default to the runtime settings (summaries use the
-    owner's ``fast_models``). The text itself (empty, too long) is validated by the
-    engine, which answers with ``turn.failed``."""
+    owner's ``fast_models``, and the revisions get the PDFs as the owner's
+    ``pdf_in_revisions`` says). The text itself (empty, too long) and whether the
+    attachments exist are validated by the engine, which answers with
+    ``turn.failed``."""
     request_id = parse_request_id(data)
     try:
         text = data.get("text")
@@ -188,6 +216,7 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
             raise ProtocolError("«conversation_id» ha de ser un enter positiu o null.")
         options = turn_options(data.get("options"), runtime)
         models = turn_models(data.get("models"), runtime)
+        attachments = turn_attachments(data.get("attachments"))
     except ProtocolError as exc:
         raise ProtocolError(exc.message, request_id=request_id) from None
     return TurnRequest(
@@ -199,6 +228,8 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         options=options,
         models=models,
         fast_models=runtime.chosen_fast_models(),
+        attachments=attachments,
+        pdf_in_revisions=runtime.pdf_in_revisions,
     )
 
 

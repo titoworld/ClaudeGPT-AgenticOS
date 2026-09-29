@@ -17,6 +17,7 @@ import {
   type TurnView,
 } from './turns.svelte';
 import { turnCost } from './costs';
+import type { Attachment } from './protocol';
 import {
   cancelledDebateEvents,
   cancelledDebateMessages,
@@ -718,5 +719,50 @@ describe('keptAnswers: revisions that keep the previous answer', () => {
   it('is empty for turns without revisions', () => {
     expect(keptAnswers(liveTurn(fallbackSynthesisEvents())).size).toBe(0);
     expect(keptAnswers(turnsFromMessages(compactedDuelMessages())[0]!).size).toBe(0);
+  });
+});
+
+describe('the attachments of a question (docs/PROTOCOL.md «Adjunts»)', () => {
+  const attachment = (id: number, partial: Partial<Attachment> = {}): Attachment => ({
+    id,
+    name: `fitxer-${id}.png`,
+    kind: 'image',
+    mime: 'image/png',
+    size: 1000 * id,
+    pages: null,
+    width: 640,
+    height: 480,
+    sha256: String(id).repeat(64).slice(0, 64),
+    created_at: '2026-09-28T10:00:00Z',
+    has_thumbnail: true,
+    text_available: false,
+    estimated_tokens: 414,
+    ...partial,
+  });
+
+  it('a live turn keeps the ones it was sent with', () => {
+    const turn = createLiveTurn({ requestId: 'r1', question: 'Què és?', mode: 'solo', attachments: [attachment(2), attachment(1)] });
+    expect(turn.attachments.map((a) => a.id)).toEqual([2, 1]);
+    expect(createLiveTurn({ requestId: 'r2', question: 'Hola', mode: 'solo' }).attachments).toEqual([]);
+  });
+
+  it('a stored turn reads them from its question, in order', () => {
+    const pdf = attachment(7, { name: 'informe.pdf', kind: 'pdf', mime: 'application/pdf', pages: 12, width: null, height: null, text_available: true, estimated_tokens: 43_200 });
+    const [turn] = turnsFromMessages([
+      message({ id: 1, turn_id: 1, kind: 'question', content: 'Resumeix-ho', final: true, meta: { mode: 'solo', target: 'claude', attachments: [pdf, attachment(3)] } }),
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'claude', content: 'Resum', final: true, meta: {} }),
+    ]);
+    expect(turn!.attachments).toEqual([pdf, attachment(3)]);
+  });
+
+  it('skips entries it cannot use, and a question without any has none', () => {
+    const [withBad, without] = turnsFromMessages([
+      message({ id: 1, turn_id: 1, kind: 'question', content: 'A', final: true, meta: { mode: 'solo', attachments: [attachment(4), { id: 'x' }, null, { ...attachment(5), kind: 'video' }, { ...attachment(6), id: 0 }] as unknown as Attachment[] } }),
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'claude', content: 'B', final: true }),
+      message({ id: 3, turn_id: 2, kind: 'question', content: 'C', final: true, meta: { mode: 'solo', attachments: 'no' as unknown as Attachment[] } }),
+      message({ id: 4, turn_id: 2, kind: 'answer', agent: 'claude', content: 'D', final: true }),
+    ]);
+    expect(withBad!.attachments.map((a) => a.id)).toEqual([4]);
+    expect(without!.attachments).toEqual([]);
   });
 });

@@ -41,11 +41,19 @@ message received is appended to ``$CODEX_HOME/requests.jsonl`` with the pid (and
 start time); the environment goes to ``env.json``. Like the real server, every turn input
 is logged to ``logs_2.sqlite`` (a plain-text stand-in) in ``-c sqlite_home=...``, or in
 ``$CODEX_HOME`` without that override.
+
+A turn's ``input`` takes the ``UserInput`` items of 0.157.1 this client sends: ``text``
+(with ``text_elements``) and ``localImage`` (an absolute ``path``, and an optional
+``detail``); anything else is refused with -32602, as the real server refuses an unknown
+variant. Every turn logs its items as ``turn_input``, a ``localImage`` with the type its
+file name gives (as Codex's mime_guess does) and the SHA-256
+of the file this process read at its path (or the error it got), as Codex reads it.
 Standard library only.
 """
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -438,6 +446,44 @@ def run_turn(thread_id: str, turn_id: str, text: str) -> None:
     turn.finish()
 
 
+IMAGE_TYPES_BY_EXTENSION = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+"""What Codex's mime_guess makes of a local image's extension ("image" without one)."""
+
+
+def input_item(item: object) -> dict[str, Any] | None:
+    """The log entry of a turn input item (None for an item 0.157.1 would refuse)."""
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("type")
+    if kind == "text" and set(item) == {"type", "text", "text_elements"}:
+        if isinstance(item["text"], str) and isinstance(item["text_elements"], list):
+            return {"type": "text", "text": item["text"]}
+        return None
+    if kind == "localImage" and set(item) <= {"type", "path", "detail"}:
+        path = item.get("path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            return None
+        # Like Codex (mime_guess): the type comes from the file name, never the bytes.
+        extension = os.path.splitext(path)[1].lower()
+        entry: dict[str, Any] = {
+            "type": "localImage",
+            "path": path,
+            "mime": IMAGE_TYPES_BY_EXTENSION.get(extension, "image"),
+        }
+        try:
+            entry["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError as exc:
+            entry["error"] = type(exc).__name__
+        return entry
+    return None
+
+
 def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
     account = OPTIONS.get("account", DEFAULT_ACCOUNT)
     if method == "initialize":
@@ -520,6 +566,11 @@ def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
         )
         notify("thread/started", {"thread": thread})
     elif method == "turn/start":
+        items = [input_item(item) for item in params.get("input", [])]
+        if not items or any(item is None for item in items):
+            fail(request_id, -32602, "invalid params: unknown or malformed UserInput item")
+            return
+        log({"turn_input": items})
         turn_id = str(uuid.uuid4())
         _interrupts[turn_id] = threading.Event()
         respond(request_id, {"turn": Turn(params["threadId"], turn_id).turn("inProgress")})

@@ -1,7 +1,7 @@
 // RuntimeSettings defaults and validation, mirroring the server ranges (docs/PROTOCOL.md).
 
 import { validateModelId } from './models';
-import { AGENTS, type Agent, type ModelPrice, type RuntimeSettings } from './protocol';
+import { AGENTS, type Agent, type ModelPrice, type PdfInRevisions, type RuntimeSettings } from './protocol';
 
 export const LIMITS = {
   rounds: { min: 0, max: 4 },
@@ -33,10 +33,13 @@ export const DEFAULT_SETTINGS: RuntimeSettings = {
   fx: { mode: 'auto', eur_per_usd: DEFAULT_EUR_PER_USD },
   budgets_eur: perAgent(null),
   plans_eur: perAgent(null),
+  pdf_in_revisions: 'text',
 };
 
 const isRevision = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+const isPdfInRevisions = (value: unknown): value is PdfInRevisions => value === 'full' || value === 'text';
 
 /**
  * Deep copy of plain settings with every key present (an older server may omit
@@ -59,6 +62,7 @@ export function normalizeSettings(s: Partial<RuntimeSettings>): RuntimeSettings 
     fx: { ...d.fx, ...s.fx },
     budgets_eur: { ...d.budgets_eur, ...s.budgets_eur },
     plans_eur: { ...d.plans_eur, ...s.plans_eur },
+    pdf_in_revisions: isPdfInRevisions(s.pdf_in_revisions) ? s.pdf_in_revisions : d.pdf_in_revisions,
   };
 }
 

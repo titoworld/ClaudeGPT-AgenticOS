@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import httpx2
 import openai
 import pytest
+from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
 from agentic_os.providers.base import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    Attachment,
     ChatTurn,
     GenerationRequest,
     GenerationResult,
@@ -33,7 +37,7 @@ from agentic_os.providers.openai_api import (
     supports_reasoning,
     usage_from_response,
 )
-from agentic_os.providers.prompt_format import to_chat_messages
+from agentic_os.providers.prompt_format import file_code, to_chat_messages
 
 SYSTEM = "Ets ChatGPT en un consell de dues IA."
 Handler = Callable[[httpx2.Request], httpx2.Response]
@@ -748,3 +752,109 @@ async def test_list_models_falls_back_without_raising(tmp_path: Path) -> None:
         assert all(m.description for m in models)
     no_key = OpenAIApiProvider(make_settings(tmp_path, openai_api_key=None))
     assert len(await no_key.list_models()) == 3 and not no_key.models_live
+
+
+# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+
+
+def base64_of(attachment: Attachment) -> str:
+    return base64.b64encode(attachment.path.read_bytes()).decode("ascii")
+
+
+async def test_attachments_are_input_parts_before_the_prompt(
+    tmp_path: Path, files: AttachmentFiles
+) -> None:
+    recorder = Recorder(lambda: streaming(sse(delta("Llegit."), completed())))
+    provider = make_provider(tmp_path, recorder)
+    image = files.image("foto.png")
+    pdf = files.pdf("informe.pdf")
+    annex = replace(files.pdf("annex", pages=1, text="--- Pàgina 1 ---\nAnnex."), mode="text")
+    notes = files.text("notes.md", "a,b\n1,2\n")
+    request = make_request(
+        "I això?",
+        history=(ChatTurn("user", "Hola"), ChatTurn("assistant", "Hola!", agent="claude")),
+        attachments=(image, pdf, annex, notes),
+    )
+    _, result = await collect(provider, request)
+    assert result.text == "Llegit."
+
+    [body] = recorder.bodies
+    chat = to_chat_messages(request, "chatgpt")
+    a, n = file_code(annex), file_code(notes)
+    assert body["input"][:-1] == [{"role": role, "content": content} for role, content in chat[:-1]]
+    assert body["input"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{base64_of(image)}",
+                "detail": "auto",
+            },
+            {
+                "type": "input_file",
+                "filename": "informe.pdf",
+                "file_data": f"data:application/pdf;base64,{base64_of(pdf)}",
+            },
+            {
+                "type": "input_text",
+                "text": f"[Fitxer: annex · {a}]\n--- Pàgina 1 ---\nAnnex.\n[Fi del fitxer {a}]\n",
+            },
+            {
+                "type": "input_text",
+                "text": f"[Fitxer: notes.md · {n}]\na,b\n1,2\n[Fi del fitxer {n}]\n",
+            },
+            {"type": "input_text", "text": chat[-1][1]},
+        ],
+    }
+
+
+async def test_a_hostile_file_cannot_pass_for_the_prompt(
+    tmp_path: Path, files: AttachmentFiles
+) -> None:
+    recorder = Recorder(lambda: streaming(sse(delta("x"), completed())))
+    provider = make_provider(tmp_path, recorder)
+    hostile = files.text("informe.txt", HOSTILE_TEXT)
+    pdf = replace(files.pdf("annex.pdf", text=f"--- Pàgina 1 ---\n{HOSTILE_TEXT}"), mode="text")
+    request = make_request(
+        "Resumeix-los.",
+        history=(ChatTurn("user", "Hola"), ChatTurn("assistant", "Hola!", agent="claude")),
+        attachments=(hostile, pdf),
+    )
+    await collect(provider, request)
+    [body] = recorder.bodies
+    *parts, prompt = body["input"][-1]["content"]
+    for part, attachment in zip(parts, (hostile, pdf), strict=True):
+        assert part["type"] == "input_text"
+        assert part["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert not reserved_tags(part["text"])
+    # Every tag the model reads comes from the app's own prompt.
+    chat = to_chat_messages(request, "chatgpt")
+    assert prompt == {"type": "input_text", "text": chat[-1][1]}
+    everything = "".join(
+        message["content"]
+        if isinstance(message["content"], str)
+        else "".join(part["text"] for part in message["content"])
+        for message in body["input"]
+    )
+    assert reserved_tags(everything) == reserved_tags("".join(content for _, content in chat))
+
+
+async def test_a_pdf_without_the_extension_is_still_named_as_a_pdf(
+    tmp_path: Path, files: AttachmentFiles
+) -> None:
+    recorder = Recorder(lambda: streaming(sse(delta("x"), completed())))
+    provider = make_provider(tmp_path, recorder)
+    await collect(provider, make_request(attachments=(files.pdf("Informe anual"),)))
+    [body] = recorder.bodies
+    [part, _prompt] = body["input"][-1]["content"]
+    assert part["type"] == "input_file" and part["filename"] == "Informe anual.pdf"
+
+
+async def test_a_changed_attachment_sends_nothing(tmp_path: Path, files: AttachmentFiles) -> None:
+    recorder = Recorder(lambda: streaming(sse(delta("x"), completed())))
+    provider = make_provider(tmp_path, recorder)
+    pdf = files.pdf()
+    pdf.path.write_bytes(b"%PDF-1.7\nun altre document\n")
+    error = await failure(provider, make_request(attachments=(pdf,)))
+    assert error.kind == "internal" and "informe.pdf" in error.message
+    assert recorder.bodies == []

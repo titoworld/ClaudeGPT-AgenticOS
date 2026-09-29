@@ -7,6 +7,14 @@ cancelling the iterator cancels every task of the turn before returning.
 
 How every turn ends (completed, failed or cancelled) is decided once and stored on its
 question before the terminal event (docs/adr/0007-resultat-del-torn.md).
+
+Attachments (docs/adr/0009-adjunts.md): a turn loads the ones its request names before
+anything else (a missing one fails the turn), stores its question linked to them in one
+transaction, before ``turn.started`` (one deleted meanwhile fails the turn just the same),
+and keeps their metadata there (``meta.attachments``). Answers and the synthesis get
+every one whole; the revisions get images and text files whole and the PDFs as
+``pdf_in_revisions`` says (their extracted text, or the document), except a PDF without
+any text, which goes whole. Later turns only see a reference to them.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from agentic_os.attachments import snapshot
 from agentic_os.domain import (
     AGENTS,
     AgentName,
@@ -76,6 +85,7 @@ from agentic_os.orchestrator.memory import (
     context_from_history,
 )
 from agentic_os.orchestrator.prompts import (
+    answer_prompt,
     debate_answer_prompt,
     revision_prompt,
     synthesis_prompt,
@@ -83,6 +93,7 @@ from agentic_os.orchestrator.prompts import (
 )
 from agentic_os.orchestrator.sections import RevisionStreamParser
 from agentic_os.orchestrator.store import (
+    AttachmentNotFoundError,
     CachedTurn,
     JsonValue,
     NewMessage,
@@ -94,13 +105,14 @@ from agentic_os.orchestrator.types import EngineConfig, TurnRequest
 from agentic_os.pricing import ModelPrice, estimate_cost_usd, find_price
 from agentic_os.providers.base import (
     MODEL_ID_PATTERN,
+    Attachment,
     GenerationRequest,
     GenerationResult,
     Provider,
     ProviderError,
     TextDelta,
 )
-from agentic_os.providers.prompt_format import AGENT_LABELS
+from agentic_os.providers.prompt_format import AGENT_LABELS, has_text
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +208,8 @@ class _Turn:
     question: str
     conversation_id: int = 0
     turn_id: int = 0
+    attachments: tuple[Attachment, ...] = ()
+    """The question's attachments, in order, each in mode "full"."""
     prices: Mapping[str, ModelPrice] | None = None
     """Owner price overrides (over the default prices) for this turn's costs."""
     context: TurnContext = field(default_factory=lambda: build_context(None, ()))
@@ -451,6 +465,11 @@ class Engine:
         if invalid is not None:
             await self._fail(turn, invalid)
             return
+        # Before anything is stored: a turn with a missing attachment leaves nothing.
+        invalid = await self._load_attachments(turn)
+        if invalid is not None:
+            await self._fail(turn, invalid)
+            return
 
         new_conversation = request.conversation_id is None
         if request.conversation_id is None:
@@ -480,6 +499,8 @@ class Engine:
                 question=turn.question,
                 context_fingerprint=context_fingerprint(turn.context),
                 identities=known,
+                attachments=turn.attachments,
+                pdf_in_revisions=request.pdf_in_revisions,
             )
             if len(known) == len(agents)
             else None
@@ -494,6 +515,15 @@ class Engine:
                 cached = None
 
         question_meta = self._question_meta(request, agents)
+        if turn.attachments:
+            # The wire's Attachment of each one (docs/PROTOCOL.md): the turn view shows
+            # them from here, and later turns mention them (see memory.to_chat_turn).
+            question_meta["attachments"] = [
+                snapshot(attachment_id, attachment)
+                for attachment_id, attachment in zip(
+                    request.attachments, turn.attachments, strict=True
+                )
+            ]
         if turn.compaction_usage is not None:
             # The summary ran before the question existed: its cost travels with the
             # question (and in the turn's outcome).
@@ -501,15 +531,27 @@ class Engine:
         # Open until the turn ends (see _settle): a turn that never ends (a crash, a
         # restart) keeps it null, unlike the turns stored before outcomes existed.
         question_meta["outcome"] = None
-        turn.turn_id = await self._store.add_message(
-            NewMessage(
-                conversation_id=turn.conversation_id,
-                kind="question",
-                content=turn.question,
-                final=True,
-                meta=question_meta,
+        try:
+            # The question and the links to its attachments, in one transaction: a
+            # question never describes attachments that are not kept with it.
+            turn.turn_id = await self._store.add_message(
+                NewMessage(
+                    conversation_id=turn.conversation_id,
+                    kind="question",
+                    content=turn.question,
+                    final=True,
+                    meta=question_meta,
+                    attachments=request.attachments,
+                )
             )
-        )
+        except AttachmentNotFoundError as exc:
+            # Deleted since the turn loaded it (from another tab, or an old orphan swept
+            # meanwhile): the turn fails before it starts and leaves nothing, not even
+            # the conversation it had just created (nobody has heard of it yet).
+            if new_conversation:
+                await self._discard_conversation(turn.conversation_id)
+            await self._fail(turn, self._missing_attachment(exc))
+            return
         turn.emit(
             TurnStarted(
                 turn.request_id,
@@ -561,9 +603,53 @@ class Engine:
         for model in (*request.models.values(), *request.fast_models.values()):
             if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
                 return ErrorInfo("invalid", "Identificador de model invàlid.")
+        attachments = request.attachments
+        if len(attachments) > self._config.max_attachments:
+            return ErrorInfo(
+                "invalid",
+                f"Un missatge pot portar com a màxim {self._config.max_attachments} adjunts.",
+            )
+        if len(set(attachments)) != len(attachments):
+            return ErrorInfo("invalid", "Un mateix adjunt no pot anar dues vegades al missatge.")
+        if request.pdf_in_revisions not in ("full", "text"):
+            return ErrorInfo("invalid", "Opció desconeguda per als PDF de les revisions.")
         for agent in self._agents(request):
             if agent not in self._providers:
                 return ErrorInfo("unavailable", f"{AGENT_LABELS[agent]} no està configurat.")
+        return None
+
+    @staticmethod
+    def _missing_attachment(error: AttachmentNotFoundError) -> ErrorInfo:
+        return ErrorInfo("invalid", f"L'adjunt {error.attachment_id} no existeix.")
+
+    async def _discard_conversation(self, conversation_id: int) -> None:
+        """Delete the conversation a turn created and could not store its question in.
+        A failure only leaves that empty conversation behind, so it is logged."""
+        try:
+            await self._store.discard_conversation(conversation_id)
+        except Exception:
+            logger.exception("Could not delete the empty conversation %d", conversation_id)
+
+    async def _load_attachments(self, turn: _Turn) -> ErrorInfo | None:
+        """Load the request's attachments into ``turn.attachments`` (in order, mode
+        "full"); the error that fails the turn when one does not exist or together they
+        pass the size limit."""
+        ids = turn.request.attachments
+        if not ids:
+            return None
+        try:
+            loaded = await self._store.get_attachments(ids)
+        except AttachmentNotFoundError as exc:
+            return self._missing_attachment(exc)
+        if len(loaded) != len(ids):
+            raise RuntimeError(f"the store returned {len(loaded)} attachments for {len(ids)} ids")
+        limit = self._config.max_attachment_bytes
+        if sum(attachment.size for attachment in loaded) > limit:
+            return ErrorInfo(
+                "invalid",
+                f"Els adjunts d'un missatge no poden sumar més de {limit / 1_000_000:g} MB.",
+            )
+        turn.attachments = tuple(replace(attachment, mode="full") for attachment in loaded)
         return None
 
     @staticmethod
@@ -804,12 +890,13 @@ class Engine:
     async def _solo(self, turn: _Turn) -> bool:
         agent = turn.request.target
         turn.emit(PhaseChanged(turn.request_id, "answer", 0))
+        prompt = answer_prompt(turn.question, turn.attachments)
         outcome = await self._call(
             turn,
             agent=agent,
             kind="answer",
             round_=0,
-            request=self._context_request(turn, agent, turn.question, "answer"),
+            request=self._context_request(turn, agent, prompt, "answer"),
             final=True,
         )
         if outcome.ok:
@@ -820,6 +907,7 @@ class Engine:
 
     async def _duel(self, turn: _Turn) -> bool:
         turn.emit(PhaseChanged(turn.request_id, "answer", 0))
+        prompt = answer_prompt(turn.question, turn.attachments)
         outcomes = await self._parallel(
             {
                 agent: self._call(
@@ -827,7 +915,7 @@ class Engine:
                     agent=agent,
                     kind="answer",
                     round_=0,
-                    request=self._context_request(turn, agent, turn.question, "answer"),
+                    request=self._context_request(turn, agent, prompt, "answer"),
                     final=True,
                 )
                 for agent in AGENTS
@@ -852,7 +940,10 @@ class Engine:
                     kind="answer",
                     round_=0,
                     request=self._context_request(
-                        turn, agent, debate_answer_prompt(agent, turn.question), "answer"
+                        turn,
+                        agent,
+                        debate_answer_prompt(agent, turn.question, turn.attachments),
+                        "answer",
                     ),
                     final=False,
                 )
@@ -931,7 +1022,9 @@ class Engine:
         order = [synthesizer, other_agent(synthesizer)]
         if synthesizer in turn.failed_agents:
             order.reverse()  # it already failed in this turn: try the other one first
-        prompt = synthesis_prompt(turn.question, answers.text, critiques, answers.cut)
+        prompt = synthesis_prompt(
+            turn.question, answers.text, critiques, answers.cut, turn.attachments
+        )
         extra: dict[str, JsonValue] = {"consensus": _consensus_json(consensus)}
         for agent in order:
             outcome = await self._call(
@@ -1097,7 +1190,8 @@ class Engine:
     def _context_request(
         self, turn: _Turn, agent: AgentName, prompt: str, purpose: Purpose
     ) -> GenerationRequest:
-        """A request carrying the conversation context (answers and synthesis)."""
+        """A request carrying the conversation context and every attachment of the
+        question whole (answers and synthesis)."""
         return GenerationRequest(
             system=system_prompt(agent),
             prompt=prompt,
@@ -1107,14 +1201,30 @@ class Engine:
             model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
             reasoning="default",
+            attachments=turn.attachments,
+        )
+
+    @staticmethod
+    def _revision_attachments(turn: _Turn) -> tuple[Attachment, ...]:
+        """The attachments as the revisions get them: images and text files whole, the
+        PDFs as ``pdf_in_revisions`` says (their extracted text, or the document). A PDF
+        without any text (a scanned one) goes whole: as text, the revisions would get
+        nothing to check the answers against."""
+        mode = turn.request.pdf_in_revisions
+        return tuple(
+            replace(attachment, mode=mode)
+            if attachment.kind == "pdf" and has_text(attachment)
+            else attachment
+            for attachment in turn.attachments
         )
 
     def _revision_request(
         self, turn: _Turn, agent: AgentName, answers: _Answers
     ) -> GenerationRequest:
         """Self-contained revision request: question + both answers (marked when cut
-        off), no history."""
+        off), no history; the attachments as :meth:`_revision_attachments` says."""
         other = other_agent(agent)
+        attachments = self._revision_attachments(turn)
         return GenerationRequest(
             system=system_prompt(agent),
             prompt=revision_prompt(
@@ -1124,11 +1234,13 @@ class Engine:
                 answers.text[other],
                 own_incomplete=agent in answers.cut,
                 other_incomplete=other in answers.cut,
+                attachments=attachments,
             ),
             purpose="revision",
             model=turn.request.models.get(agent),
             max_output_tokens=self._config.max_output_tokens,
             reasoning="default",
+            attachments=attachments,
         )
 
     def _prewarm_next(self, turn: _Turn, *, revision: bool) -> None:

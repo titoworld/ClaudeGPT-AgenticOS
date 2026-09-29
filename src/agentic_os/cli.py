@@ -11,6 +11,7 @@
 import argparse
 import asyncio
 import copy
+import logging
 import os
 import re
 import shutil
@@ -262,11 +263,28 @@ def _with_store(settings: Settings, command: Callable[[SqliteStore], Awaitable[i
 # -- serve -----------------------------------------------------------------------------
 
 
+class AccessLogWithoutQuery(logging.Filter):
+    """Keeps only the path of the requests in uvicorn's access log: the query string can
+    name an uploaded file (``PUT /api/attachments?name=...``) or carry a search, and
+    neither belongs in the logs (docs/adr/0009-adjunts.md)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn logs '%s - "%s %s HTTP/%s" %d' with (client, method, path?query,
+        # version, status); the path is percent-encoded, so its first "?" is the query's.
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            record.args = (args[0], args[1], args[2].partition("?")[0], args[3], args[4])
+        return True
+
+
 def log_config(level: str) -> dict[str, Any]:
-    """uvicorn's logging configuration plus the application's own loggers."""
+    """uvicorn's logging configuration plus the application's own loggers, with an access
+    log that keeps no query string (:class:`AccessLogWithoutQuery`)."""
     from uvicorn.config import LOGGING_CONFIG
 
     config: dict[str, Any] = copy.deepcopy(LOGGING_CONFIG)
+    config.setdefault("filters", {})["no_query"] = {"()": AccessLogWithoutQuery}
+    config["loggers"]["uvicorn.access"]["filters"] = ["no_query"]
     config["formatters"]["app"] = {
         "()": "uvicorn.logging.DefaultFormatter",
         "fmt": "%(levelprefix)s %(name)s: %(message)s",

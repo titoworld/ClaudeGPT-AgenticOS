@@ -23,7 +23,7 @@ from agentic_os.providers.factory import build_providers
 from agentic_os.security.devices import DeviceManager
 from agentic_os.security.sessions import SessionManager
 from agentic_os.security.throttle import LoginThrottle
-from agentic_os.server import routes_api, routes_auth, ws
+from agentic_os.server import routes_api, routes_attachments, routes_auth, ws
 from agentic_os.server.catalog import ModelCatalog
 from agentic_os.server.deps import AppState
 from agentic_os.server.fx_rates import FxFetcher, FxRefresher
@@ -50,6 +50,7 @@ _DEFAULT_DETAILS: Final[dict[int, str]] = {
     404: "No s'ha trobat.",
     405: "Mètode no permès.",
     413: "La petició és massa gran.",
+    415: "Aquest tipus de fitxer no s'admet.",
     422: "Dades no vàlides.",
     429: "Massa intents.",
     500: "Error intern del servidor.",
@@ -89,8 +90,8 @@ async def _internal_error(request: Request, exc: Exception) -> Response:
 
 
 async def _maintenance(state: AppState) -> None:
-    """Hourly purge of expired sessions and devices, cached turns and stale throttle
-    counters."""
+    """Hourly purge of expired sessions and devices, cached turns, stale throttle
+    counters, attachments never sent (after a day) and files no attachment uses."""
     while True:
         now = state.clock()
         try:
@@ -98,6 +99,7 @@ async def _maintenance(state: AppState) -> None:
             await state.sessions.purge_expired(now)
             await state.devices.purge_expired(now)
             await state.throttle.purge(now)
+            await state.store.purge_attachments(now)
         except Exception:
             logger.exception("Periodic maintenance failed")
         await asyncio.sleep(MAINTENANCE_INTERVAL_SECONDS)
@@ -197,6 +199,7 @@ def create_app(
     app.include_router(routes_api.public_router)
     app.include_router(routes_auth.router)
     app.include_router(routes_api.router)
+    app.include_router(routes_attachments.router)
     app.include_router(ws.router)
 
     dist = find_web_dist(settings)

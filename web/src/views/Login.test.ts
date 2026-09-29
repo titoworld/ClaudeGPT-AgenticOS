@@ -19,6 +19,7 @@ const SAVED: RuntimeSettings = {
   fx: { mode: 'auto', eur_per_usd: 0.86 },
   budgets_eur: { claude: null, chatgpt: null },
   plans_eur: { claude: null, chatgpt: null },
+  pdf_in_revisions: 'text',
 };
 
 const LOCK_TITLE = "La sessió encara no s'ha pogut tancar al servidor";

@@ -18,6 +18,7 @@ const SAVED: RuntimeSettings = {
   fx: { mode: 'manual', eur_per_usd: 0.9 },
   budgets_eur: { claude: 50, chatgpt: 20 },
   plans_eur: { claude: 90, chatgpt: 23 },
+  pdf_in_revisions: 'full',
 };
 
 /** A new app (as after a page load) and the drawer, from the same module graph. */
@@ -214,5 +215,24 @@ describe('SettingsDrawer and changes made elsewhere (N5)', () => {
     await vi.waitFor(() => expect(server.puts).toHaveLength(2));
     expect(server.puts.map((p) => p.revision)).toEqual([7, 8]);
     await vi.waitFor(() => expect(server.settings.debate.rounds).toBe(4));
+  });
+});
+
+describe('SettingsDrawer: what the revisions of a debate get of an attached PDF', () => {
+  it('shows the saved choice, «sencer» or «només el text», and saves a change', async () => {
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    const radio = (value: string) => root.querySelector<HTMLInputElement>(`input[type=radio][value=${value}]`);
+    await vi.waitFor(() => expect(radio('full')?.checked).toBe(true));
+    const group = radio('full')!.closest('fieldset')!;
+    expect(e.textOf(group.querySelector('legend'))).toBe('PDF a les revisions');
+    expect([...group.querySelectorAll('label')].map((l) => e.textOf(l))).toEqual(['Sencer', 'Només el text']);
+    expect(e.textOf(group)).toContain('Les respostes i la síntesi sempre reben el PDF sencer.');
+    radio('text')!.click();
+    e.flushSync();
+    submit(root);
+    await vi.waitFor(() => expect(server.puts).toHaveLength(1));
+    expect(server.puts[0]).toEqual({ ...SAVED, pdf_in_revisions: 'text' });
   });
 });

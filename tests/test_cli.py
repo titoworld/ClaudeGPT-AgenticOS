@@ -1,6 +1,8 @@
 import asyncio
 import json
 import stat
+import subprocess
+import sys
 import tempfile
 import tomllib
 from collections.abc import Iterator, Sequence
@@ -11,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import agentic_os
 from agentic_os import __version__
 from agentic_os.cli import log_config, main, run_doctor
 from agentic_os.config import Settings, get_settings
@@ -106,6 +109,33 @@ def test_log_config_adds_the_application_logger() -> None:
     assert config["loggers"]["agentic_os"]["level"] == "INFO"
     assert config["loggers"]["agentic_os"]["handlers"] == ["app"]
     assert "uvicorn.access" in config["loggers"]
+
+
+def test_the_access_log_keeps_no_query_string() -> None:
+    """An upload names its file in the query (``PUT /api/attachments?name=...``) and a
+    search sends its text (``?q=...``): the access log keeps only the path. In a process of
+    its own, configured as uvicorn configures it, so the tests' logging stays as it is."""
+    package_root = Path(agentic_os.__file__).resolve().parents[1]  # the code under test
+    line = "'%s - \"%s %s HTTP/%s\" %d', '203.0.113.9:40000'"
+    code = (
+        f"import sys; sys.path.insert(0, {str(package_root)!r}); "
+        "import logging.config; from agentic_os.cli import log_config; "
+        "logging.config.dictConfig(log_config('info')); "
+        "log = logging.getLogger('uvicorn.access'); "
+        f"log.info({line}, 'PUT', '/api/attachments?name=informe%20m%C3%A8dic.pdf', '1.1', 201); "
+        f"log.info({line}, 'GET', '/api/conversations?q=diagn%C3%B2stic&limit=20', '1.1', 200); "
+        f"log.info({line}, 'GET', '/api/health', '1.1', 200)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=60
+    )
+    requests = [entry.split('"')[1] for entry in result.stdout.splitlines()]
+    assert requests == [
+        "PUT /api/attachments HTTP/1.1",
+        "GET /api/conversations HTTP/1.1",
+        "GET /api/health HTTP/1.1",
+    ]
+    assert "?" not in result.stdout and not result.stderr
 
 
 def test_reset_sessions(env: Path, capsys: pytest.CaptureFixture[str]) -> None:

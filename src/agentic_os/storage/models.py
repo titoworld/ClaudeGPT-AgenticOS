@@ -14,11 +14,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Literal, TypeGuard
 
+from agentic_os.attachments import attachment_wire
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.pricing import ModelPrice, normalize_model
-from agentic_os.providers.base import MODEL_ID_PATTERN
+from agentic_os.providers.base import MODEL_ID_PATTERN, AttachmentKind, AttachmentMode
 
 TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate")
 
@@ -35,6 +36,8 @@ FX_MAX_AGE: Final = timedelta(days=10)
 
 FxMode = Literal["auto", "manual"]
 FX_MODES: Final[tuple[FxMode, ...]] = ("auto", "manual")
+PDF_IN_REVISIONS: Final[tuple[AttachmentMode, ...]] = ("full", "text")
+ATTACHMENT_KINDS: Final[tuple[AttachmentKind, ...]] = ("image", "pdf", "text")
 
 _MODEL_ID: Final = re.compile(MODEL_ID_PATTERN)
 
@@ -94,6 +97,13 @@ def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"«{name}» ha de ser un booleà (true o false).")
     return value
+
+
+def _pdf_in_revisions(value: object) -> AttachmentMode:
+    for mode in PDF_IN_REVISIONS:
+        if value == mode:
+            return mode
+    raise ValueError("«pdf_in_revisions» ha de ser «full» o «text».")
 
 
 def is_revision(value: object) -> TypeGuard[int]:
@@ -283,6 +293,10 @@ class RuntimeSettings:
     """Monthly budget of the api-mode usage."""
     plans_eur: Mapping[AgentName, float | None] = field(default_factory=_no_amounts)
     """Monthly price of the subscription (cli mode)."""
+    pdf_in_revisions: AttachmentMode = "text"
+    """How the debate revisions get the attached PDFs: ``"text"`` their extracted text
+    (far fewer tokens), ``"full"`` the document itself. The answers and the synthesis
+    always get the whole document (docs/adr/0009-adjunts.md)."""
     revision: int = 0
     """How many times the settings have been saved: 0 until the first save, and 1 for
     settings saved before revisions existed. The store sets it; in a ``PUT
@@ -321,6 +335,7 @@ class RuntimeSettings:
             raise ValueError("«fx» ha de ser un objecte.")
         _agent_map(self.budgets_eur, "budgets_eur", _optional_amount)
         _agent_map(self.plans_eur, "plans_eur", _optional_amount)
+        _pdf_in_revisions(self.pdf_in_revisions)
 
     @classmethod
     def from_wire(cls, data: object) -> RuntimeSettings:
@@ -366,6 +381,9 @@ class RuntimeSettings:
             fx=FxSettings.from_wire(data.get("fx", {})),
             budgets_eur=_agent_map(data.get("budgets_eur", {}), "budgets_eur", _optional_amount),
             plans_eur=_agent_map(data.get("plans_eur", {}), "plans_eur", _optional_amount),
+            pdf_in_revisions=_pdf_in_revisions(
+                data.get("pdf_in_revisions", defaults.pdf_in_revisions)
+            ),
             revision=revision,
         )
 
@@ -390,6 +408,7 @@ class RuntimeSettings:
             "fx": {"mode": self.fx.mode, "eur_per_usd": self.fx.eur_per_usd},
             "budgets_eur": {agent: self.budgets_eur.get(agent) for agent in AGENTS},
             "plans_eur": {agent: self.plans_eur.get(agent) for agent in AGENTS},
+            "pdf_in_revisions": self.pdf_in_revisions,
         }
 
     def to_turn_options(self) -> TurnOptions:
@@ -513,6 +532,49 @@ class ConversationDetail:
         wire["summary"] = self.summary
         wire["messages"] = [message_to_wire(m) for m in self.messages]
         return wire
+
+
+# --------------------------------------------------------------------------
+# Attachments
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentRecord:
+    """An uploaded attachment as stored (``Attachment`` of PROTOCOL.md): its file is at
+    :meth:`~agentic_os.storage.SqliteStore.content_path` of ``sha256``."""
+
+    id: int
+    sha256: str
+    kind: AttachmentKind
+    mime: str
+    name: str
+    """Display name, sanitized (:func:`agentic_os.attachments.display_name`)."""
+    size: int
+    pages: int | None
+    width: int | None
+    height: int | None
+    text_chars: int | None
+    """Characters of the stored text (a text file's content, a PDF's extracted text);
+    ``None`` without one."""
+    has_thumbnail: bool
+    created_at: datetime
+
+    def to_wire(self) -> Wire:
+        return attachment_wire(
+            self.id,
+            name=self.name,
+            kind=self.kind,
+            mime=self.mime,
+            size=self.size,
+            sha256=self.sha256,
+            pages=self.pages,
+            width=self.width,
+            height=self.height,
+            created_at=self.created_at,
+            has_thumbnail=self.has_thumbnail,
+            text_chars=self.text_chars,
+        )
 
 
 # --------------------------------------------------------------------------

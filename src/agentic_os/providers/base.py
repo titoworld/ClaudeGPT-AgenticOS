@@ -16,14 +16,21 @@ billed, at the rates of its ``model``. Earlier attempts of the same call that an
 model declined (a server-side fallback) are ``declined``, each with its own model, and
 the engine prices and records every one of them apart: tokens of different models are
 never summed (docs/adr/0008-recompte-de-tokens.md).
+
+Attachments (docs/adr/0009-adjunts.md): a request carries the files the owner attached to
+the question (``GenerationRequest.attachments``), each with the ``mode`` this call must
+deliver it in. Providers send them before the prompt text, in order, as the vendor's own
+blocks (images, PDF documents, labelled text); their content is data, never instructions.
 """
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
@@ -41,6 +48,57 @@ FinishReason = str
 a provider-specific string."""
 
 REFUSAL_TEXT_MAX_CHARS = 300
+
+AttachmentKind = Literal["image", "pdf", "text"]
+"""An image (PNG, JPEG, GIF or WebP), a PDF or a UTF-8 text file."""
+
+AttachmentMode = Literal["full", "text"]
+"""How a call delivers an attachment: ``"full"`` sends the file itself (the image, the PDF
+document, a text file's content); ``"text"`` sends a PDF's extracted text instead of the
+document (the revisions' choice, ``TurnRequest.pdf_in_revisions``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """A file the owner attached to a question, as a call must deliver it. Files are
+    stored content-addressed and never change: ``sha256`` identifies the content."""
+
+    kind: AttachmentKind
+    name: str
+    """Display name, sanitized (no path, no control characters)."""
+    mime: str
+    """``image/png|jpeg|gif|webp``, ``application/pdf`` or ``text/plain``."""
+    sha256: str
+    size: int
+    path: Path
+    """Absolute path of the stored file (read-only)."""
+    pages: int | None = None
+    width: int | None = None
+    height: int | None = None
+    text: str | None = None
+    """Text files: the content; PDFs: the extracted text (None if none)."""
+    mode: AttachmentMode = "full"
+    """How THIS call must deliver it (the engine sets it for each phase)."""
+    created_at: datetime | None = None
+    """When it was uploaded, if the store says (the question's ``meta.attachments``)."""
+    has_thumbnail: bool = False
+    """Whether the browser uploaded a thumbnail of it, if the store says."""
+
+    def read(self) -> bytes:
+        """The stored file's bytes, checked against ``sha256`` (blocking: run it in a
+        thread). A missing, unreadable or changed file raises :class:`ProviderError`, so
+        a call never sends another file than the one the owner attached."""
+        try:
+            data = self.path.read_bytes()
+        except OSError:
+            raise ProviderError(
+                f"No s'ha pogut llegir l'adjunt «{self.name}».", kind="internal"
+            ) from None
+        if hashlib.sha256(data).hexdigest() != self.sha256:
+            raise ProviderError(
+                f"L'adjunt «{self.name}» ha canviat des que es va pujar.", kind="internal"
+            )
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +132,9 @@ class GenerationRequest:
     It is not a length for the visible text, and counting text is never billing."""
     reasoning: Reasoning = "default"
     """Reasoning policy, separate from the budget: ``"off"`` for summaries."""
+    attachments: tuple[Attachment, ...] = ()
+    """Files attached to the question, in order, each with the mode this call delivers
+    it in; sent before the prompt text (the history only mentions earlier ones)."""
 
 
 @dataclass(frozen=True, slots=True)

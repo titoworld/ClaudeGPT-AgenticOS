@@ -48,8 +48,32 @@ describe('entry chunk (login screen)', () => {
     expect(modules).toContain('/src/views/Login.svelte');
     expect(modules).toContain('/src/components/CopyButton.svelte');
     expect(modules).toContain('/src/lib/clipboard.ts');
-    for (const lazy of ['/src/lib/markdown.ts', '/src/lib/hidden-chars.ts']) expect(modules).not.toContain(lazy);
-    for (const heavy of ['marked', 'dompurify', 'highlight.js', 'three']) expect(packages).not.toContain(heavy);
+    for (const lazy of [
+      '/src/lib/markdown.ts',
+      '/src/lib/hidden-chars.ts',
+      '/src/lib/pdf.ts',
+      // The work on attached files (canvas, sniffing, image headers) comes with the first attachment.
+      '/src/lib/attachment-work.ts',
+      '/src/lib/media.ts',
+      '/src/lib/image-header.ts',
+    ]) {
+      expect(modules).not.toContain(lazy);
+    }
+    for (const heavy of ['marked', 'dompurify', 'highlight.js', 'three', 'pdfjs-dist']) expect(packages).not.toContain(heavy);
+  });
+
+  it('loads PDF.js only when a PDF is attached or previewed (its own chunk)', () => {
+    const importers = Object.entries(SOURCES)
+      .filter(([, text]) => [...text.matchAll(STATIC_IMPORT)].some((m) => m[1]!.startsWith('pdfjs-dist')))
+      .map(([file]) => file);
+    expect(importers).toEqual(['/src/lib/pdf.ts']);
+    // lib/pdf.ts itself is never imported statically: only with import('./pdf').
+    const staticPdf = Object.entries(SOURCES)
+      .filter(([file, text]) => [...text.matchAll(STATIC_IMPORT)].some((m) => resolve(file, m[1]!) === '/src/lib/pdf.ts'))
+      .map(([file]) => file);
+    expect(staticPdf).toEqual([]);
+    const lazy = Object.entries(SOURCES).filter(([, text]) => /import\(\s*['"]\.{1,2}\/(?:lib\/)?pdf['"]\s*\)/.test(text));
+    expect(lazy.length).toBeGreaterThan(0);
   });
 
   it('keeps the clipboard and hidden-character helpers free of imports', () => {

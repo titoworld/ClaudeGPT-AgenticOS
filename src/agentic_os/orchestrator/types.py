@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from agentic_os.attachments import MAX_ATTACHMENTS, MAX_TURN_BYTES
 from agentic_os.domain import AgentName, TurnMode, TurnOptions
-from agentic_os.providers.base import DEFAULT_MAX_OUTPUT_TOKENS
+from agentic_os.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, AttachmentMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,13 @@ class TurnRequest:
     provider's configured default."""
     fast_models: Mapping[AgentName, str] = field(default_factory=dict)
     """Model per agent for cheap internal calls (compaction summaries)."""
+    attachments: tuple[int, ...] = ()
+    """Ids of the uploaded files attached to the question, in order
+    (docs/adr/0009-adjunts.md)."""
+    pdf_in_revisions: AttachmentMode = "text"
+    """How the debate revisions get the attached PDFs (the owner's runtime setting):
+    ``"text"`` their extracted text instead of the document, ``"full"`` the document.
+    Answers and the synthesis always get every attachment whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,3 +48,7 @@ class EngineConfig:
     summary_max_output_tokens: int = 2000
     """Billed output budget of the compaction summaries (they run with reasoning "off")."""
     max_question_chars: int = 100_000
+    max_attachments: int = MAX_ATTACHMENTS
+    """Attachments one question may carry (the server checks it too)."""
+    max_attachment_bytes: int = MAX_TURN_BYTES
+    """Raw bytes all the attachments of one question may add up to."""

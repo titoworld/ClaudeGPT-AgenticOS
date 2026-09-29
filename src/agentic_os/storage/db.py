@@ -1,5 +1,8 @@
 """SQLite access layer: one aiosqlite connection plus forward-only schema migrations.
 
+The attachments' bytes are not in the database: :mod:`agentic_os.storage.files` keeps
+them next to it, and the ``attachments`` table describes them.
+
 The connection also has the SQL functions the queries use: ``aos_fold`` (the
 case- and accent-insensitive form of a text that conversation searches compare, see
 :mod:`agentic_os.storage.search`).
@@ -187,7 +190,44 @@ _V3: Final[tuple[str, ...]] = (
     """,
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3)
+_V4: Final[tuple[str, ...]] = (
+    # Files attached to questions (docs/adr/0009-adjunts.md). The bytes live outside
+    # the database, content-addressed by sha256 (storage/files.py); AUTOINCREMENT so a
+    # deleted attachment's id never names another file. `text`: a text file's content
+    # or a PDF's extracted text (NULL without one).
+    """
+    CREATE TABLE attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'pdf', 'text')),
+        mime TEXT NOT NULL,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL CHECK (size > 0),
+        pages INTEGER CHECK (pages > 0),
+        width INTEGER CHECK (width > 0),
+        height INTEGER CHECK (height > 0),
+        text TEXT,
+        has_thumbnail INTEGER NOT NULL DEFAULT 0 CHECK (has_thumbnail IN (0, 1)),
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX attachments_sha256 ON attachments (sha256)",
+    "CREATE INDEX attachments_created_at ON attachments (created_at)",
+    # The attachments of each question, in order. Deleting the message (its
+    # conversation) removes the links; an attachment still linked cannot be deleted.
+    """
+    CREATE TABLE message_attachments (
+        message_id INTEGER NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+        attachment_id INTEGER NOT NULL REFERENCES attachments (id),
+        position INTEGER NOT NULL CHECK (position >= 0),
+        PRIMARY KEY (message_id, position),
+        UNIQUE (message_id, attachment_id)
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX message_attachments_attachment ON message_attachments (attachment_id)",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3, _V4)
 """Statements of each schema version, oldest first. Append only."""
 
 SCHEMA_VERSION: Final = len(MIGRATIONS)

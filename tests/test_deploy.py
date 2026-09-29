@@ -34,7 +34,13 @@ from typing import Any
 import pytest
 from portability import group_alive
 
-from agentic_os.server.middleware import MAX_BODY_BYTES
+from agentic_os.server.middleware import (
+    BODY_TIMEOUT_SECONDS,
+    LARGE_BODY_PATHS,
+    MAX_BODY_BYTES,
+    UPLOAD_PATH,
+    UPLOAD_TIMEOUT_SECONDS,
+)
 
 yaml = pytest.importorskip("yaml")  # PyYAML comes with uvicorn[standard]
 
@@ -137,14 +143,22 @@ def test_codex_state_lives_on_a_private_tmpfs() -> None:
     assert "exec" not in options
 
 
+def read_timeout(limits: str) -> int:
+    """Seconds of the ``read_timeout`` of a ``request_body`` block."""
+    [seconds] = re.findall(r"^read_timeout (\d+)s$", limits, re.M)
+    return int(seconds)
+
+
 def test_caddy_caps_request_bodies_but_never_websockets() -> None:
     caddyfile = read("deploy/Caddyfile")
-    methods = re.search(r"^\s*@body method (.+)$", caddyfile, re.M)
-    assert methods and set(methods.group(1).split()) == BODY_METHODS
+    # Every method that carries a body (but the upload of an attachment, see below).
+    [body] = caddy_blocks(caddyfile, r"@body")
+    outside = re.sub(r"^not \{$.*?^\}$", "", body, flags=re.M | re.S).split()
+    assert outside[0] == "method" and set(outside[1:]) == BODY_METHODS
 
     [limits] = caddy_blocks(caddyfile, r"request_body @body")
     assert size_bytes(re.findall(r"max_size (\S+)", limits)[0]) <= MAX_BODY_BYTES
-    assert re.search(r"read_timeout \d+s", limits)
+    assert read_timeout(limits) > BODY_TIMEOUT_SECONDS  # the app answers 408 first
     # An unmatched request_body would also catch a WebSocket (a GET, or a CONNECT
     # whose body is the socket over HTTP/2 and HTTP/3): capped and timed out, it breaks.
     assert caddy_blocks(caddyfile, r"request_body") == []
@@ -152,6 +166,50 @@ def test_caddy_caps_request_bodies_but_never_websockets() -> None:
     assert proxies
     for block in proxies:
         assert "request_body" not in block
+
+
+def test_caddy_lets_an_attachment_upload_through_like_the_app() -> None:
+    # PUT /api/attachments is the file itself: the 1 MiB cap refused every file over
+    # 1 MiB with a 413 of Caddy's, and cut a slow upload at 30 s.
+    caddyfile = read("deploy/Caddyfile")
+    [upload] = caddy_blocks(caddyfile, r"@upload")
+    assert sorted(upload.splitlines()) == ["method PUT", f"path {UPLOAD_PATH}"]
+    # The only request @body leaves out, so the two limits never apply together.
+    [body] = caddy_blocks(caddyfile, r"@body")
+    [excluded] = caddy_blocks(body, r"not")
+    assert sorted(excluded.splitlines()) == sorted(upload.splitlines())
+
+    [limits] = caddy_blocks(caddyfile, r"request_body @upload")
+    assert size_bytes(re.findall(r"max_size (\S+)", limits)[0]) == LARGE_BODY_PATHS[UPLOAD_PATH]
+    assert read_timeout(limits) > UPLOAD_TIMEOUT_SECONDS  # the app answers 408 first
+
+
+def test_the_docs_give_caddys_timeouts() -> None:
+    caddyfile = read("deploy/Caddyfile")
+    timeouts = {
+        read_timeout(limits)
+        for matcher in ("@body", "@upload")
+        for limits in caddy_blocks(caddyfile, rf"request_body {matcher}")
+    }
+    assert len(timeouts) == 2
+    for document in ("docs/ARQUITECTURA.md", "docs/DESPLEGAMENT.md"):
+        said = {int(n) for n in re.findall(r"Caddy talla als (\d+)", read(document))}
+        assert said == timeouts, document
+
+
+def test_caddy_logs_keep_no_query_string() -> None:
+    # An upload names its file in the query (PUT /api/attachments?name=...), and a search
+    # sends its text (?q=...): neither the access log nor Caddy's own log, where a 502
+    # names its request, may keep them.
+    caddyfile = read("deploy/Caddyfile")
+    [own] = caddy_blocks(caddyfile, r"log default")
+    [access] = caddy_blocks(caddyfile, r"log")
+    for log in (own, access):
+        [fields] = caddy_blocks(log, r"fields")
+        [(pattern, replacement)] = re.findall(r'^request>uri regexp "(.+)" "(.*)"$', fields, re.M)
+        for uri in ("/api/attachments?name=informe%20m%C3%A8dic.pdf", "/api/conversations?q=x"):
+            assert "?" not in re.sub(pattern, replacement, uri)
+        assert re.sub(pattern, replacement, "/api/attachments") == "/api/attachments"
 
 
 def test_caddy_streams_request_bodies_instead_of_buffering_them() -> None:

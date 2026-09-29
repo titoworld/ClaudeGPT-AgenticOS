@@ -33,6 +33,7 @@ const SAVED: RuntimeSettings = {
   fx: { mode: 'manual', eur_per_usd: 0.9 },
   budgets_eur: { claude: 50, chatgpt: 20 },
   plans_eur: { claude: 90, chatgpt: 23 },
+  pdf_in_revisions: 'text',
 };
 
 const CONVERSATION: ConversationSummary = {

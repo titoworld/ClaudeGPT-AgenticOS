@@ -1,23 +1,31 @@
 """SQLite implementation of the orchestrator :class:`~agentic_os.orchestrator.store.Store`
-plus the persistence needed by the web layer and the security primitives."""
+plus the persistence needed by the web layer and the security primitives.
+
+Attachments (docs/adr/0009-adjunts.md): the rows live in the database and the files next
+to it (:mod:`agentic_os.storage.files`). Every change to the files (placing an upload,
+a thumbnail, deleting and sweeping) holds one lock, and the database transactions are
+taken inside it, so a sweep never removes the file of a row being added."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
 import math
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self, cast
 
+from agentic_os.attachments import ORPHAN_TTL
 from agentic_os.domain import AGENTS, MessageKind
 from agentic_os.fx import FxRate
 from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.orchestrator.store import (
+    AttachmentNotFoundError,
     CachedTurn,
     History,
     JsonValue,
@@ -27,9 +35,13 @@ from agentic_os.orchestrator.store import (
     UsageRecord,
 )
 from agentic_os.pricing import normalize_model
+from agentic_os.providers.base import Attachment, AttachmentKind
 from agentic_os.storage.db import Database, Tx
+from agentic_os.storage.files import AttachmentFiles, IncomingFile
 from agentic_os.storage.models import (
+    ATTACHMENT_KINDS,
     TURN_MODES,
+    AttachmentRecord,
     ConversationDetail,
     ConversationSummary,
     DeviceRecord,
@@ -73,6 +85,14 @@ _SUMMARY_SELECT: Final = """
            (SELECT COUNT(*) FROM messages AS m WHERE m.conversation_id = c.id) AS message_count
     FROM conversations AS c
 """
+_ATTACHMENT_COLUMNS: Final = (
+    "id, sha256, kind, mime, name, size, pages, width, height, has_thumbnail, created_at, "
+    "length(text) AS text_chars"
+)
+_UNLINKED: Final = (
+    "NOT EXISTS (SELECT 1 FROM message_attachments AS l WHERE l.attachment_id = a.id)"
+)
+"""Condition on ``attachments AS a``: never sent in a turn (or no longer)."""
 
 
 class ConversationNotFoundError(LookupError):
@@ -81,6 +101,14 @@ class ConversationNotFoundError(LookupError):
     def __init__(self, conversation_id: int) -> None:
         super().__init__(f"La conversa {conversation_id} no existeix.")
         self.conversation_id = conversation_id
+
+
+class AttachmentInUseError(Exception):
+    """The attachment was sent in a turn: it stays while its conversation exists."""
+
+    def __init__(self, attachment_id: int) -> None:
+        super().__init__(f"L'adjunt {attachment_id} ja forma part d'una conversa.")
+        self.attachment_id = attachment_id
 
 
 class SettingsConflictError(Exception):
@@ -136,6 +164,35 @@ def _row_to_summary(row: sqlite3.Row) -> ConversationSummary:
         last_mode=_choice(row["last_mode"], TURN_MODES),
         message_count=cast(int, row["message_count"]),
     )
+
+
+def _attachment_kind(value: object) -> AttachmentKind:
+    kind = _choice(value, ATTACHMENT_KINDS)
+    if kind is None:  # pragma: no cover - guarded by a CHECK constraint
+        raise ValueError(f"unknown attachment kind {value!r}")
+    return kind
+
+
+def _row_to_attachment(row: sqlite3.Row) -> AttachmentRecord:
+    return AttachmentRecord(
+        id=cast(int, row["id"]),
+        sha256=str(row["sha256"]),
+        kind=_attachment_kind(row["kind"]),
+        mime=str(row["mime"]),
+        name=str(row["name"]),
+        size=cast(int, row["size"]),
+        pages=cast(int | None, row["pages"]),
+        width=cast(int | None, row["width"]),
+        height=cast(int | None, row["height"]),
+        text_chars=cast(int | None, row["text_chars"]),
+        has_thumbnail=bool(row["has_thumbnail"]),
+        created_at=parse_ts(str(row["created_at"])),
+    )
+
+
+def _json_ids(ids: Collection[int]) -> str:
+    """A list of ids as one parameter, for ``json_each(?)`` (no limit on how many)."""
+    return json.dumps(list(ids))
 
 
 def _row_to_session(row: sqlite3.Row) -> SessionRecord:
@@ -223,24 +280,41 @@ class SqliteStore:
     """Persistence for the whole application on one SQLite database.
 
     Implements :class:`agentic_os.orchestrator.store.Store` (engine side) and adds
-    conversation browsing, runtime settings, the owner account, sessions, login
-    throttling and stats. Open with :meth:`open` and always :meth:`close` (or use
+    conversation browsing, attachments, runtime settings, the owner account, sessions,
+    login throttling and stats. Open with :meth:`open` and always :meth:`close` (or use
     ``async with``). All methods are safe to call concurrently from many tasks.
     Datetimes returned are aware UTC; naive datetimes passed in are taken as UTC.
     """
 
-    def __init__(self, db: Database, *, clock: Callable[[], datetime] = utc_now) -> None:
+    def __init__(
+        self,
+        db: Database,
+        *,
+        attachments_dir: Path,
+        clock: Callable[[], datetime] = utc_now,
+    ) -> None:
         self._db = db
         self._clock = clock
+        self._files = AttachmentFiles(attachments_dir.absolute())
+        self._files_lock = asyncio.Lock()
 
     @classmethod
-    async def open(cls, path: Path, *, clock: Callable[[], datetime] = utc_now) -> SqliteStore:
+    async def open(
+        cls,
+        path: Path,
+        *,
+        clock: Callable[[], datetime] = utc_now,
+        attachments_dir: Path | None = None,
+    ) -> SqliteStore:
         """Open or create the database file at ``path`` (the parent directory is
         created with mode 0700, the file with 0600) and apply pending migrations.
 
         ``clock`` timestamps new rows (conversations, messages, usage, savings,
-        cache entries); tests inject a fixed clock."""
-        return cls(await Database.open(path), clock=clock)
+        cache entries, attachments); tests inject a fixed clock. The attachments'
+        files go to ``attachments_dir``, by default ``attachments`` next to the
+        database (created when the first file arrives)."""
+        directory = attachments_dir if attachments_dir is not None else path.parent / "attachments"
+        return cls(await Database.open(path), clock=clock, attachments_dir=directory)
 
     async def close(self) -> None:
         await self._db.close()
@@ -272,6 +346,18 @@ class SqliteStore:
                 "INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)",
                 (clean, now, now),
             )
+
+    async def discard_conversation(self, conversation_id: int) -> bool:
+        """Delete a conversation that has no messages: one a turn created and then could
+        not store its question in. ``False``, and nothing changes, if it has any message
+        or does not exist."""
+        async with self._db.transaction() as tx:
+            deleted = await tx.execute(
+                "DELETE FROM conversations WHERE id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM messages WHERE conversation_id = ?)",
+                (conversation_id, conversation_id),
+            )
+        return deleted > 0
 
     async def conversation_exists(self, conversation_id: int) -> bool:
         async with self._db.transaction(write=False) as tx:
@@ -305,15 +391,21 @@ class SqliteStore:
 
         A question starts a turn: it must have ``turn_id=None`` and its turn id
         becomes its own id; it also sets the conversation's ``last_mode`` from
-        ``meta["mode"]``. Any other message must reference a question of the same
-        conversation. Every message bumps the conversation's ``updated_at``.
-        Raises :class:`ConversationNotFoundError` or :class:`ValueError`.
+        ``meta["mode"]``, and its ``attachments`` are linked in the same transaction
+        (as :meth:`link_attachments` does), so with one that does not exist nothing is
+        stored. Any other message must reference a question of the same conversation.
+        Every message bumps the conversation's ``updated_at``. Raises
+        :class:`ConversationNotFoundError`, :class:`AttachmentNotFoundError` or
+        :class:`ValueError`.
         """
         is_question = message.kind == "question"
         if is_question and message.turn_id is not None:
             raise ValueError("a question starts its own turn: turn_id must be None")
         if not is_question and message.turn_id is None:
             raise ValueError(f"a {message.kind} message needs the turn_id of its question")
+        if message.attachments and not is_question:
+            raise ValueError("only a question takes attachments")
+        _check_unique(message.attachments)
         if message.round < 0:
             raise ValueError("round must be >= 0")
         meta_json = _dump_json(dict(message.meta))
@@ -355,6 +447,8 @@ class SqliteStore:
             )
             if is_question:
                 await tx.execute("UPDATE messages SET turn_id = id WHERE id = ?", (message_id,))
+                if message.attachments:
+                    await _link(tx, message_id, message.attachments)
         return message_id
 
     async def set_summary(self, conversation_id: int, summary: str, upto_message_id: int) -> None:
@@ -550,11 +644,255 @@ class SqliteStore:
 
     async def delete_conversation(self, conversation_id: int) -> bool:
         """Delete the conversation, its messages and the cached answers that came
-        from it (usage and savings rows are kept). Returns ``False`` if missing."""
-        async with self._db.transaction() as tx:
-            await tx.execute("DELETE FROM turn_cache WHERE conversation_id = ?", (conversation_id,))
-            deleted = await tx.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        from it (usage and savings rows are kept), and the attachments sent in it that
+        no other conversation uses, with their files. Returns ``False`` if missing."""
+        async with self._files_lock:
+            async with self._db.transaction() as tx:
+                linked = [
+                    int(row[0])
+                    for row in await tx.fetchall(
+                        "SELECT DISTINCT l.attachment_id FROM message_attachments AS l "
+                        "JOIN messages AS m ON m.id = l.message_id WHERE m.conversation_id = ?",
+                        (conversation_id,),
+                    )
+                ]
+                await tx.execute(
+                    "DELETE FROM turn_cache WHERE conversation_id = ?", (conversation_id,)
+                )
+                deleted = await tx.execute(
+                    "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+                )
+                removed = await _delete_unlinked(tx, linked) if linked else []
+                unused = await _unused_contents(tx, {sha for _, sha in removed})
+            if removed:
+                await self._remove_files(unused, [attachment_id for attachment_id, _ in removed])
         return deleted > 0
+
+    # ------------------------------------------------------------------
+    # Attachments (docs/adr/0009-adjunts.md)
+    # ------------------------------------------------------------------
+
+    def content_path(self, sha256: str) -> Path:
+        """Absolute path of the stored file with this content."""
+        return self._files.content_path(sha256)
+
+    def thumbnail_path(self, attachment_id: int) -> Path:
+        """Absolute path of an attachment's thumbnail (it exists if ``has_thumbnail``)."""
+        return self._files.thumbnail_path(attachment_id)
+
+    def new_upload(self) -> IncomingFile:
+        """A private temporary file for an upload being received (blocking, but only
+        creates it): :meth:`add_attachment` stores it once finished, and
+        :meth:`IncomingFile.discard` deletes it otherwise."""
+        return self._files.incoming()
+
+    async def add_attachment(
+        self,
+        upload: IncomingFile,
+        *,
+        kind: AttachmentKind,
+        mime: str,
+        name: str,
+        pages: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        text: str | None = None,
+    ) -> AttachmentRecord:
+        """Store a finished upload (:meth:`IncomingFile.finish`), already checked, and
+        its row. Its file is moved to its content-addressed path, or deleted if that
+        content is already stored. It is an orphan until a turn links it."""
+        if not upload.sha256:
+            raise ValueError("the upload is not finished")
+        now = self._now()
+        async with self._files_lock:
+            await asyncio.to_thread(self._files.place, upload)
+            # If the row cannot be written, the file stays until the sweep, as after
+            # a crash: nothing may remove a file another row could be adding.
+            async with self._db.transaction() as tx:
+                attachment_id = await tx.insert(
+                    "INSERT INTO attachments (sha256, kind, mime, name, size, pages, width, "
+                    "height, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        upload.sha256,
+                        kind,
+                        mime,
+                        name,
+                        upload.size,
+                        pages,
+                        width,
+                        height,
+                        text,
+                        now,
+                    ),
+                )
+        return AttachmentRecord(
+            id=attachment_id,
+            sha256=upload.sha256,
+            kind=kind,
+            mime=mime,
+            name=name,
+            size=upload.size,
+            pages=pages,
+            width=width,
+            height=height,
+            text_chars=len(text) if text is not None else None,
+            has_thumbnail=False,
+            created_at=parse_ts(now),
+        )
+
+    async def get_attachment(self, attachment_id: int) -> AttachmentRecord | None:
+        async with self._db.transaction(write=False) as tx:
+            row = await tx.fetchone(
+                f"SELECT {_ATTACHMENT_COLUMNS} FROM attachments WHERE id = ?", (attachment_id,)
+            )
+        return _row_to_attachment(row) if row is not None else None
+
+    async def get_attachments(self, ids: Sequence[int]) -> list[Attachment]:
+        """The attachments with these ids, in the given order, in mode ``"full"``, with
+        their text (engine contract). Raises :class:`AttachmentNotFoundError` with the
+        first id that does not exist, or whose file is gone."""
+        if not ids:
+            return []
+        async with self._db.transaction(write=False) as tx:
+            rows = await tx.fetchall(
+                f"SELECT {_ATTACHMENT_COLUMNS}, text FROM attachments "
+                "WHERE id IN (SELECT value FROM json_each(?))",
+                (_json_ids(ids),),
+            )
+        found = {cast(int, row["id"]): row for row in rows}
+        attachments: list[Attachment] = []
+        for attachment_id in ids:
+            row = found.get(attachment_id)
+            if row is None:
+                raise AttachmentNotFoundError(attachment_id)
+            record = _row_to_attachment(row)
+            path = self._files.content_path(record.sha256)
+            if not path.is_file():
+                logger.warning("The file of attachment %d is missing", attachment_id)
+                raise AttachmentNotFoundError(attachment_id)
+            attachments.append(
+                Attachment(
+                    kind=record.kind,
+                    name=record.name,
+                    mime=record.mime,
+                    sha256=record.sha256,
+                    size=record.size,
+                    path=path,
+                    pages=record.pages,
+                    width=record.width,
+                    height=record.height,
+                    text=cast(str | None, row["text"]),
+                    mode="full",
+                    created_at=record.created_at,
+                    has_thumbnail=record.has_thumbnail,
+                )
+            )
+        return attachments
+
+    async def link_attachments(self, message_id: int, ids: Sequence[int]) -> None:
+        """Link attachments to a question, in the given order (their positions): from
+        then on they are kept while the conversation exists. Raises :class:`ValueError`
+        if the message is not a question, already has attachments or an id repeats,
+        and :class:`AttachmentNotFoundError` with the first id that does not exist. (The
+        engine links a question's attachments as it stores it: ``NewMessage.attachments``.)"""
+        _check_unique(ids)
+        async with self._db.transaction() as tx:
+            question = await tx.fetchone(
+                "SELECT 1 FROM messages WHERE id = ? AND kind = 'question'", (message_id,)
+            )
+            if question is None:
+                raise ValueError(f"message {message_id} is not a question")
+            if await tx.fetchone(
+                "SELECT 1 FROM message_attachments WHERE message_id = ?", (message_id,)
+            ):
+                raise ValueError(f"message {message_id} already has attachments")
+            await _link(tx, message_id, ids)
+
+    async def delete_attachment(self, attachment_id: int) -> bool:
+        """Delete an attachment never sent in a turn, its thumbnail and, if no other
+        upload has the same content, its file. ``False`` if it does not exist; raises
+        :class:`AttachmentInUseError` if a question has it."""
+        async with self._files_lock:
+            async with self._db.transaction() as tx:
+                row = await tx.fetchone(
+                    "SELECT sha256 FROM attachments WHERE id = ?", (attachment_id,)
+                )
+                if row is None:
+                    return False
+                if await tx.fetchone(
+                    "SELECT 1 FROM message_attachments WHERE attachment_id = ?", (attachment_id,)
+                ):
+                    raise AttachmentInUseError(attachment_id)
+                await tx.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
+                unused = await _unused_contents(tx, {str(row["sha256"])})
+            await self._remove_files(unused, [attachment_id])
+        return True
+
+    async def set_thumbnail(self, attachment_id: int, data: bytes) -> bool:
+        """Store (or replace) the thumbnail of an attachment, already checked
+        (:func:`agentic_os.attachments.thumbnail_type`). ``False`` if the attachment
+        does not exist."""
+        async with self._files_lock:
+            async with self._db.transaction(write=False) as tx:
+                exists = await tx.fetchone(
+                    "SELECT 1 FROM attachments WHERE id = ?", (attachment_id,)
+                )
+            if exists is None:
+                return False
+            # Under the lock no one deletes the attachment meanwhile.
+            await asyncio.to_thread(self._files.write_thumbnail, attachment_id, data)
+            async with self._db.transaction() as tx:
+                await tx.execute(
+                    "UPDATE attachments SET has_thumbnail = 1 WHERE id = ?", (attachment_id,)
+                )
+        return True
+
+    async def purge_attachments(self, now: datetime) -> int:
+        """Delete the attachments never sent in a turn that were uploaded
+        :data:`~agentic_os.attachments.ORPHAN_TTL` or more before ``now``, with their
+        thumbnails and the files no other row uses; then sweep the files that no row
+        uses and are older than an hour (leftovers of a crash or of a failed upload).
+        Returns how many attachments were deleted."""
+        cutoff = format_ts(now - ORPHAN_TTL)
+        async with self._files_lock:
+            async with self._db.transaction() as tx:
+                rows = await tx.fetchall(
+                    f"SELECT a.id, a.sha256 FROM attachments AS a "
+                    f"WHERE a.created_at <= ? AND {_UNLINKED}",
+                    (cutoff,),
+                )
+                removed = [(int(row[0]), str(row[1])) for row in rows]
+                if removed:
+                    await tx.execute(
+                        "DELETE FROM attachments WHERE id IN (SELECT value FROM json_each(?))",
+                        (_json_ids([attachment_id for attachment_id, _ in removed]),),
+                    )
+                unused = await _unused_contents(tx, {sha for _, sha in removed})
+                shas = await tx.fetchall("SELECT DISTINCT sha256 FROM attachments")
+                stored = {str(row[0]) for row in shas}
+                ids = {int(row[0]) for row in await tx.fetchall("SELECT id FROM attachments")}
+            await self._remove_files(unused, [attachment_id for attachment_id, _ in removed])
+            swept = await asyncio.to_thread(self._files.sweep, stored=stored, attachment_ids=ids)
+        if removed or swept:
+            logger.info(
+                "Deleted %d attachments never sent and %d unused files", len(removed), swept
+            )
+        return len(removed)
+
+    async def _remove_files(self, contents: Collection[str], thumbnails: Collection[int]) -> None:
+        """Delete these content files and thumbnails (their rows are gone). A failure is
+        logged: the sweep deletes them later."""
+
+        def remove() -> None:
+            for sha256 in contents:
+                self._files.remove_content(sha256)
+            for attachment_id in thumbnails:
+                self._files.remove_thumbnail(attachment_id)
+
+        try:
+            await asyncio.to_thread(remove)
+        except OSError:
+            logger.exception("Could not delete the files of deleted attachments")
 
     # ------------------------------------------------------------------
     # Runtime settings
@@ -902,6 +1240,59 @@ class SqliteStore:
             return await compute_month_spend(tx, now, fx, settings.budgets_eur, settings.plans_eur)
 
 
+def _check_unique(ids: Sequence[int]) -> None:
+    if len(set(ids)) != len(ids):
+        raise ValueError("an attachment cannot be linked twice to a message")
+
+
+async def _link(tx: Tx, message_id: int, ids: Sequence[int]) -> None:
+    """Link attachments to a question in ``tx``, in order (their positions). Raises
+    :class:`AttachmentNotFoundError` with the first id that does not exist: the caller's
+    transaction is then rolled back, so nothing is linked."""
+    rows = await tx.fetchall(
+        "SELECT id FROM attachments WHERE id IN (SELECT value FROM json_each(?))",
+        (_json_ids(ids),),
+    )
+    existing = {int(row[0]) for row in rows}
+    for attachment_id in ids:
+        if attachment_id not in existing:
+            raise AttachmentNotFoundError(attachment_id)
+    for position, attachment_id in enumerate(ids):
+        await tx.execute(
+            "INSERT INTO message_attachments (message_id, attachment_id, position) "
+            "VALUES (?, ?, ?)",
+            (message_id, attachment_id, position),
+        )
+
+
+async def _delete_unlinked(tx: Tx, ids: Collection[int]) -> list[tuple[int, str]]:
+    """Delete, among ``ids``, the attachments no question has; returns their ids and
+    contents."""
+    rows = await tx.fetchall(
+        f"SELECT a.id, a.sha256 FROM attachments AS a "
+        f"WHERE a.id IN (SELECT value FROM json_each(?)) AND {_UNLINKED}",
+        (_json_ids(ids),),
+    )
+    removed = [(int(row[0]), str(row[1])) for row in rows]
+    if removed:
+        await tx.execute(
+            "DELETE FROM attachments WHERE id IN (SELECT value FROM json_each(?))",
+            (_json_ids([attachment_id for attachment_id, _ in removed]),),
+        )
+    return removed
+
+
+async def _unused_contents(tx: Tx, contents: Collection[str]) -> list[str]:
+    """The contents (SHA-256) among ``contents`` that no attachment row has any more."""
+    if not contents:
+        return []
+    rows = await tx.fetchall(
+        "SELECT value FROM json_each(?) WHERE value NOT IN (SELECT sha256 FROM attachments)",
+        (json.dumps(sorted(contents)),),
+    )
+    return [str(row[0]) for row in rows]
+
+
 async def _insert_session(tx: Tx, session: SessionRecord) -> None:
     await tx.execute(
         "INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at, ip, "
@@ -1010,6 +1401,7 @@ async def _read_ecb_rate(tx: Tx) -> StoredFxRate | None:
 __all__ = [
     "DEFAULT_TITLE",
     "MAX_LIST_LIMIT",
+    "AttachmentInUseError",
     "ConversationNotFoundError",
     "SettingsConflictError",
     "SqliteStore",

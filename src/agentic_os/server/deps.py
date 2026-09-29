@@ -16,6 +16,7 @@ from typing import Annotated, Final, Protocol
 from fastapi import Depends, HTTPException, Request
 from starlette.requests import ClientDisconnect, HTTPConnection
 
+from agentic_os.attachments import PdfReader
 from agentic_os.config import Settings
 from agentic_os.security.devices import DeviceManager
 from agentic_os.security.sessions import SessionManager, hash_token, is_well_formed
@@ -105,6 +106,8 @@ class AppState:
     atomic: parallel requests cannot test more passwords than the lockout allows."""
     connections: SessionConnections = field(default_factory=SessionConnections)
     """Open WebSockets by session, closed when the session ends (logout)."""
+    pdf: PdfReader = field(default_factory=PdfReader)
+    """Reads the page count and the text of uploaded PDFs, in subprocesses."""
 
     @property
     def cookie_name(self) -> str:

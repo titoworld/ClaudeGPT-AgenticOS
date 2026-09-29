@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agentic_os.domain import AgentName
 from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.providers.fake import FakeProvider
+from orchestrator.attachment_fixtures import AttachmentFiles
+
+
+@pytest.fixture
+def files(tmp_path: Path) -> AttachmentFiles:
+    """Attachments stored under ``tmp_path`` (see ``AttachmentFiles``)."""
+    return AttachmentFiles(tmp_path / "attachments")
 
 
 @pytest.fixture

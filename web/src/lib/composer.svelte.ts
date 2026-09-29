@@ -9,8 +9,10 @@
 //   refuse is never sent; one it rejected before storing it comes back (N19).
 // - What Enter does: it sends with a fine pointer (mouse, trackpad) and makes a new line
 //   with a coarse one (phones, tablets), where the button or Ctrl/Cmd+Enter sends (N20).
+// - The attachments of the next question (lib/composer-attachments.svelte.ts).
 
-import type { Agent, RuntimeSettings, TurnMode } from './protocol';
+import { ComposerAttachments } from './composer-attachments.svelte';
+import type { Agent, Attachment, RuntimeSettings, TurnMode } from './protocol';
 import { DEFAULT_SETTINGS } from './settings';
 
 /**
@@ -76,6 +78,10 @@ export function composerDefaults(s: RuntimeSettings): ComposerOptions {
 
 export class ComposerState {
   draft = $state('');
+  /** The attachments of the next question. */
+  readonly attachments = new ComposerAttachments();
+  /** The owner sent while attachments were still uploading: the question goes once they are up. */
+  waitingUploads = $state(false);
   /**
    * The main pointer is coarse: a finger (phones, tablets). There Enter makes a new line,
    * as the on-screen keyboard's Return key promises, and the button sends (N20).
@@ -94,9 +100,14 @@ export class ComposerState {
     }
   }
 
-  /** Puts back a question the server never stored, unless the owner is writing another. */
-  restore(question: string): void {
-    if (question.trim() && !this.draft.trim()) this.draft = question;
+  /**
+   * Puts back a question the server never stored, with its attachments, unless the owner
+   * is writing another.
+   */
+  restore(question: string, attachments: readonly Attachment[] = []): void {
+    if (!question.trim() || this.draft.trim()) return;
+    this.draft = question;
+    this.attachments.restore(attachments);
   }
 
   get mode(): TurnMode {

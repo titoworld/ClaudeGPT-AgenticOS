@@ -20,6 +20,7 @@ const SAVED: RuntimeSettings = {
   fx: { mode: 'manual', eur_per_usd: 0.9 },
   budgets_eur: { claude: null, chatgpt: null },
   plans_eur: { claude: null, chatgpt: null },
+  pdf_in_revisions: 'text',
 };
 
 const NO_SPEND = { api_usd: 0, equivalent_usd: 0, unpriced_calls: 0, budget_eur: null, budget_used: null, plan_eur: null, plan_value: null };

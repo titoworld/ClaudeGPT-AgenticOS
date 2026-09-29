@@ -12,15 +12,19 @@ from agentic_os.domain import AgentName, TurnMode, TurnOptions, Usage
 from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
+from agentic_os.providers.base import Attachment, AttachmentMode
+from agentic_os.providers.prompt_format import has_text
 
-CACHE_KEY_VERSION = 4
+CACHE_KEY_VERSION = 6
 """Bump when prompts, the replay format or the key itself change, to invalidate old
 entries (2: the question keeps its inner whitespace; 3: earlier entries may hold replies
 that were cut off, duplicated by a Codex retry or mangled by the revision parser, which
 are no longer stored as complete or cached; 4: earlier entries count their tokens as
 input + output only and hide the attempts declined before a fallback in the served
 message's usage, so a hit would report a saving with the old token count and value
-the declined tokens at the serving model's rates)."""
+the declined tokens at the serving model's rates; 5: the key includes the attachments
+and the system prompt says how to treat them; 6: a file's text is neutralized and
+enclosed, and a PDF without text goes whole to the revisions)."""
 
 
 def _digest(payload: object) -> str:
@@ -53,15 +57,24 @@ def turn_cache_key(
     question: str,
     context_fingerprint: str,
     identities: Mapping[AgentName, str],
+    attachments: Sequence[Attachment] = (),
+    pdf_in_revisions: AttachmentMode = "text",
 ) -> str:
     """Cache key of a turn.
 
     ``identities`` maps each agent taking part to its provider identity
-    (``"<mode>:<model>"``, with the model requested for this turn). The solo target
-    and the debate options only count in the modes that use them, so irrelevant
-    differences do not cause misses.
+    (``"<mode>:<model>"``, with the model requested for this turn). The attachments
+    count by content and name (the prompts name them), in order. The solo target, the
+    debate options and ``pdf_in_revisions`` (how the revisions get the PDFs that have
+    text: one without any goes whole) only count where they change what the models get,
+    so irrelevant differences do not cause misses.
     """
     debate = options.debate
+    revises_pdf = (
+        mode == "debate"
+        and debate.rounds > 0
+        and any(attachment.kind == "pdf" and has_text(attachment) for attachment in attachments)
+    )
     return _digest(
         {
             "v": CACHE_KEY_VERSION,
@@ -77,6 +90,8 @@ def turn_cache_key(
                 else None
             ),
             "question": normalize_question(question),
+            "attachments": [[attachment.sha256, attachment.name] for attachment in attachments],
+            "pdf_in_revisions": pdf_in_revisions if revises_pdf else None,
             "context": context_fingerprint,
             "providers": {agent: identities[agent] for agent in sorted(identities)},
         }

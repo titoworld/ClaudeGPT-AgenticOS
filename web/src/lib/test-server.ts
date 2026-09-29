@@ -6,6 +6,8 @@
 // imported by application code.
 import {
   BACKGROUND_HEADER,
+  type Attachment,
+  type AttachmentKind,
   type ConversationDetail,
   type ConversationSummary,
   type ModelCatalog,
@@ -40,6 +42,32 @@ const json = (body: unknown, status = 200): Response =>
 
 const unavailable = (): Response => json({ detail: 'No disponible en aquesta prova.' }, 503);
 
+const NOT_FOUND = "L'adjunt no existeix.";
+
+/** An uploaded file of the fake server, with its thumbnail. */
+export interface StoredAttachment {
+  attachment: Attachment;
+  body: Uint8Array;
+  thumbnail: Uint8Array | null;
+}
+
+/** What the first bytes of an upload are, roughly as the server sniffs them. */
+function uploadKind(body: Uint8Array): { kind: AttachmentKind; mime: string } {
+  const head = String.fromCharCode(...body.subarray(0, 12));
+  if (head.startsWith('\x89PNG')) return { kind: 'image', mime: 'image/png' };
+  if (head.startsWith('\xff\xd8\xff')) return { kind: 'image', mime: 'image/jpeg' };
+  if (head.startsWith('GIF8')) return { kind: 'image', mime: 'image/gif' };
+  if (head.startsWith('RIFF')) return { kind: 'image', mime: 'image/webp' };
+  if (head.startsWith('%PDF-')) return { kind: 'pdf', mime: 'application/pdf' };
+  return { kind: 'text', mime: 'text/plain' };
+}
+
+async function bodyBytes(body: BodyInit | null | undefined): Promise<Uint8Array> {
+  if (body instanceof Blob) return new Uint8Array(await body.arrayBuffer());
+  if (body == null) return new Uint8Array();
+  return new Uint8Array(await new Response(body).arrayBuffer());
+}
+
 export class FakeApi {
   /** The stored settings, with their revision. */
   settings: RuntimeSettings;
@@ -70,9 +98,58 @@ export class FakeApi {
   readonly requests: { call: string; background: boolean }[] = [];
   /** Bodies of every PUT /api/settings. */
   readonly puts: RuntimeSettings[] = [];
+  /** Requests aborted by the client (a removed upload...), as "METHOD /path". */
+  readonly aborted: string[] = [];
+  /** Uploaded attachments by id (PUT /api/attachments, or `addAttachment`). */
+  readonly attachments = new Map<number, StoredAttachment>();
+  /** Every PUT /api/attachments: the `name` and the body. */
+  readonly uploads: { name: string; body: Uint8Array }[] = [];
+  /** Every PUT /api/attachments/{id}/thumbnail. */
+  readonly thumbnailPuts: { id: number; body: Uint8Array }[] = [];
+  /** The `Range` header of every GET /api/attachments/{id}/content (null without one). */
+  readonly ranges: (string | null)[] = [];
+  /**
+   * Answers PUT /api/attachments instead of storing the file: return a Response (a 413...),
+   * or a promise of one to hold the upload; null (now or later) stores it as usual. Throw
+   * a TypeError to make the request fail as a lost connection does.
+   */
+  uploadAnswer: ((name: string, body: Uint8Array) => Response | null | Promise<Response | null>) | null = null;
+  /** Answers PUT /api/attachments/{id}/thumbnail instead of storing it (null stores it). */
+  thumbnailAnswer: ((id: number, body: Uint8Array) => Response | null | Promise<Response | null>) | null = null;
+  /** What the server says of an upload beyond its type and size (pages, estimated tokens...). */
+  describeUpload: ((name: string, body: Uint8Array) => Partial<Attachment>) | null = null;
+  #nextAttachment = 1;
 
   constructor(settings: RuntimeSettings) {
     this.settings = structuredClone(settings);
+  }
+
+  /** An attachment the server already has (sent in an earlier turn, say). */
+  addAttachment(partial: Partial<Attachment> & Pick<Attachment, 'id'>, body: Uint8Array): Attachment {
+    const attachment = { ...this.#describe(partial.name ?? `fitxer-${partial.id}`, body, partial.id), ...partial };
+    this.attachments.set(attachment.id, { attachment, body, thumbnail: null });
+    this.#nextAttachment = Math.max(this.#nextAttachment, attachment.id + 1);
+    return attachment;
+  }
+
+  #describe(name: string, body: Uint8Array, id: number): Attachment {
+    const { kind, mime } = uploadKind(body);
+    return {
+      id,
+      name,
+      kind,
+      mime,
+      size: body.length,
+      pages: kind === 'pdf' ? 1 : null,
+      width: kind === 'image' ? 640 : null,
+      height: kind === 'image' ? 480 : null,
+      sha256: id.toString(16).padStart(64, '0'),
+      created_at: '2026-09-29T10:00:00Z',
+      has_thumbnail: false,
+      text_available: kind !== 'image',
+      estimated_tokens: kind === 'image' ? 414 : kind === 'pdf' ? 3600 : Math.ceil(body.length / 4),
+      ...this.describeUpload?.(name, body),
+    };
   }
 
   count(call: string): number {
@@ -95,7 +172,10 @@ export class FakeApi {
     if (!signal) return answer;
     // Like a browser: an aborted request rejects with an AbortError at once.
     return new Promise<Response>((resolve, reject) => {
-      const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+      const abort = () => {
+        this.aborted.push(`${init.method ?? 'GET'} ${new URL(String(input), 'https://aos.test').pathname}`);
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      };
       if (signal.aborted) return abort();
       signal.addEventListener('abort', abort, { once: true });
       answer.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
@@ -104,12 +184,18 @@ export class FakeApi {
 
   async #answer(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
     const method = init.method ?? 'GET';
-    const path = new URL(String(input), 'https://aos.test').pathname;
+    const url = new URL(String(input), 'https://aos.test');
+    const path = url.pathname;
     const call = `${method} ${path}`;
     this.calls.push(call);
     this.requests.push({ call, background: new Headers(init.headers).get(BACKGROUND_HEADER) === '1' });
     const one = /^\/api\/conversations\/(\d+)$/.exec(path);
     if (one) return this.#conversation(method, Number(one[1]), init);
+    const attachment = /^\/api\/attachments(?:\/(\d+)(?:\/(content|thumbnail))?)?$/.exec(path);
+    if (attachment) {
+      const id = attachment[1] ? Number(attachment[1]) : null;
+      return this.#attachment(method, id, attachment[2] ?? null, url, init);
+    }
     switch (call) {
       case 'GET /api/auth/state':
         return json({ authenticated: this.session, setup_required: false });
@@ -158,6 +244,50 @@ export class FakeApi {
       default:
         return unavailable();
     }
+  }
+
+  /** /api/attachments and its sub-routes, like server/routes_attachments.py. */
+  async #attachment(method: string, id: number | null, sub: string | null, url: URL, init: RequestInit): Promise<Response> {
+    if (id === null) {
+      if (method !== 'PUT') return unavailable();
+      const name = url.searchParams.get('name') ?? '';
+      const body = await bodyBytes(init.body);
+      this.uploads.push({ name, body });
+      const answer = await this.uploadAnswer?.(name, body);
+      if (answer) return answer;
+      const attachment = this.#describe(name, body, this.#nextAttachment++);
+      this.attachments.set(attachment.id, { attachment, body, thumbnail: null });
+      return json(attachment, 201);
+    }
+    const stored = this.attachments.get(id);
+    if (!stored) return json({ detail: NOT_FOUND }, 404);
+    if (sub === 'content' && method === 'GET') {
+      const range = new Headers(init.headers).get('Range');
+      this.ranges.push(range);
+      const type = stored.attachment.kind === 'text' ? 'text/plain; charset=utf-8' : stored.attachment.mime;
+      const part = range ? /^bytes=0-(\d+)$/.exec(range) : null;
+      if (part) return new Response(stored.body.slice(0, Number(part[1]) + 1), { status: 206, headers: { 'Content-Type': type } });
+      return new Response(stored.body.slice(), { status: 200, headers: { 'Content-Type': type } });
+    }
+    if (sub === 'thumbnail' && method === 'PUT') {
+      const body = await bodyBytes(init.body);
+      this.thumbnailPuts.push({ id, body });
+      const answer = await this.thumbnailAnswer?.(id, body);
+      if (answer) return answer;
+      stored.thumbnail = body;
+      stored.attachment = { ...stored.attachment, has_thumbnail: true };
+      return new Response(null, { status: 204 });
+    }
+    if (sub === 'thumbnail' && method === 'GET') {
+      if (!stored.thumbnail) return json({ detail: 'Aquest adjunt no té miniatura.' }, 404);
+      return new Response(stored.thumbnail.slice(), { status: 200, headers: { 'Content-Type': 'image/webp' } });
+    }
+    if (sub === null && method === 'GET') return json(stored.attachment);
+    if (sub === null && method === 'DELETE') {
+      this.attachments.delete(id);
+      return new Response(null, { status: 204 });
+    }
+    return unavailable();
   }
 
   #put(body: RuntimeSettings): Response {

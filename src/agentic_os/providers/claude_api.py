@@ -2,13 +2,18 @@
 
 Prompt caching: the system prompt is a block with its own breakpoint and top-level
 automatic caching moves a second breakpoint to the end of the append-only history,
-so each call re-reads the prefix the previous one wrote. Models of the 4.6 generation
-on run with adaptive thinking (text omitted) and an effort per call purpose; older
-Claude 4 / 3.7 models get a thinking budget instead, and Haiku or unknown ids run
-without thinking (what each model accepts comes from the Models API when it says so).
-A request with reasoning "off" disables thinking. ``max_tokens`` is the request's billed
-output budget exactly (thinking included), never raised. Opus 5 / Opus 5.5 / Fable
-requests opt into server-side refusal fallbacks.
+so each call re-reads the prefix the previous one wrote. Attachments go at the start of
+the last user message, as the CLI sends them (:func:`attachment_blocks`), and the last
+one carries a third breakpoint: a later phase of the turn that sends them after the
+same prefix (the synthesis after the answers, a revision round after the previous one)
+reads them from the cache instead of paying for them whole again.
+
+Models of the 4.6 generation on run with adaptive thinking (text omitted) and an effort
+per call purpose; older Claude 4 / 3.7 models get a thinking budget instead, and Haiku
+or unknown ids run without thinking (what each model accepts comes from the Models API
+when it says so). A request with reasoning "off" disables thinking. ``max_tokens`` is the
+request's billed output budget exactly (thinking included), never raised. Opus 5 /
+Opus 5.5 / Fable requests opt into server-side refusal fallbacks.
 
 Usage is what Anthropic bills, per attempt: a refusal still bills its input and any
 streamed output (and, before any output, the categories in ``BILLED_BEFORE_OUTPUT``), so
@@ -33,13 +38,14 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import anthropic
 import httpx2
 from anthropic import Omit, omit
 from anthropic.types import ModelCapabilities
 from anthropic.types.beta import (
+    BetaContentBlockParam,
     BetaMessage,
     BetaMessageParam,
     BetaTextBlockParam,
@@ -61,12 +67,13 @@ from agentic_os.providers.base import (
 from agentic_os.providers.claude_cli import (
     EFFORT_BY_PURPOSE,
     Effort,
+    attachment_blocks,
     family_description,
     is_haiku,
     redact,
     refusal_error,
 )
-from agentic_os.providers.prompt_format import to_chat_messages
+from agentic_os.providers.prompt_format import read_files, to_chat_messages
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +417,8 @@ class ClaudeApiProvider:
             {"role": role, "content": content}
             for role, content in to_chat_messages(request, "claude")
         ]
+        if request.attachments:
+            messages[-1] = await self._with_attachments(request, messages[-1])
         manager = client.beta.messages.stream(
             model=model,
             max_tokens=max_tokens,
@@ -500,6 +509,20 @@ class ClaudeApiProvider:
             raise ProviderError(
                 f"Claude no ha respost a temps ({seconds:g} s).", kind="timeout"
             ) from None
+
+    @staticmethod
+    async def _with_attachments(
+        request: GenerationRequest, last: BetaMessageParam
+    ) -> BetaMessageParam:
+        """The last user message (it ends with the prompt) with the attachment blocks
+        before its text; the last attachment block is a cache breakpoint."""
+        blocks = attachment_blocks(request.attachments, await read_files(request.attachments))
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        text = last["content"]
+        if not isinstance(text, str):  # pragma: no cover - to_chat_messages gives text
+            raise ProviderError("Missatge inesperat per als adjunts.", kind="internal")
+        content = [*blocks, {"type": "text", "text": text}]
+        return {"role": "user", "content": cast(list[BetaContentBlockParam], content)}
 
     async def prewarm(self, request: GenerationRequest) -> None:
         """Nothing to start ahead of time in api mode."""

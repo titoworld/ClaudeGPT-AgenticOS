@@ -3,6 +3,8 @@
 // call its methods; nothing else talks to the network.
 
 import { api, ApiError, setUnauthorizedHandler, type RequestOptions } from './api';
+import { forgetLines } from './attachment-lines';
+import { missingAttachment } from './attachments';
 import { charCount, ComposerState, MAX_MESSAGE_CHARS, MAX_QUESTION_CHARS } from './composer.svelte';
 import { Conversations, errorMessage } from './conversations.svelte';
 import { inferCostBasis } from './costs';
@@ -31,6 +33,7 @@ import { wsErrorText } from './text';
 import { toasts } from './toasts.svelte';
 import { createLiveTurn, isTerminal, mergeTurns, TurnRegistry, type TurnView } from './turns.svelte';
 import { uuid } from './uuid';
+import { viewer } from './viewer.svelte';
 import { Connection } from './ws.svelte';
 
 /**
@@ -58,6 +61,11 @@ const MESSAGE_TOO_LARGE =
 
 const UNREAD_MESSAGE =
   'El servidor no ha llegit la pregunta perquè el missatge era massa gran. Escurça-la i torna-ho a provar.';
+
+const ATTACHMENTS_FAILED =
+  "Hi ha adjunts que no s'han pogut pujar: treu-los o torna-ho a provar abans d'enviar la pregunta.";
+
+const ATTACHMENTS_UPLOADING = 'Encara es pugen adjunts. Espera que acabin i torna-ho a provar.';
 
 /**
  * Requests the app makes by itself (refreshes after `hello`, after turn events, retries):
@@ -260,6 +268,8 @@ class App {
     this.#endSession();
     this.settings = normalizeSettings(DEFAULT_SETTINGS);
     this.composer.draft = '';
+    this.composer.waitingUploads = false;
+    this.composer.attachments.clear(); // their uploads stop; the server deletes what was never sent
     this.auth = 'locked';
   }
 
@@ -292,6 +302,8 @@ class App {
     this.paletteOpen = false;
     this.settingsOpen = false;
     this.sidebarOpen = false;
+    viewer.close();
+    forgetLines();
   }
 
   /** A 401, or the socket closed with 4401: the server has no session for this browser. */
@@ -613,14 +625,43 @@ class App {
   }
 
   /**
-   * Sends `text` as a question in the open conversation. False when it was not sent (the
-   * composer then keeps it): never a question or a message the server would refuse (N19).
+   * The composer's send: its draft, with its attachments. While some are still uploading
+   * it waits for them (the composer says so) and sends once they are all up; a second
+   * call stops waiting.
+   */
+  sendDraft(): void {
+    const c = this.composer;
+    if (c.waitingUploads) {
+      c.waitingUploads = false;
+      return;
+    }
+    if (!c.attachments.busy) {
+      if (this.send(c.draft)) c.draft = '';
+      return;
+    }
+    c.waitingUploads = true;
+    void c.attachments.settled().then(() => {
+      if (!c.waitingUploads) return; // stopped, or the session ended
+      c.waitingUploads = false;
+      if (this.send(c.draft)) c.draft = '';
+    });
+  }
+
+  /**
+   * Sends `text` as a question in the open conversation, with the composer's attachments.
+   * False when it was not sent (the composer then keeps it): never a question or a message
+   * the server would refuse (N19).
    */
   send(text: string): boolean {
     const question = text.trim();
     if (!question || this.runningTurn) return false;
     if (charCount(question) > MAX_QUESTION_CHARS) {
       toasts.push(QUESTION_TOO_LONG, 'error');
+      return false;
+    }
+    const tray = this.composer.attachments;
+    if (tray.failed || tray.busy) {
+      toasts.push(tray.failed ? ATTACHMENTS_FAILED : ATTACHMENTS_UPLOADING, 'error');
       return false;
     }
     if (this.conn.status !== 'open') {
@@ -645,6 +686,7 @@ class App {
     };
     const conversationId = this.convs.currentId;
     const models = modelOverridesPayload(prefs.models, c.mode === 'solo' ? [c.target] : AGENTS);
+    const attachments = tray.ready();
     const msg: ClientMessage = {
       type: 'turn.start',
       request_id: requestId,
@@ -654,6 +696,7 @@ class App {
       conversation_id: conversationId,
       options,
       ...(models ? { models } : {}),
+      ...(attachments.length ? { attachments: attachments.map((a) => a.id) } : {}),
     };
     if (charCount(JSON.stringify(msg)) > MAX_MESSAGE_CHARS) {
       // The server would not read it, nor could it say which turn went unread.
@@ -668,6 +711,7 @@ class App {
         target: c.mode === 'solo' ? c.target : null,
         options,
         conversationId,
+        attachments,
       }),
     );
     if (!this.conn.send(msg)) {
@@ -675,6 +719,7 @@ class App {
       toasts.push("No s'ha pogut enviar la pregunta.", 'error');
       return false;
     }
+    tray.take(); // they go with the question now
     return true;
   }
 
@@ -711,7 +756,7 @@ class App {
           // A rejected turn.start (busy, invalid model...): never saved, so offer the text back.
           turn.status = 'failed';
           turn.error = { kind: msg.code ?? 'server', message: text };
-          if (turn.turnId == null) this.composer.restore(turn.question);
+          if (turn.turnId == null) this.composer.restore(turn.question, turn.attachments);
         } else if (msg.code === 'too_large' && !msg.request_id && this.#askAboutUnread()) {
           // The server's answers say which turn it was (#onUnknown), and that turn says why.
         } else {
@@ -766,8 +811,13 @@ class App {
         this.#turnEnded();
         sceneHost.flash('error');
         // Rejected before it started (too long, the conversation is gone...): the server
-        // stored nothing, so the question goes back to the composer (N19).
-        if (turn.turnId == null) this.composer.restore(turn.question);
+        // stored nothing, so the question goes back to the composer (N19), with its attachments;
+        // one the server no longer has says so on its card.
+        if (turn.turnId == null) {
+          this.composer.restore(turn.question, turn.attachments);
+          const gone = missingAttachment(ev.error.message);
+          if (gone !== null) this.composer.attachments.markGone(gone);
+        }
         if (turn.conversationId !== this.convs.currentId) {
           toasts.push(`Un torn ha fallat: ${ev.error.message}`, 'error');
         }
@@ -831,7 +881,7 @@ class App {
       turn.error = unread
         ? { kind: 'too_large', message: UNREAD_MESSAGE }
         : { kind: 'lost', message: "La connexió es va tallar abans d'enviar la pregunta. Torna-ho a provar." };
-      this.composer.restore(turn.question);
+      this.composer.restore(turn.question, turn.attachments);
       return;
     }
     // The server forgot it (finished long ago or restarted): trust the stored version.
@@ -857,6 +907,7 @@ class App {
     const stored = this.convs.storedTurns.find((t) => t.turnId === turn.turnId);
     if (!stored) return;
     if (!turn.question) turn.question = stored.question;
+    if (!turn.attachments.length) turn.attachments = stored.attachments;
     turn.options ??= stored.options;
     turn.target ??= stored.target;
   }

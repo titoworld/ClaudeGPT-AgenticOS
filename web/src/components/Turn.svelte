@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
+  import { attachmentView } from '../lib/attachments';
   import { approxEur, processedTokens, tokenBreakdown, turnCost, turnCostTitle } from '../lib/costs';
   import { AGENT_LABEL, formatInt, formatTime } from '../lib/format';
   import { AGENTS } from '../lib/protocol';
@@ -16,7 +17,9 @@
     turnUsage,
     type TurnView,
   } from '../lib/turns.svelte';
+  import { viewer } from '../lib/viewer.svelte';
   import AnswerCard from './AnswerCard.svelte';
+  import AttachmentCard from './AttachmentCard.svelte';
   import DebateStepper from './DebateStepper.svelte';
   import Icon from './Icon.svelte';
   import RevisionRound from './RevisionRound.svelte';
@@ -78,6 +81,13 @@
 
 <article class="turn" aria-label="Torn: {turn.question.slice(0, 80)}">
   <div class="question">
+    {#if turn.attachments.length}
+      <ul class="attachments" aria-label="Adjunts">
+        {#each turn.attachments as attachment (attachment.id)}
+          <li><AttachmentCard view={attachmentView(attachment)} onopen={() => viewer.open(attachment)} /></li>
+        {/each}
+      </ul>
+    {/if}
     <div class="bubble">
       <p>{turn.question || '…'}</p>
     </div>
@@ -175,6 +185,16 @@
     gap: 0.3rem;
     margin-left: auto;
     max-width: min(46rem, 88%);
+  }
+
+  .attachments {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 
   .bubble {

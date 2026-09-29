@@ -118,6 +118,12 @@ export interface TurnOptions {
   use_cache: boolean;
 }
 
+/**
+ * What the revisions of a debate get of an attached PDF: "text" its extracted text (far
+ * fewer tokens), "full" the document. The answers and the synthesis always get it whole.
+ */
+export type PdfInRevisions = 'full' | 'text';
+
 export interface RuntimeSettings {
   /**
    * Version of the stored settings, +1 on every save. PUT /api/settings carries the
@@ -135,6 +141,7 @@ export interface RuntimeSettings {
   fx: { mode: 'auto' | 'manual'; eur_per_usd: number };
   budgets_eur: Record<Agent, number | null>; // monthly API budget
   plans_eur: Record<Agent, number | null>; // monthly subscription price
+  pdf_in_revisions: PdfInRevisions;
 }
 
 /** Body of the 409 answer to PUT /api/settings: the settings are the current ones. */
@@ -160,6 +167,57 @@ export interface ConversationSummary {
  */
 export const CONVERSATION_QUERY_MAX_LENGTH = 200;
 
+// ---------------------------------------------------------------- attachments
+
+export type AttachmentKind = 'image' | 'pdf' | 'text';
+
+/** A file attached to a question (docs/PROTOCOL.md «Adjunts»). */
+export interface Attachment {
+  id: number;
+  /** Display name, cleaned by the server (no path, no control or invisible characters). */
+  name: string;
+  kind: AttachmentKind;
+  /** image/png|jpeg|gif|webp, application/pdf or text/plain: sniffed from the content. */
+  mime: string;
+  size: number; // bytes
+  pages: number | null; // PDF
+  width: number | null; // images, in pixels
+  height: number | null;
+  sha256: string;
+  created_at: string;
+  /** The browser uploaded its thumbnail (GET /api/attachments/{id}/thumbnail). */
+  has_thumbnail: boolean;
+  /** Text files: always; PDFs: the server could extract their text. */
+  text_available: boolean;
+  /** Approximate input tokens of each call that gets it. */
+  estimated_tokens: number;
+}
+
+/** Attachments of one message. */
+export const MAX_ATTACHMENTS = 5;
+/** Raw bytes of all the attachments of one message. */
+export const MAX_TURN_ATTACHMENT_BYTES = 20_000_000;
+export const MAX_IMAGE_BYTES = 7_000_000;
+/** Pixels per side of an image. */
+export const MAX_IMAGE_SIDE = 8000;
+/**
+ * The models see an image with its long edge at most this long: the browser downscales
+ * a larger one before uploading it (same fidelity for the models, far less upload).
+ */
+export const DOWNSCALE_EDGE = 2576;
+export const MAX_PDF_BYTES = 20_000_000;
+export const MAX_PDF_PAGES = 100;
+export const MAX_TEXT_BYTES = 200_000;
+/** A thumbnail: a PNG or WebP of at most these bytes and pixels per side. */
+export const MAX_THUMBNAIL_BYTES = 100_000;
+export const MAX_THUMBNAIL_SIDE = 512;
+/** Extensions of the text files accepted (their content must be UTF-8 without NUL). */
+export const TEXT_EXTENSIONS: readonly string[] = [
+  'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'htm', 'log', 'ini', 'toml', 'cfg',
+  'py', 'js', 'ts', 'jsx', 'tsx', 'svelte', 'css', 'scss', 'sql', 'sh', 'bash', 'rs', 'go', 'java', 'kt', 'c', 'h',
+  'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'lua', 'r', 'pl',
+];
+
 export interface Message {
   id: number;
   turn_id: number;
@@ -177,6 +235,8 @@ export interface MessageMeta {
   target?: Agent;
   options?: TurnOptions;
   models?: Partial<Record<Agent, string>>;
+  /** Question only: its attachments, in order, as they were when the turn started. */
+  attachments?: Attachment[];
   /**
    * Question only: how the turn ended (ADR 0007). `null` from the moment the question is
    * stored until the engine writes it at the end of the turn, so a turn that never ended
@@ -315,6 +375,8 @@ export type ClientMessage =
       conversation_id: number | null;
       options?: TurnOptions;
       models?: Partial<Record<Agent, string>>;
+      /** Ids of uploaded attachments, in order: at most MAX_ATTACHMENTS, each once. */
+      attachments?: number[];
     }
   | { type: 'turn.cancel'; request_id: string }
   | { type: 'turn.subscribe'; request_id: string; after_seq: number }

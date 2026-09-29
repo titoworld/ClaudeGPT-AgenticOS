@@ -12,11 +12,16 @@ client, timeouts and transports.
 A reply that stops early (``response.incomplete``) is a truncated result, or an error
 with its billed usage when no text came at all; a refusal (``refusal`` events or parts)
 raises :class:`RefusalError` with its billed usage, even after some text streamed.
+
+Attachments go at the start of the last user message, in order (:func:`input_parts`):
+an image as ``input_image`` and a PDF as ``input_file``, both as base64 data URLs, and a
+text file (or a PDF sent as its extracted text) as ``input_text``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -26,11 +31,12 @@ from typing import Literal
 import httpx2
 import openai
 from openai import omit
-from openai.types.responses import ResponseInputParam
+from openai.types.responses import ResponseInputContentParam, ResponseInputParam
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.providers.base import (
+    Attachment,
     GenerationRequest,
     GenerationResult,
     ModelInfo,
@@ -41,7 +47,7 @@ from agentic_os.providers.base import (
     TextDelta,
     clean_refusal,
 )
-from agentic_os.providers.prompt_format import to_chat_messages
+from agentic_os.providers.prompt_format import attachment_text, read_files, to_chat_messages
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +106,39 @@ def lowest_effort(model_id: str) -> Effort:
     if _MINIMAL_EFFORT_MODEL.match(model_id):
         return "minimal"
     return "low"
+
+
+def input_parts(
+    attachments: Sequence[Attachment], files: Sequence[bytes | None]
+) -> list[ResponseInputContentParam]:
+    """Responses API content parts of the attachments, in order: ``input_image`` or
+    ``input_file`` (a PDF, named ``*.pdf``) from the file's bytes (``files``, from
+    :func:`~agentic_os.providers.prompt_format.read_files`) as a data URL, else an
+    ``input_text`` (a text file, or a PDF in mode "text")."""
+    parts: list[ResponseInputContentParam] = []
+    for attachment, data in zip(attachments, files, strict=True):
+        if data is None:
+            parts.append({"type": "input_text", "text": attachment_text(attachment)})
+            continue
+        encoded = base64.b64encode(data).decode("ascii")
+        if attachment.kind == "image":
+            parts.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{attachment.mime};base64,{encoded}",
+                    "detail": "auto",
+                }
+            )
+        else:
+            name = attachment.name
+            parts.append(
+                {
+                    "type": "input_file",
+                    "filename": name if name.lower().endswith(".pdf") else f"{name}.pdf",
+                    "file_data": f"data:application/pdf;base64,{encoded}",
+                }
+            )
+    return parts
 
 
 def _refusal_in_output(output: object) -> str | None:
@@ -299,10 +338,15 @@ class OpenAIApiProvider:
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         client = self._get_client()
         model = self._model(request)
+        chat = to_chat_messages(request, "chatgpt")
         messages: ResponseInputParam = [
-            {"role": role, "content": content}
-            for role, content in to_chat_messages(request, "chatgpt")
+            {"role": role, "content": content} for role, content in chat
         ]
+        if request.attachments:
+            # The last message is the user's, and it ends with the prompt.
+            content = input_parts(request.attachments, await read_files(request.attachments))
+            content.append({"type": "input_text", "text": chat[-1][1]})
+            messages[-1] = {"role": "user", "content": content}
         effort: Effort = (
             lowest_effort(model)
             if request.reasoning == "off"

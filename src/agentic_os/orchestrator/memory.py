@@ -4,6 +4,10 @@ The canonical history only contains final messages (the question and the solo/du
 answers or the debate synthesis); intermediate debate messages never reach the
 context. When the context grows beyond a threshold, everything except the most
 recent messages is replaced by a summary written by a fast model.
+
+Attachments are sent only with the turn they belong to: in the history a question
+carries just a reference to them, from its ``meta.attachments``
+(:func:`attachments_reference`).
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from dataclasses import dataclass, replace
 from agentic_os.domain import AgentName, Usage
 from agentic_os.orchestrator.accounting import declined_attempts, failed_call_usage, is_billed
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
-from agentic_os.orchestrator.store import History, Store, StoredMessage, UsageRecord
+from agentic_os.orchestrator.store import History, JsonValue, Store, StoredMessage, UsageRecord
 from agentic_os.orchestrator.tokens import estimate_context_tokens
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import (
@@ -26,6 +30,7 @@ from agentic_os.providers.base import (
     Provider,
     ProviderError,
 )
+from agentic_os.providers.prompt_format import attachment_label
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +79,27 @@ def canonical_messages(messages: Sequence[StoredMessage]) -> tuple[StoredMessage
     return tuple(m for m in messages if m.final and (m.kind != "question" or m.id in answered))
 
 
+def attachments_reference(snapshot: JsonValue) -> str | None:
+    """The line that stands for a question's attachments in later turns, from its
+    ``meta.attachments``: «[Adjunts: informe.pdf (PDF, 12 pàgines), foto.jpg (imatge)]»;
+    None without any (entries that are not attachments are skipped)."""
+    labels: list[str] = []
+    for entry in snapshot if isinstance(snapshot, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name, kind, pages = entry.get("name"), entry.get("kind"), entry.get("pages")
+        if not isinstance(name, str) or not isinstance(kind, str):
+            continue
+        count = pages if isinstance(pages, int) and not isinstance(pages, bool) else None
+        labels.append(attachment_label(name, kind, count))
+    return f"[Adjunts: {', '.join(labels)}]" if labels else None
+
+
 def to_chat_turn(message: StoredMessage) -> ChatTurn:
     if message.kind == "question":
-        return ChatTurn(role="user", content=message.content)
+        reference = attachments_reference(message.meta.get("attachments"))
+        content = f"{reference}\n{message.content}" if reference else message.content
+        return ChatTurn(role="user", content=content)
     return ChatTurn(role="assistant", content=message.content, agent=message.agent)
 
 

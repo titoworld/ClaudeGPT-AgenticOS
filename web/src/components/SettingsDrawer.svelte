@@ -239,6 +239,22 @@
                 {/each}
               </div>
             </fieldset>
+            <fieldset class="field">
+              <legend class="field-label">PDF a les revisions</legend>
+              <div class="segmented">
+                <label>
+                  <input type="radio" name="{uid}-pdf" value="full" bind:group={form.pdf_in_revisions} />Sencer
+                </label>
+                <label>
+                  <input type="radio" name="{uid}-pdf" value="text" bind:group={form.pdf_in_revisions} />Només el text
+                </label>
+              </div>
+              <small class="hint">
+                Les respostes i la síntesi sempre reben el PDF sencer. A les revisions d'un debat, «Només el text» envia el
+                text extret del PDF, que gasta molts menys tokens, i «Sencer» hi torna a enviar el document. Un PDF sense
+                text (un d'escanejat) hi va sempre sencer.
+              </small>
+            </fieldset>
           </section>
 
           <section>

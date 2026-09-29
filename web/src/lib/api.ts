@@ -1,6 +1,7 @@
 // Typed REST client (docs/PROTOCOL.md). Same-origin, cookie session.
 import {
   BACKGROUND_HEADER,
+  type Attachment,
   type AuthState,
   type ConversationDetail,
   type ConversationSummary,
@@ -55,6 +56,10 @@ export interface RequestOptions {
 interface SendOptions extends RequestOptions {
   /** The request (body included) is aborted after this long and rejects with RequestTimeoutError. */
   timeoutMs?: number;
+  /** Stops the request (it then rejects with an AbortError), e.g. an upload the owner cancelled. */
+  signal?: AbortSignal;
+  /** A body sent as it is (a file), instead of JSON. */
+  raw?: Blob;
 }
 
 /** Called on any 401 so the app can go back to the login screen. */
@@ -67,11 +72,11 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 const OWN_401 = new Set(['/api/auth/login', '/api/auth/logout']);
 
 async function request<T>(method: string, path: string, body?: unknown, options: SendOptions = {}): Promise<T> {
-  const { timeoutMs, background = false } = options;
+  const { timeoutMs, background = false, signal, raw } = options;
   const controller = timeoutMs === undefined ? null : new AbortController();
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
   try {
-    return await send<T>(method, path, body, background, controller?.signal ?? null);
+    return await send<T>(method, path, raw ?? body, raw !== undefined, background, controller?.signal ?? signal ?? null);
   } catch (err) {
     if (controller?.signal.aborted) throw new RequestTimeoutError();
     throw err;
@@ -84,17 +89,19 @@ async function send<T>(
   method: string,
   path: string,
   body: unknown,
+  raw: boolean,
   background: boolean,
   signal: AbortSignal | null,
 ): Promise<T> {
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  // A file goes as it is: the server takes its type from the content, never from this.
+  if (body !== undefined) headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json';
   if (background) headers[BACKGROUND_HEADER] = '1';
   const init: RequestInit = {
     method,
     credentials: 'same-origin',
     headers,
-    body: body === undefined ? null : JSON.stringify(body),
+    body: body === undefined ? null : raw ? (body as Blob) : JSON.stringify(body),
     signal,
   };
   const res = await fetch(path, init);
@@ -106,17 +113,44 @@ async function send<T>(
     if (signal?.aborted) throw err; // the time limit, not a body that is not JSON
     payload = null;
   }
-  if (!res.ok) {
-    const detail =
-      payload && typeof payload === 'object' && 'detail' in payload && typeof payload.detail === 'string'
-        ? payload.detail
-        : `Error ${res.status}`;
-    const retryHeader = res.headers.get('Retry-After');
-    const retryAfter = retryHeader ? Number.parseInt(retryHeader, 10) : null;
-    if (res.status === 401 && !OWN_401.has(path)) onUnauthorized?.();
-    throw new ApiError(res.status, detail, Number.isFinite(retryAfter) ? retryAfter : null, payload);
-  }
+  if (!res.ok) throw failure(res, path, payload);
   return payload as T;
+}
+
+/** The ApiError of an answer that is not OK (a 401 also sends the app to the login). */
+function failure(res: Response, path: string, payload: unknown): ApiError {
+  const detail =
+    payload && typeof payload === 'object' && 'detail' in payload && typeof payload.detail === 'string'
+      ? payload.detail
+      : `Error ${res.status}`;
+  const retryHeader = res.headers.get('Retry-After');
+  const retryAfter = retryHeader ? Number.parseInt(retryHeader, 10) : null;
+  if (res.status === 401 && !OWN_401.has(path)) onUnauthorized?.();
+  return new ApiError(res.status, detail, Number.isFinite(retryAfter) ? retryAfter : null, payload);
+}
+
+/**
+ * The text of an attachment (a text file is UTF-8). With `maxBytes`, only its start: a
+ * `Range` request, and a character the cut leaves incomplete is dropped.
+ */
+async function attachmentText(id: number, options: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<string> {
+  const { maxBytes, signal } = options;
+  const path = `/api/attachments/${id}/content`;
+  const headers: Record<string, string> = maxBytes === undefined ? {} : { Range: `bytes=0-${maxBytes - 1}` };
+  const res = await fetch(path, { credentials: 'same-origin', headers, signal: signal ?? null });
+  if (!res.ok) {
+    let payload: unknown = null;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    throw failure(res, path, payload);
+  }
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const cut = maxBytes !== undefined && (res.status === 206 || bytes.length > maxBytes);
+  // `stream` keeps back the bytes of a character that the cut left incomplete.
+  return new TextDecoder('utf-8').decode(maxBytes === undefined ? bytes : bytes.subarray(0, maxBytes), { stream: cut });
 }
 
 const GATING: SendOptions = { timeoutMs: GATING_REQUEST_TIMEOUT_MS };
@@ -150,4 +184,17 @@ export const api = {
     request<ConversationSummary>('PATCH', `/api/conversations/${id}`, { title }),
   deleteConversation: (id: number) => request<void>('DELETE', `/api/conversations/${id}`),
   stats: (days = 30) => request<Stats>('GET', `/api/stats?days=${days}`),
+  /**
+   * Uploads a file (the body is the file itself, not multipart): 201 with the Attachment;
+   * 413, 415, 422 or 507 with the reason (docs/PROTOCOL.md «Adjunts»).
+   */
+  uploadAttachment: (file: Blob, name: string, signal?: AbortSignal) =>
+    request<Attachment>('PUT', `/api/attachments?${new URLSearchParams({ name })}`, undefined, { raw: file, signal }),
+  /** The thumbnail the browser made of an attachment: a PNG or WebP (100 kB, 512 px at most). */
+  uploadThumbnail: (id: number, thumbnail: Blob, signal?: AbortSignal) =>
+    request<void>('PUT', `/api/attachments/${id}/thumbnail`, undefined, { raw: thumbnail, signal }),
+  attachment: (id: number) => request<Attachment>('GET', `/api/attachments/${id}`),
+  /** Deletes an attachment never sent (409 once a question has it). */
+  deleteAttachment: (id: number) => request<void>('DELETE', `/api/attachments/${id}`),
+  attachmentText,
 };

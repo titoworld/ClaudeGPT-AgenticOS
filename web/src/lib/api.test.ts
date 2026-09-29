@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, GATING_REQUEST_TIMEOUT_MS, RequestTimeoutError, setUnauthorizedHandler } from './api';
 import { errorMessage } from './conversations.svelte';
-import { BACKGROUND_HEADER } from './protocol';
+import { BACKGROUND_HEADER, type Attachment } from './protocol';
 
 /** A fetch that answers only when told to, and rejects as a browser does when aborted. */
 function stalledFetch(stallBody = false) {
@@ -164,5 +164,104 @@ describe('the background marker', () => {
     await expect(api.spend()).rejects.toMatchObject({ status: 401 });
     expect(onUnauthorized).toHaveBeenCalledOnce();
     setUnauthorizedHandler(null);
+  });
+});
+
+describe('attachments (docs/PROTOCOL.md «Adjunts»)', () => {
+  const ATTACHMENT: Attachment = {
+    id: 12,
+    name: 'informe final.pdf',
+    kind: 'pdf',
+    mime: 'application/pdf',
+    size: 8,
+    pages: 1,
+    width: null,
+    height: null,
+    sha256: 'c'.repeat(64),
+    created_at: '2026-09-28T10:00:00Z',
+    has_thumbnail: false,
+    text_available: true,
+    estimated_tokens: 3600,
+  };
+
+  /** A fetch that records every request and answers with `answer`. */
+  function recording(answer: () => Response) {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const fetch = vi.fn(async (url: RequestInfo | URL, init: RequestInit = {}) => {
+      seen.push({ url: String(url), init });
+      if (init.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+      return answer();
+    });
+    vi.stubGlobal('fetch', fetch);
+    return seen;
+  }
+
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  it('uploads the file itself (not JSON) with PUT /api/attachments and its name', async () => {
+    const seen = recording(() => json(ATTACHMENT, 201));
+    const file = new File(['%PDF-1.7'], 'informe final.pdf', { type: 'application/pdf' });
+    expect(await api.uploadAttachment(file, 'informe final.pdf')).toEqual(ATTACHMENT);
+    const [{ url, init }] = seen as [{ url: string; init: RequestInit }];
+    expect(url).toBe('/api/attachments?name=informe+final.pdf');
+    expect(init.method).toBe('PUT');
+    expect(init.body).toBe(file);
+    expect(init.credentials).toBe('same-origin');
+    const headers = new Headers(init.headers);
+    // The server takes the type from the content, never from this header.
+    expect(headers.get('Content-Type')).toBe('application/octet-stream');
+    expect(headers.get(BACKGROUND_HEADER)).toBeNull(); // the owner attached it
+  });
+
+  it('a refused upload is an ApiError with the reason the server gives', async () => {
+    recording(() => json({ detail: 'El fitxer és massa gran: un PDF pot tenir com a molt 20 MB.' }, 413));
+    const err = await api.uploadAttachment(new Blob(['x']), 'gran.pdf').catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 413, message: 'El fitxer és massa gran: un PDF pot tenir com a molt 20 MB.' });
+  });
+
+  it('an upload can be stopped', async () => {
+    const seen = recording(() => json(ATTACHMENT, 201));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(api.uploadAttachment(new Blob(['x']), 'a.pdf', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(seen[0]!.init.signal).toBe(controller.signal);
+  });
+
+  it('uploads a thumbnail as the body of PUT /api/attachments/{id}/thumbnail', async () => {
+    const seen = recording(() => new Response(null, { status: 204 }));
+    const thumbnail = new Blob([new Uint8Array([82, 73, 70, 70])], { type: 'image/webp' });
+    await api.uploadThumbnail(12, thumbnail);
+    expect(seen[0]!.url).toBe('/api/attachments/12/thumbnail');
+    expect(seen[0]!.init.method).toBe('PUT');
+    expect(seen[0]!.init.body).toBe(thumbnail);
+  });
+
+  it('reads the metadata and deletes an attachment never sent', async () => {
+    const seen = recording(() => json(ATTACHMENT));
+    expect(await api.attachment(12)).toEqual(ATTACHMENT);
+    recording(() => new Response(null, { status: 204 }));
+    await api.deleteAttachment(12);
+    expect(seen[0]!.url).toBe('/api/attachments/12');
+    expect(vi.mocked(fetch).mock.calls[0]![1]?.method).toBe('DELETE');
+  });
+
+  it('reads the text of an attachment, only its start when asked', async () => {
+    const seen = recording(() => new Response('Primera línia\nSegona', { status: 206, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+    expect(await api.attachmentText(9, { maxBytes: 4096 })).toBe('Primera línia\nSegona');
+    expect(seen[0]!.url).toBe('/api/attachments/9/content');
+    expect(new Headers(seen[0]!.init.headers).get('Range')).toBe('bytes=0-4095');
+
+    // A multi-byte character cut by the range is left out, not garbled.
+    const cut = new Uint8Array([...new TextEncoder().encode('Adéu'), 0xc3]);
+    recording(() => new Response(cut, { status: 206 }));
+    expect(await api.attachmentText(9, { maxBytes: 6 })).toBe('Adéu');
+
+    const whole = recording(() => new Response('Tot', { status: 200 }));
+    expect(await api.attachmentText(9)).toBe('Tot');
+    expect(new Headers(whole[0]!.init.headers).get('Range')).toBeNull();
+
+    recording(() => json({ detail: "L'adjunt no existeix." }, 404));
+    await expect(api.attachmentText(9)).rejects.toMatchObject({ status: 404, message: "L'adjunt no existeix." });
   });
 });

@@ -25,6 +25,16 @@ Codex's SQLite state, whose log records every prompt, lives in a private directo
 outside ``CODEX_HOME``; the log databases are deleted before every start, so prompts do
 not outlive the process and a full state tmpfs cannot prevent a restart.
 
+Attachments go before the transcript as items of the turn's input, in order
+(:func:`input_items`): an image as a ``localImage`` (Codex reads the file itself, so no
+image travels through the JSON-RPC pipe) at a link to the stored file whose extension
+gives its type, because Codex guesses a local image's type from the file name
+(:func:`named_image`); a text file as text; and a
+PDF, which Codex cannot take, as the text the server extracted from it, labelled as not
+checked (:func:`pdf_text`). Codex joins the text items into one message: a file's text
+is enclosed and neutralized (``prompt_format.enclosed``), so it cannot pass for the
+transcript that follows.
+
 Integrity of the reply: the text is kept per ``agentMessage`` item and the final text is
 made only of the (non-commentary) items that completed. When Codex retries a dropped
 model stream after some text was already shown (an ``error`` with ``willRetry``), it
@@ -46,6 +56,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import signal
 import time
 from collections import deque
@@ -53,13 +64,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentic_os import __version__
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.orchestrator.tokens import tokens_for_chars
 from agentic_os.providers.base import (
+    Attachment,
     GenerationRequest,
     GenerationResult,
     ModelInfo,
@@ -69,7 +81,13 @@ from agentic_os.providers.base import (
     TextDelta,
     UsageLimit,
 )
-from agentic_os.providers.prompt_format import render_transcript
+from agentic_os.providers.prompt_format import (
+    attachment_text,
+    enclosed,
+    neutralize_tags,
+    pages_label,
+    render_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -723,6 +741,84 @@ def remove_log_databases(state_dir: Path) -> list[str]:
     return sorted(removed)
 
 
+def pdf_text(attachment: Attachment) -> str:
+    """What ChatGPT reads of a PDF: the text the server extracted, unchecked (Codex has no
+    PDF input), enclosed under a header that says so (``prompt_format.enclosed``); or a
+    notice when there is none."""
+    name = neutralize_tags(attachment.name)
+    text = attachment.text
+    if text is None or not text.strip():
+        return f"[PDF «{name}»: no se n'ha pogut extreure el text]\n"
+    pages = f", {pages_label(attachment.pages)}" if attachment.pages else ""
+    header = f"PDF «{name}»{pages}: text extret pel servidor, sense contrastar"
+    return enclosed(header, text, attachment)
+
+
+def _text_item(text: str) -> JsonObject:
+    return {"type": "text", "text": text, "text_elements": []}
+
+
+IMAGE_EXTENSIONS: Final[Mapping[str, str]] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+"""The extension that makes Codex's type guess (mime_guess, from the file name) right."""
+
+
+def named_image(attachment: Attachment, directory: Path) -> Path:
+    """A path to ``attachment`` whose name gives its type: Codex tells a local image's
+    type from the file name, and the stored files are named after their content only. A
+    symbolic link ``<sha256><extension>`` in ``directory`` (which must exist), replaced
+    atomically when it points elsewhere. Blocking (file system calls)."""
+    extension = IMAGE_EXTENSIONS.get(attachment.mime)
+    if extension is None:
+        return attachment.path
+    target = attachment.path.resolve()
+    link = directory / f"{attachment.sha256}{extension}"
+    with contextlib.suppress(OSError):
+        if Path(os.readlink(link)) == target:
+            return link
+    temporary = directory / f".{link.name}.{secrets.token_hex(8)}"
+    os.symlink(target, temporary)
+    try:
+        os.replace(temporary, link)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    return link
+
+
+def input_items(
+    request: GenerationRequest, images: Mapping[str, Path] | None = None
+) -> list[JsonObject]:
+    """``UserInput`` items of a call's turn: one per attachment, in order (an image as a
+    ``localImage``, at its path in ``images`` (by SHA-256, see :func:`named_image`) or
+    else its stored path; a PDF as :func:`pdf_text`; a text file as its ``[Fitxer: ...]``
+    text), then the rendered transcript."""
+    items: list[JsonObject] = []
+    for attachment in request.attachments:
+        if attachment.kind == "image":
+            path = (images or {}).get(attachment.sha256, attachment.path)
+            items.append({"type": "localImage", "path": str(path)})
+        elif attachment.kind == "pdf":
+            items.append(_text_item(pdf_text(attachment)))
+        else:
+            items.append(_text_item(attachment_text(attachment)))
+    items.append(_text_item(render_transcript(request)))
+    return items
+
+
+async def check_images(attachments: Sequence[Attachment]) -> None:
+    """Check that every image Codex will read is the file the owner attached (a
+    ``ProviderError`` otherwise): Codex would put a note in its place and ChatGPT would
+    answer without it."""
+    images = [attachment for attachment in attachments if attachment.kind == "image"]
+    if images:
+        await asyncio.to_thread(lambda: [image.read() for image in images])
+
+
 def sub_agent_run(item: JsonObject) -> tuple[str, list[str]] | None:
     """``(item id, thread ids)`` when a turn item starts a turn on a sub-agent's thread
     (a spawn or a follow-up), else None. ``item/started`` and ``item/completed`` repeat
@@ -798,6 +894,8 @@ class CodexAppServerProvider:
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         started = time.monotonic()
         deadline = started + self._settings.provider_timeout_seconds
+        await check_images(request.attachments)
+        images = await self._named_images(request.attachments)
         requested_model = self._requested_model(request)
         conn: _AppServerConnection | None = None
         thread_task: asyncio.Task[Any] | None = None
@@ -826,13 +924,7 @@ class CodexAppServerProvider:
                     "turn/start",
                     {
                         "threadId": thread_id,
-                        "input": [
-                            {
-                                "type": "text",
-                                "text": render_transcript(request),
-                                "text_elements": [],
-                            }
-                        ],
+                        "input": input_items(request, images),
                         "effort": (
                             LOWEST_EFFORT
                             if request.reasoning == "off"
@@ -1024,6 +1116,19 @@ class CodexAppServerProvider:
             await conn.request(
                 "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, CLEANUP_TIMEOUT
             )
+
+    async def _named_images(self, attachments: Sequence[Attachment]) -> dict[str, Path]:
+        """Links with the right extension to the call's images (:func:`named_image`), by
+        SHA-256, in a private directory outside Codex's working directory."""
+        images = [attachment for attachment in attachments if attachment.kind == "image"]
+        if not images:
+            return {}
+
+        def make() -> dict[str, Path]:
+            directory = _private_dir(self._settings.data_dir / "codex-images")
+            return {image.sha256: named_image(image, directory) for image in images}
+
+        return await asyncio.to_thread(make)
 
     def _requested_model(self, request: GenerationRequest) -> str | None:
         if request.model:

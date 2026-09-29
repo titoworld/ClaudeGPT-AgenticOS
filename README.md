@@ -17,6 +17,7 @@ El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiq
   - L'historial es compacta quan creix.
   - Hi ha memòria cau de torns sencers.
   - Cada estalvi es veu al tauler.
+- **Adjunts al xat:** imatges (PNG, JPEG, GIF, WebP), PDF i fitxers de text, amb miniatures com a claude.ai. Tria'ls, arrossega'ls o enganxa les imatges; cada targeta mostra els tokens estimats abans d'enviar. Els models reben el fitxer mateix (ChatGPT amb la subscripció, el text dels PDF); a les revisions d'un debat, els PDF hi van com a text per estalviar tokens (els escanejats, sencers), si no tries el contrari a la configuració.
 - **Subscripcions via les CLI oficials** (Claude Code i Codex), o claus d'API, o un mode de demostració sense cost.
 - **Model a triar per a cada agent.** Amb claus d'API i amb Codex, la llista es demana en directe al proveïdor, així que els models nous hi surten sols. Amb la CLI de Claude són els àlies `opus`, `sonnet`, `haiku` i `fable`, que sempre apunten a l'última versió. També pots escriure qualsevol identificador.
 - **Tokens i euros:**
@@ -92,9 +93,10 @@ La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les d
 ├── src/agentic_os/
 │   ├── providers/      Claude (CLI i API), ChatGPT (Codex app-server i API), fake
 │   ├── orchestrator/   motor de torns: solo, duel, consell, compactació, memòria cau
-│   ├── storage/        SQLite: converses, ús, estalvis, sessions, configuració
+│   ├── storage/        SQLite: converses, adjunts, ús, estalvis, sessions, configuració
 │   ├── security/       contrasenya, TOTP, sessions, límits d'intents
 │   ├── server/         FastAPI: REST, WebSocket, capçaleres de seguretat
+│   ├── attachments.py  adjunts: límits, tipus pel contingut, text dels PDF
 │   ├── pricing.py      preus per model i cost estimat
 │   └── fx.py           canvi USD→EUR del BCE
 ├── web/                Svelte 5 + three.js (interfície i tauler)

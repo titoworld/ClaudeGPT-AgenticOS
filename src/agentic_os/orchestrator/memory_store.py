@@ -7,13 +7,14 @@ safe to share between concurrent turns of one event loop.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast
 
 from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.orchestrator.store import (
+    AttachmentNotFoundError,
     CachedTurn,
     History,
     JsonValue,
@@ -22,6 +23,7 @@ from agentic_os.orchestrator.store import (
     StoredMessage,
     UsageRecord,
 )
+from agentic_os.providers.base import Attachment
 
 
 def _utc_now() -> datetime:
@@ -46,14 +48,27 @@ class InMemoryStore:
         self.usage: list[UsageRecord] = []
         self.savings: list[SavingRecord] = []
         self.cache: dict[str, tuple[CachedTurn, datetime]] = {}
+        self.attachments: dict[int, Attachment] = {}
+        self.attachment_links: dict[int, tuple[int, ...]] = {}
+        """Attachment ids of each question message, in order."""
         self._next_conversation_id = 1
         self._next_message_id = 1
+        self._next_attachment_id = 1
 
     async def create_conversation(self, title: str) -> int:
         conversation_id = self._next_conversation_id
         self._next_conversation_id += 1
         self.conversations[conversation_id] = _Conversation(title=title, created_at=self._clock())
         return conversation_id
+
+    async def discard_conversation(self, conversation_id: int) -> bool:
+        """Delete a conversation without messages (see the protocol)."""
+        if conversation_id not in self.conversations or any(
+            m.conversation_id == conversation_id for m in self.messages
+        ):
+            return False
+        del self.conversations[conversation_id]
+        return True
 
     async def conversation_exists(self, conversation_id: int) -> bool:
         return conversation_id in self.conversations
@@ -77,13 +92,16 @@ class InMemoryStore:
 
     async def add_message(self, message: NewMessage) -> int:
         """Store a message. Same rules as the SQLite store: a question starts its own
-        turn (``turn_id`` None); any other message references a question of the same
-        conversation."""
+        turn (``turn_id`` None) and is stored with its attachments or not at all; any
+        other message references a question of the same conversation."""
         if message.conversation_id not in self.conversations:
             raise KeyError(f"unknown conversation {message.conversation_id}")
         if message.kind == "question":
             if message.turn_id is not None:
                 raise ValueError("a question starts its own turn: turn_id must be None")
+            self._check_links(message.attachments)
+        elif message.attachments:
+            raise ValueError("only a question takes attachments")
         elif not any(
             m.id == message.turn_id
             and m.kind == "question"
@@ -107,6 +125,8 @@ class InMemoryStore:
                 created_at=self._clock(),
             )
         )
+        if message.attachments:
+            self.attachment_links[message_id] = tuple(message.attachments)
         return message_id
 
     async def set_summary(self, conversation_id: int, summary: str, upto_message_id: int) -> None:
@@ -144,3 +164,40 @@ class InMemoryStore:
 
     async def cache_put(self, key: str, value: CachedTurn, expires_at: datetime) -> None:
         self.cache[key] = (value, expires_at)
+
+    def add_attachment(self, attachment: Attachment) -> int:
+        """Store an uploaded attachment (what the upload route does with the SQLite
+        store) and return its id; its ``created_at`` defaults to the store's clock."""
+        attachment_id = self._next_attachment_id
+        self._next_attachment_id += 1
+        if attachment.created_at is None:
+            attachment = replace(attachment, created_at=self._clock())
+        self.attachments[attachment_id] = replace(attachment, mode="full")
+        return attachment_id
+
+    async def get_attachments(self, ids: Sequence[int]) -> list[Attachment]:
+        found: list[Attachment] = []
+        for attachment_id in ids:
+            attachment = self.attachments.get(attachment_id)
+            if attachment is None:
+                raise AttachmentNotFoundError(attachment_id)
+            found.append(attachment)
+        return found
+
+    async def link_attachments(self, message_id: int, ids: Sequence[int]) -> None:
+        """Same rules as the SQLite store: only a question takes attachments, once, each
+        of them once, and only ones that exist (:class:`AttachmentNotFoundError`)."""
+        if not any(m.id == message_id and m.kind == "question" for m in self.messages):
+            raise ValueError(f"message {message_id} is not a question")
+        if message_id in self.attachment_links:
+            raise ValueError(f"message {message_id} already has attachments")
+        self._check_links(ids)
+        self.attachment_links[message_id] = tuple(ids)
+
+    def _check_links(self, ids: Sequence[int]) -> None:
+        """Each id once, and every one an attachment that exists."""
+        if len(set(ids)) != len(ids):
+            raise ValueError("an attachment cannot be linked twice to a message")
+        for attachment_id in ids:
+            if attachment_id not in self.attachments:
+                raise AttachmentNotFoundError(attachment_id)

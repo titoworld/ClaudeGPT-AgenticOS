@@ -172,3 +172,19 @@ describe('amounts typed in the budget and plan inputs (F2)', () => {
     expect(amountText('abc', null)).toBe('');
   });
 });
+
+describe('pdf_in_revisions: what the debate revisions get of an attached PDF', () => {
+  it('is «only the text» by default and when an older server does not send it', () => {
+    expect(DEFAULT_SETTINGS.pdf_in_revisions).toBe('text');
+    expect(normalizeSettings({ default_mode: 'solo' }).pdf_in_revisions).toBe('text');
+  });
+
+  it('keeps «full» and «text», and gives the default for anything else', () => {
+    expect(normalizeSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: 'full' }).pdf_in_revisions).toBe('full');
+    expect(normalizeSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: 'text' }).pdf_in_revisions).toBe('text');
+    for (const value of ['FULL', '', null, 1]) {
+      expect(normalizeSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: value } as unknown as Partial<RuntimeSettings>).pdf_in_revisions).toBe('text');
+    }
+    expect(cleanSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: 'full' }).pdf_in_revisions).toBe('full');
+  });
+});

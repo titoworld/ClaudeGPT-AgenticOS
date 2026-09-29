@@ -9,8 +9,8 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 - Dispositiu conegut: cada inici de sessió correcte posa també una cookie `__Host-aos_device` (HttpOnly, Secure, SameSite=Strict, Path=/; sense HTTPS es diu `aos_device` i no és `Secure`) amb un testimoni aleatori que dura 1 any i se substitueix per un de nou a cada inici de sessió. El logout la conserva; `agentic-os init` i `agentic-os reset-sessions` obliden tots els dispositius. Un intent d'inici de sessió que la porta només es limita pel comptador d'errors d'aquell dispositiu (no pel de l'adreça ni pel global), de manera que ningú no pot bloquejar el propietari des d'un navegador on ja ha entrat.
 - Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
 - Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`: la d'`AOS_PUBLIC_ORIGIN` o una d'`AOS_EXTRA_ORIGINS`. Si no, la petició rep `403`. El WebSocket, en canvi, s'accepta i es tanca de seguida amb el codi `4403`, perquè el navegador en vegi el motiu: d'un *handshake* rebutjat no en veu cap.
-- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir), `409` si la configuració ha canviat des que el client la va llegir (només `PUT /api/settings`, amb `settings` al cos), `413` cos massa gran: com a molt 1 MiB, o 4 KiB a `POST /api/auth/login` (l'única ruta que es llegeix sense sessió), pel `Content-Length` o comptat mentre arriba; el `detail` diu el límit que s'ha aplicat (`La petició és massa gran (màxim 1 MiB).` o `La petició és massa gran (màxim 4 KiB).`), `422` validació (també els nombres fora de rang, per grans que siguin; vegeu «Validació de l'entrada»), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons).
-- Validació de l'entrada: els identificadors de conversa (a la ruta, a `before` i al `conversation_id` del WebSocket) han de ser enters d'1 a 2^63 − 1, el màxim de SQLite; si no, `422` (`Dades no vàlides: «conversation_id».`, o `«before»`). El text dels cossos JSON (claus i valors) s'ha de poder codificar en UTF-8: un substitut solitari, que en JSON s'escriu `"\ud800"` i és JSON vàlid, dona `422` amb `La petició conté text que no és UTF-8 vàlid.` i no es desa res. Les parelles de substituts, com `"\ud83d\ude00"` (😀), són text vàlid. L'única excepció és `POST /api/auth/login`: una contrasenya o un codi amb aquest text són credencials incorrectes (`401`), i l'intent compta per al bloqueig per intents fallits. Els missatges d'error no inclouen mai els missatges interns de Python.
+- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir; 120 s a `PUT /api/attachments`), `409` si la configuració ha canviat des que el client la va llegir (`PUT /api/settings`, amb `settings` al cos) o si l'adjunt que s'esborra ja s'ha enviat (`DELETE /api/attachments/{id}`), `413` cos massa gran: com a molt 1 MiB, o 4 KiB a `POST /api/auth/login` (l'única ruta que es llegeix sense sessió), o 20 MB a `PUT /api/attachments` (cada tipus de fitxer en té un de més baix: vegeu «Adjunts»), pel `Content-Length` o comptat mentre arriba; el `detail` diu el límit que s'ha aplicat (`La petició és massa gran (màxim 1 MiB).`, `La petició és massa gran (màxim 4 KiB).` o `La petició és massa gran (màxim 20 MB).`), `415` tipus de fitxer no admès (només els adjunts), `422` validació (també els nombres fora de rang, per grans que siguin; vegeu «Validació de l'entrada»), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons), `507` el servidor no té espai al disc per desar un adjunt.
+- Validació de l'entrada: els identificadors de conversa i d'adjunt (a la ruta, a `before`, i al `conversation_id` i els `attachments` del WebSocket) han de ser enters d'1 a 2^63 − 1, el màxim de SQLite; si no, `422` (`Dades no vàlides: «conversation_id».`, `«attachment_id»` o `«before»`). El text dels cossos JSON (claus i valors) s'ha de poder codificar en UTF-8: un substitut solitari, que en JSON s'escriu `"\ud800"` i és JSON vàlid, dona `422` amb `La petició conté text que no és UTF-8 vàlid.` i no es desa res. Les parelles de substituts, com `"\ud83d\ude00"` (😀), són text vàlid. L'única excepció és `POST /api/auth/login`: una contrasenya o un codi amb aquest text són credencials incorrectes (`401`), i l'intent compta per al bloqueig per intents fallits. Els missatges d'error no inclouen mai els missatges interns de Python.
 - Una resposta que surt abans que el servidor hagi rebut tot el cos de la petició (`403`, `401`, `413` pel `Content-Length`, `429`, `408`, o un cos enviat a una ruta que no el llegeix) porta `Connection: close` i el servidor tanca la connexió: el client no la pot reutilitzar. Les peticions sense cos o amb el cos llegit sencer mantenen la connexió.
 
 ## REST
@@ -32,6 +32,12 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 | `PATCH /api/conversations/{id}` | `{"title": str}` | `ConversationSummary` |
 | `DELETE /api/conversations/{id}` | – | `204`. Els torns en curs de la conversa es cancel·len, i el servidor n'oblida tots els torns: un `turn.subscribe` posterior rep `turn.unknown` |
 | `GET /api/stats` | `?days=30` (1–365) | `Stats` |
+| `PUT /api/attachments` | `?name=<nom del fitxer>`; el cos és el fitxer tal com és, no multipart (vegeu «Adjunts») | `201` + `Attachment`; `413`, `415`, `422`, `507` |
+| `GET /api/attachments/{id}` | – | `Attachment` |
+| `GET /api/attachments/{id}/content` | – | El fitxer, amb el tipus detectat en pujar-lo (vegeu «Adjunts») |
+| `PUT /api/attachments/{id}/thumbnail` | El cos és la miniatura: PNG o WebP, com a molt 100 kB i 512 px per costat | `204`; `404`, `413`, `415`, `422` |
+| `GET /api/attachments/{id}/thumbnail` | – | La miniatura (`image/png` o `image/webp`), o `404` si no en té |
+| `DELETE /api/attachments/{id}` | – | `204` si no s'ha enviat mai; `409` si ja és a una pregunta (s'esborra amb la conversa) |
 | `GET /api/ws` | WebSocket | vegeu més avall |
 
 ### Tipus
@@ -130,6 +136,9 @@ interface RuntimeSettings {
         eur_per_usd: number };                // 0,2–5, per defecte 0,86
   budgets_eur: Record<Agent, number | null>;  // pressupost mensual de l'ús per API
   plans_eur: Record<Agent, number | null>;    // preu mensual de la subscripció
+  pdf_in_revisions: "full" | "text";          // PDF a les revisions d'un debat: "text" (per
+                                              // defecte) el text extret; "full" el document.
+                                              // Un PDF sense text hi va sempre sencer
 }
 
 interface AgentSpend {
@@ -163,6 +172,22 @@ interface Message {
 interface ConversationDetail extends ConversationSummary {
   summary: string | null;          // resum de la compactació, si n'hi ha
   messages: Message[];             // tots, els més antics primer
+}
+
+interface Attachment {             // un fitxer adjunt (vegeu «Adjunts»)
+  id: number;
+  name: string;                    // nom que es mostra, net (sense camí ni caràcters de control)
+  kind: "image" | "pdf" | "text";
+  mime: string;                    // "image/png" | "image/jpeg" | "image/gif" | "image/webp" |
+                                   // "application/pdf" | "text/plain"
+  size: number;                    // bytes
+  pages: number | null;            // PDF
+  width: number | null; height: number | null;   // imatges, en píxels
+  sha256: string;                  // del contingut
+  created_at: string;              // ISO 8601 UTC, quan es va pujar
+  has_thumbnail: boolean;          // el navegador n'ha pujat la miniatura
+  text_available: boolean;         // text: sempre; PDF: se n'ha pogut extreure el text
+  estimated_tokens: number;        // tokens d'entrada aproximats per crida
 }
 
 interface Stats {
@@ -213,6 +238,28 @@ interface Stats {
 - El text de la cerca pot tenir com a molt 200 caràcters, un cop tret els espais dels extrems. Un de més llarg dona `422` amb `La cerca no pot tenir més de 200 caràcters.`
 - Una cerca pagina com la llista: `before` és l'`id` de l'última conversa de la pàgina anterior de la mateixa cerca. La resposta té la mateixa forma, `[ConversationSummary]`.
 
+### Adjunts
+
+Els fitxers que el propietari adjunta a una pregunta ([ADR 0009](adr/0009-adjunts.md)). Els límits són les constants de `src/agentic_os/attachments.py`.
+
+- **Tipus.** Surt sempre del contingut, mai del nom ni del `Content-Type`:
+  - imatges PNG, JPEG, GIF i WebP, pels primers bytes; les dimensions, de les capçaleres (el servidor no descodifica mai cap imatge);
+  - PDF, pel `%PDF-` del començament;
+  - text: UTF-8 vàlid sense cap caràcter NUL i amb una d'aquestes extensions: `txt`, `md`, `markdown`, `csv`, `tsv`, `json`, `yaml`, `yml`, `xml`, `html`, `htm`, `log`, `ini`, `toml`, `cfg`, `py`, `js`, `ts`, `jsx`, `tsx`, `svelte`, `css`, `scss`, `sql`, `sh`, `bash`, `rs`, `go`, `java`, `kt`, `c`, `h`, `cpp`, `hpp`, `cs`, `rb`, `php`, `swift`, `lua`, `r`, `pl`. Sempre és text pla (`text/plain`), també un `.html`;
+  - qualsevol altra cosa, també l'SVG i l'HEIC, dona `415`.
+- **Límits:**
+  - com a molt 5 adjunts per missatge, i 20 MB entre tots;
+  - imatge: 7 MB i 8.000 píxels per costat. Abans de pujar-la, el navegador redueix tota imatge de més de 2.576 píxels al costat llarg i torna a codificar a la mateixa mida una de més de 7 MB; també torna a codificar dreta una foto que es mostra girada per la seva orientació EXIF (com les del mòbil), perquè els models en reben els píxels tal com estan desats, sense les metadades. Els GIF es pugen tal com són;
+  - PDF: 20 MB i 100 pàgines, sense xifrar;
+  - text: 200 kB.
+  - Massa gran: `413`, amb el límit del tipus (`El fitxer és massa gran: una imatge pot tenir com a molt 7 MB.`). No vàlid (buit, sense nom, una imatge il·legible, massa píxels o pàgines, un PDF xifrat o malmès): `422`.
+- **Pujada:** `PUT /api/attachments?name=<nom>`, amb el fitxer com a cos. Necessita la sessió i l'`Origin`, com totes les escriptures. El servidor escriu el cos en un fitxer temporal a mesura que arriba i el talla al límit del seu tipus, que decideixen els primers 16 bytes: si el `Content-Length` ja el passa, respon `413` de seguida, sense llegir-ne més. `name` és el nom que es mostra (i el que dona l'extensió d'un fitxer de text): se'n queda l'última part d'un camí, en NFC, sense caràcters de control ni de format invisibles (com els que capgiren el sentit del text), amb els espais seguits com un de sol i com a molt 200 caràcters (un de més llarg es talla i conserva l'extensió). Un adjunt que no s'envia en cap torn s'esborra al cap de 24 h.
+- **Text d'un PDF:** el servidor el llegeix amb pypdf en un procés a part, com a molt 60 s. Té un bloc per pàgina, introduït per la línia `--- Pàgina N ---`, i els models el reben quan no reben el document (vegeu `pdf_in_revisions` i l'ADR). `text_available` és `false` si no se n'ha pogut extreure cap text: un PDF escanejat, o un error o el temps esgotat mentre se n'extreia (si ni tan sols se'n poden comptar les pàgines, la pujada dona `422`). Si passa d'1.000.000 caràcters, es talla i acaba amb l'avís `[Text retallat: el text extret del PDF passava de 1.000.000 caràcters.]`.
+- **`estimated_tokens`** (aproximats, per a cada crida que rep l'adjunt): imatge `ceil(w'/28) · ceil(h'/28)`, com a molt 4.784, amb `(w', h')` la imatge reduïda a 2.576 píxels al costat llarg (mai ampliada); PDF, 3.600 per pàgina; text, `ceil(caràcters / 4)`.
+- **Contingut** (`GET /api/attachments/{id}/content`): el fitxer tal com es va pujar, amb el tipus detectat (`text/plain; charset=utf-8` per al text), `X-Content-Type-Options: nosniff` i `Content-Security-Policy: default-src 'none'; sandbox`. Les imatges porten `Content-Disposition: inline`; els PDF i el text, `attachment` (es descarreguen). En tots dos casos, amb el nom: `filename` en ASCII i `filename*` en UTF-8. Res del que es puja no es serveix com a HTML. Admet `Range`.
+- **Miniatures:** el navegador en fa una en adjuntar el fitxer i la puja a `PUT /api/attachments/{id}/thumbnail`: una imatge PNG o WebP (pel contingut) de com a molt 100 kB i 512 píxels per costat; si no, `415`, `413` o `422`. Una miniatura nova substitueix l'anterior. `GET` la retorna, amb les mateixes capçaleres que una imatge, o `404` si no en té.
+- **Esborrar:** `DELETE /api/attachments/{id}` esborra un adjunt que no s'ha enviat mai (el propietari l'ha tret del compositor): `204`. Si ja és a una pregunta, `409`, i s'esborra amb la seva conversa: esborrar una conversa esborra els adjunts que només feia servir ella. Dues pujades del mateix fitxer en comparteixen la còpia, que s'esborra quan cap adjunt no la fa servir.
+
 ### Resultat del torn (`meta.outcome` de la pregunta)
 
 Com va acabar un torn es decideix una sola vegada i es desa a la pregunta abans de l'esdeveniment final ([ADR 0007](adr/0007-resultat-del-torn.md)):
@@ -241,7 +288,7 @@ interface TurnOutcome {
 
 ### Metadades de missatge (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut) i `outcome` (vegeu «Resultat del torn»).
+- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `attachments` (els adjunts de la pregunta, en ordre: `Attachment[]` tal com eren en començar el torn; només hi és si en porta), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut) i `outcome` (vegeu «Resultat del torn»).
 - Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`; només el de l'intent que ha respost), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
 - Resposta servida després d'un fallback (API de Claude): `declined`, `[{model, usage}]`, els intents facturats que altres models van declinar abans, cadascun amb el seu model i el seu cost. Són crides facturades a part (una fila d'ús per intent, amb `ok = false`) i compten al total del torn, però no a l'`usage` del missatge: els tokens de models diferents no se sumen mai ([ADR 0008](adr/0008-recompte-de-tokens.md)).
 - Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
@@ -268,13 +315,16 @@ L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Nom�
  "target": "claude", "conversation_id": null,
  "options": {"debate": {"rounds": 2, "consensus_threshold": 85, "synthesizer": "claude"},
              "use_cache": true},
- "models": {"claude": "opus", "chatgpt": "gpt-6-sol"}}
+ "models": {"claude": "opus", "chatgpt": "gpt-6-sol"},
+ "attachments": [12, 13]}
 {"type": "turn.cancel", "request_id": "uuid"}
 {"type": "turn.subscribe", "request_id": "uuid", "after_seq": 12}   // després d'una reconnexió
 {"type": "ping", "t": 1727450000000}
 ```
 
 `mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. A `models` (i als `RuntimeSettings`), `null` o `""` vol dir el model per defecte; els identificadors es netegen d'espais. Límit: 3 torns simultanis i un de sol per conversa.
+
+`attachments` (opcional) són els `id` dels adjunts pujats, en l'ordre en què van a la pregunta: com a molt 5, cadascun un sol cop, enters d'1 a 2^63 − 1. Si no, `error` amb `code: "invalid"` i el `request_id`, i el torn no comença. Un adjunt que no existeix, o uns adjunts que sumen més de 20 MB, donen `turn.failed` amb `kind: "invalid"` (`L'adjunt 12 no existeix.`), sense `turn.started`, i no es desa res. El mateix passa si un adjunt s'esborra mentre el torn es prepara (des d'una altra pestanya, o l'escombrada d'un adjunt no enviat de fa més de 24 h): la pregunta es desa amb els seus adjunts en una sola transacció, abans de `turn.started`, i una conversa nova que el torn acabava de crear s'esborra. Les respostes i la síntesi reben els adjunts sencers; les revisions d'un debat reben els PDF com diu `pdf_in_revisions` dels `RuntimeSettings` (el valor de quan comença el torn), excepte un PDF del qual no s'ha pogut extreure cap text (un d'escanejat), que hi va sencer.
 
 La pregunta (`text`) pot tenir com a molt 100.000 caràcters. Una de buida o de més llarga dona `turn.failed` amb `kind: "invalid"`, sense `turn.started`, i no es desa res.
 

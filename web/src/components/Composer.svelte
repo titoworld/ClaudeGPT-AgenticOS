@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
+  import { ACCEPT } from '../lib/attachments';
   import { charCount, COUNT_FROM, MAX_QUESTION_CHARS } from '../lib/composer.svelte';
   import { AGENT_LABEL, formatInt } from '../lib/format';
   import { placeAbove } from '../lib/popover';
@@ -8,7 +9,9 @@
   import { AGENTS, type TurnMode } from '../lib/protocol';
   import { LIMITS } from '../lib/settings';
   import { estimateTokens, formatK, MODE_LABEL } from '../lib/text';
+  import { viewer } from '../lib/viewer.svelte';
   import AgentIcon from './AgentIcon.svelte';
+  import AttachmentCard from './AttachmentCard.svelte';
   import Icon from './Icon.svelte';
   import ModelMenu from './ModelMenu.svelte';
 
@@ -19,20 +22,29 @@
 
   let textarea: HTMLTextAreaElement | undefined = $state();
   let optionsButton: HTMLButtonElement | undefined = $state();
+  let fileInput: HTMLInputElement | undefined = $state();
+  /** Drag events carrying files over the composer, minus the ones that left it. */
+  let dragDepth = $state(0);
 
   const c = app.composer;
+  const tray = c.attachments;
   const running = $derived(!!app.runningTurn);
   const connected = $derived(app.conn.status === 'open');
   /** A turn only starts with the owner's saved settings loaded (audit A11). */
   const settingsReady = $derived(app.settingsStatus === 'ready');
   /** What would be sent: the draft without the space around it. */
   const question = $derived(c.draft.trim());
-  const tokens = $derived(estimateTokens(question));
+  /** The question's and its attachments'. */
+  const tokens = $derived(estimateTokens(question) + tray.tokens);
   /** Its length as the server counts it (N19). */
   const chars = $derived(charCount(question));
   const tooLong = $derived(chars > MAX_QUESTION_CHARS);
   const showCount = $derived(chars >= MAX_QUESTION_CHARS * COUNT_FROM);
-  const canSubmit = $derived(running || (connected && settingsReady && question.length > 0 && !tooLong));
+  const canSubmit = $derived(
+    running ||
+      c.waitingUploads ||
+      (connected && settingsReady && question.length > 0 && !tooLong && !tray.failed),
+  );
   /** Enter makes a new line with a coarse pointer (phones, tablets): the button sends there (N20). */
   const enterSends = $derived(!c.coarsePointer);
   const sendKeys = $derived(enterSends ? 'Enter' : 'Ctrl+Enter');
@@ -64,12 +76,13 @@
     });
   });
 
+  /** Sends (waiting for attachments still uploading), stops the running turn, or stops waiting. */
   function submit(): void {
     if (running) {
       app.cancel();
       return;
     }
-    if (app.send(c.draft)) c.draft = '';
+    app.sendDraft();
   }
 
   /**
@@ -85,13 +98,70 @@
     if (e.isComposing) return;
     if (sends(e)) {
       e.preventDefault();
-      if (canSubmit && !running) submit();
-    } else if (e.key === 'Escape' && running) {
+      // While it waits for the attachments, Enter does not stop it: the button or Esc do.
+      if (canSubmit && !running && !c.waitingUploads) submit();
+    } else if (e.key === 'Escape' && (running || c.waitingUploads)) {
       e.preventDefault();
-      app.cancel();
+      if (running) app.cancel();
+      else c.waitingUploads = false;
     }
   }
+
+  // ------------------------------------------------------------ attachments
+
+  function onFiles(e: Event): void {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = ''; // the same file can be picked again
+    if (files.length) tray.add(files);
+  }
+
+  const carriesFiles = (e: DragEvent): boolean => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+
+  function onDragEnter(e: DragEvent): void {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+  }
+
+  function onDragOver(e: DragEvent): void {
+    if (!carriesFiles(e)) return;
+    e.preventDefault(); // this is where they can be dropped
+    e.dataTransfer!.dropEffect = 'copy';
+  }
+
+  function onDragLeave(e: DragEvent): void {
+    if (carriesFiles(e)) dragDepth = Math.max(0, dragDepth - 1);
+  }
+
+  function onDrop(e: DragEvent): void {
+    if (!carriesFiles(e)) return;
+    e.preventDefault(); // the browser does not open the file
+    dragDepth = 0;
+    const files = [...e.dataTransfer!.files];
+    if (files.length) tray.add(files);
+  }
+
+  /** Files dropped anywhere else are not opened by the browser (the app would be left). */
+  function refuseDrop(e: DragEvent): void {
+    if (e.defaultPrevented || !carriesFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'none';
+    if (e.type === 'drop') dragDepth = 0;
+  }
+
+  /** A pasted image is attached; text is pasted as text (cells of a spreadsheet bring both). */
+  function onPaste(e: ClipboardEvent): void {
+    const data = e.clipboardData;
+    if (!data || data.getData('text/plain')) return;
+    const images = [...data.files].filter((file) => file.type.startsWith('image/'));
+    if (!images.length) return;
+    e.preventDefault();
+    tray.add(images);
+  }
 </script>
+
+<svelte:window ondragover={refuseDrop} ondrop={refuseDrop} />
 
 {#if app.settingsStatus === 'error'}
   <div class="settings-error glass" role="alert">
@@ -109,10 +179,29 @@
 <form
   class="composer glass"
   class:running
+  class:dragging={dragDepth > 0}
+  ondragenter={onDragEnter}
+  ondragover={onDragOver}
+  ondragleave={onDragLeave}
+  ondrop={onDrop}
   onsubmit={(e) => {
     e.preventDefault();
     submit();
   }}>
+  {#if tray.items.length}
+    <ul class="attachments" aria-label="Adjunts">
+      {#each tray.items as item (item.key)}
+        {@const uploaded = item.attachment}
+        <li>
+          <AttachmentCard
+            view={item}
+            onopen={uploaded ? () => viewer.open(uploaded) : undefined}
+            onremove={() => tray.remove(item.key)}
+            onretry={() => tray.retry(item.key)} />
+        </li>
+      {/each}
+    </ul>
+  {/if}
   <label class="sr-only" for="{uid}-input">Pregunta</label>
   <div class="draft">
     <textarea
@@ -120,6 +209,7 @@
       bind:this={textarea}
       bind:value={c.draft}
       onkeydown={onKeydown}
+      onpaste={onPaste}
       rows="1"
       placeholder="Pregunta el que vulguis…"
       aria-describedby={showCount ? `${uid}-hint ${uid}-count` : `${uid}-hint`}
@@ -127,10 +217,21 @@
       spellcheck="true"></textarea>
     <!-- Always in the page, so screen readers announce the text when it appears. -->
     <p class="too-long" role="status">{#if tooLong}<Icon name="alert" size={14} /><span>La pregunta passa del màxim de {formatInt(MAX_QUESTION_CHARS)} caràcters: escurça-la per enviar-la.</span>{/if}</p>
+    <p class="upload-note" role="status">{#if c.waitingUploads}<span class="note-spinner" aria-hidden="true"></span><span>S'enviarà quan s'acabin de pujar els adjunts…</span>{/if}</p>
   </div>
 
   <div class="toolbar">
     <div class="controls">
+      <button
+        type="button"
+        class="icon-btn attach"
+        aria-label="Adjunta fitxers"
+        title="Adjunta imatges, PDF o fitxers de text (també pots arrossegar-los o enganxar una imatge)"
+        onclick={() => fileInput?.click()}>
+        <Icon name="paperclip" size={18} />
+      </button>
+      <input bind:this={fileInput} type="file" multiple accept={ACCEPT} hidden onchange={onFiles} />
+
       <fieldset class="segmented modes">
         <legend class="sr-only">Mode</legend>
         {#each MODES as mode (mode)}
@@ -182,14 +283,14 @@
           {formatInt(chars)} / {formatInt(MAX_QUESTION_CHARS)}<span class="sr-only">{' caràcters'}</span>
         </span>
       {/if}
-      <span class="kbd-hint" class:idle={connected && settingsReady && !question} id="{uid}-hint">
+      <span class="kbd-hint" class:idle={connected && settingsReady && !question && !tray.items.length} id="{uid}-hint">
         {#if !connected}
           Sense connexió
         {:else if app.settingsStatus === 'loading'}
           Carregant la configuració…
         {:else if !settingsReady}
           Sense configuració
-        {:else if question}
+        {:else if question || tray.items.length}
           ≈ {formatK(tokens)} tokens
         {:else if enterSends}
           <kbd>Enter</kbd> per enviar
@@ -205,21 +306,36 @@
         type="submit"
         class="send"
         class:stop={running}
+        class:waiting={c.waitingUploads}
         disabled={!canSubmit}
-        aria-label={running ? 'Atura el torn (Esc)' : 'Envia'}
+        aria-label={running ? 'Atura el torn (Esc)' : c.waitingUploads ? "Deixa d'esperar els adjunts" : 'Envia'}
         title={running
           ? 'Atura (Esc)'
-          : !connected
-            ? 'Sense connexió'
-            : !settingsReady
-              ? 'Cal la configuració desada per enviar'
-              : tooLong
-                ? 'La pregunta és massa llarga'
-                : `Envia (${sendKeys})`}>
-        <Icon name={running ? 'stop' : 'send'} size={18} />
+          : c.waitingUploads
+            ? "La pregunta s'enviarà quan s'acabin de pujar els adjunts. Torna a prémer (o Esc) per no enviar-la encara."
+            : !connected
+              ? 'Sense connexió'
+              : !settingsReady
+                ? 'Cal la configuració desada per enviar'
+                : tooLong
+                  ? 'La pregunta és massa llarga'
+                  : tray.failed
+                    ? 'Treu els adjunts que han fallat per enviar la pregunta'
+                    : `Envia (${sendKeys})`}>
+        {#if c.waitingUploads}
+          <span class="send-spinner" aria-hidden="true"></span>
+        {:else}
+          <Icon name={running ? 'stop' : 'send'} size={18} />
+        {/if}
       </button>
     </div>
   </div>
+
+  {#if dragDepth > 0}
+    <div class="drop-overlay" aria-hidden="true">
+      <Icon name="paperclip" size={18} />Deixa anar els fitxers per adjuntar-los
+    </div>
+  {/if}
 </form>
 
 <div class="popover glass" id={popoverId} popover="auto" {@attach placeAbove(() => optionsButton, 300)}>
@@ -255,6 +371,7 @@
 
 <style>
   .composer {
+    position: relative;
     container-type: inline-size;
     display: grid;
     gap: 0.5rem;
@@ -270,6 +387,45 @@
     box-shadow:
       var(--shadow),
       0 0 0 3px rgb(139 156 255 / 0.12);
+  }
+
+  .composer.dragging {
+    border-color: rgb(139 156 255 / 0.7);
+    box-shadow:
+      var(--shadow),
+      0 0 0 3px rgb(139 156 255 / 0.2);
+  }
+
+  .attachments {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0.1rem 0.1rem 0.3rem;
+    list-style: none;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 2px dashed rgb(139 156 255 / 0.75);
+    border-radius: inherit;
+    background: rgb(13 15 23 / 0.88);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    pointer-events: none;
+  }
+
+  .attach {
+    width: 2rem;
+    height: 2rem;
   }
 
   textarea {
@@ -313,6 +469,30 @@
   .too-long > :global(.icon) {
     flex: none;
     color: var(--critical);
+  }
+
+  .upload-note {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.2rem 0.5rem 0;
+    font-size: var(--text-xs);
+    color: var(--accent);
+  }
+
+  /* Not waiting for attachments: it takes no room. */
+  .upload-note:empty {
+    margin: 0;
+  }
+
+  .note-spinner {
+    flex: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid rgb(139 156 255 / 0.25);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
   }
 
   .char-count {
@@ -453,6 +633,20 @@
   .send:disabled {
     opacity: 0.35;
     box-shadow: none;
+  }
+
+  .send.waiting {
+    background: rgb(255 255 255 / 0.12);
+    box-shadow: 0 0 0 1px var(--border-strong);
+  }
+
+  .send-spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid rgb(255 255 255 / 0.25);
+    border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
   }
 
   .send.stop {

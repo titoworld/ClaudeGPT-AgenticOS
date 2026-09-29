@@ -250,7 +250,7 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 
 | Volum | Què conté | Si el perds... |
 | --- | --- | --- |
-| `claudegpt_app_data` | Base de dades SQLite: propietari (hash de la contrasenya i secret TOTP), sessions, converses, estadístiques i preferències | Perds les converses i cal tornar a fer `agentic-os init` |
+| `claudegpt_app_data` | Base de dades SQLite: propietari (hash de la contrasenya i secret TOTP), sessions, converses, estadístiques i preferències. També els fitxers adjunts a les converses, a `/data/attachments` | Perds les converses i els seus adjunts, i cal tornar a fer `agentic-os init` |
 | `claudegpt_app_home` | Inicis de sessió de Claude (`~/.claude`) i de Codex (`~/.codex`). Els registres de Codex, que contenen els prompts, no hi són: viuen en memòria | Cal tornar a iniciar sessió a les CLI |
 | `claudegpt_caddy_data` | Certificats i compte de Let's Encrypt | Caddy els torna a demanar sol |
 | `claudegpt_caddy_config` | Configuració interna de Caddy | Res; es regenera |
@@ -258,6 +258,14 @@ Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps`
 Després d'una restauració, els dos primers tenen un nom nou, com `claudegpt_app_data_r20260928-101500`: `deploy/restore.sh` sempre restaura en volums nous i n'escriu els noms a `.env` (`APP_DATA_VOLUME` i `APP_HOME_VOLUME`).
 
 A més, **desa el fitxer `.env`**: té el token de Claude i les claus d'API. L'script de còpia el desa al costat de les dades.
+
+**Els adjunts.** Les imatges, els PDF i els fitxers de text que adjuntes a les preguntes es desen al volum de dades, a `/data/attachments` (directoris 700 i fitxers 600, com la base de dades), i per això entren a les còpies i es restauren amb elles. Cada fitxer es desa un sol cop, amb el seu hash (`sha256`) com a nom, encara que el pugis més vegades; les miniatures, a `/data/attachments/thumbnails`. Ocupen espai al disc i a cada còpia:
+
+- Un adjunt que no arribes a enviar (el treus del compositor o tanques la pestanya) s'esborra sol en un dia com a molt.
+- Esborrar una conversa esborra els adjunts que només feia servir ella.
+- Per veure quant ocupen: `docker compose exec app du -sh /data/attachments`. Si el disc s'omple, pujar un fitxer dona un error que ho diu, i l'aplicació continua funcionant.
+
+Els adjunts contenen el que hi hagis pujat (documents, fotos): tracta les còpies amb la mateixa cura que les converses.
 
 > Les còpies contenen secrets (el secret TOTP, els tokens de les subscripcions i les claus d'API). Es desen a `/var/backups/claudegpt`, un directori amb permisos 700 (només el teu usuari i root) que és **fora del repositori** (així un `git add` no les pot pujar mai). Xifra-les, descarrega-les i esborra-les del servidor.
 
@@ -387,8 +395,9 @@ docker compose logs --tail 100 caddy
 
 **Què queda exposat a Internet**
 - Només Caddy (80 i 443) i l'SSH. L'aplicació no té cap port publicat i viu en una xarxa interna.
-- Caddy fa HTTPS amb HSTS, redirigeix HTTP a HTTPS i tanca les connexions que no són per al teu domini. Els registres d'accés no guarden cookies.
-- El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió). Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit.
+- Caddy fa HTTPS amb HSTS, redirigeix HTTP a HTTPS i tanca les connexions que no són per al teu domini. Els registres d'accés no guarden cookies, i cap registre (ni el de l'aplicació ni els de Caddy) no guarda la consulta dels URL: ni els noms dels fitxers que puges ni el que cerques.
+- El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió). Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit. La pujada d'un adjunt, que només es pot fer amb la sessió iniciada, té un límit propi: 20 MB i 120 segons (Caddy talla als 150).
+- Els adjunts: el servidor en decideix el tipus pel contingut, rebutja l'SVG i no serveix mai cap fitxer pujat com a pàgina web (els PDF i els fitxers de text es descarreguen). Llegeix els PDF en un procés a part, sense accés als secrets de l'aplicació i amb límits de temps (60 segons) i de memòria, perquè un PDF maliciós no el pugui encallar. Si tot i així el contenidor de l'aplicació es queda sense memòria (dos PDF grans alhora durant un debat), el nucli mata primer aquest procés: la pujada falla amb un missatge i les CLI i el servidor continuen.
 - Docker i ufw: els ports que publica Docker no passen per les regles d'ufw. Aquí només es publiquen el 80 i el 443, que han de ser públics. No afegeixis `ports:` a l'aplicació; per depurar, fes servir `127.0.0.1:PORT:PORT` i un túnel SSH.
 
 **Inici de sessió i sessions**

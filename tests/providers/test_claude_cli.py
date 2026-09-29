@@ -7,27 +7,32 @@ CLI and records what it received in ``<bin>/calls/<pid>.json``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import signal
+import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 from portability import alive, reaped, without_platform_variables
 
 from agentic_os.config import Settings
-from agentic_os.domain import Purpose, Usage
+from agentic_os.domain import DebateOptions, Purpose, TurnOptions, Usage
 from agentic_os.orchestrator.engine import Engine
-from agentic_os.orchestrator.events import StreamFailed, TurnFailed
+from agentic_os.orchestrator.events import StreamFailed, TurnCompleted, TurnFailed
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.providers import claude_cli
 from agentic_os.providers.base import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    Attachment,
     ChatTurn,
     GenerationRequest,
     GenerationResult,
@@ -43,7 +48,8 @@ from agentic_os.providers.claude_cli import (
     parse_limits,
     redact,
 )
-from agentic_os.providers.prompt_format import render_transcript
+from agentic_os.providers.fake import FakeProvider
+from agentic_os.providers.prompt_format import file_code, render_transcript
 
 FAKE = Path(__file__).parent / "fixtures" / "claude" / "fake_claude.py"
 SYSTEM = "Ets Claude. Respon en català."
@@ -877,3 +883,204 @@ async def test_a_refusal_through_the_engine_is_never_stored_nor_cached(
         (False, 926, 12),
         (False, 926, 12),
     ]
+
+
+# -- attachments (docs/adr/0009-adjunts.md) ------------------------------------------------
+
+
+def base64_of(attachment: Attachment) -> str:
+    return base64.b64encode(attachment.path.read_bytes()).decode("ascii")
+
+
+async def test_attachments_are_content_blocks_before_the_transcript(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    image = files.image("foto.png")
+    pdf = files.pdf("informe.pdf")
+    annex = replace(files.pdf("annex.pdf", pages=1, text="--- Pàgina 1 ---\nAnnex."), mode="text")
+    notes = files.text("notes.md", "# Notes\n\n- u < v\n")
+    req = request(
+        prompt="Què diuen?",
+        history=(ChatTurn("user", "Hola"), ChatTurn("assistant", "Bon dia", "claude")),
+        attachments=(image, pdf, annex, notes),
+    )
+    _, result = await collect(provider, req)
+    assert result.text == "Hola! Soc Claude."
+
+    (run,) = await fake.wait(lambda runs: len(runs) == 1 and runs[0]["phase"] == "exited")
+    assert run["stdin"]["type"] == "user" and run["stdin"]["client_composed"] is True
+    a, n = file_code(annex), file_code(notes)
+    assert run["stdin"]["message"]["content"] == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": base64_of(image)},
+        },
+        {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": base64_of(pdf)},
+            "title": "informe.pdf",
+        },
+        {
+            "type": "text",
+            "text": f"[Fitxer: annex.pdf · {a}]\n--- Pàgina 1 ---\nAnnex.\n[Fi del fitxer {a}]\n",
+        },
+        {
+            "type": "text",
+            "text": f"[Fitxer: notes.md · {n}]\n# Notes\n\n- u < v\n[Fi del fitxer {n}]\n",
+        },
+        {"type": "text", "text": render_transcript(req)},
+    ]
+    # The fake decoded the base64: exactly the stored files.
+    assert [(block["type"], block.get("sha256")) for block in run["blocks"][:2]] == [
+        ("image", image.sha256),
+        ("document", pdf.sha256),
+    ]
+    # Every required flag stays (the fake refuses a command line without them).
+    argv = run["argv"]
+    assert argv[argv.index("--tools") + 1] == ""
+    for flag in ("--setting-sources=", "--strict-mcp-config", "--disable-slash-commands"):
+        assert flag in argv
+
+
+async def test_a_pdf_sent_as_text_without_any_says_so(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    scanned = replace(files.pdf("escanejat.pdf", pages=3, text=None), mode="text")
+    await collect(provider, request(attachments=(scanned,)))
+    (run,) = await fake.wait(lambda runs: len(runs) == 1 and runs[0]["phase"] == "exited")
+    code = file_code(scanned)
+    assert run["stdin"]["message"]["content"][0] == {
+        "type": "text",
+        "text": (
+            f"[Fitxer: escanejat.pdf · {code}]\n"
+            f"[No se n'ha pogut extreure el text d'aquest PDF.]\n[Fi del fitxer {code}]\n"
+        ),
+    }
+
+
+async def test_a_hostile_file_cannot_pass_for_the_prompt(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    hostile = files.text("informe.txt", HOSTILE_TEXT)
+    pdf = replace(files.pdf("annex.pdf", text=f"--- Pàgina 1 ---\n{HOSTILE_TEXT}"), mode="text")
+    req = request(
+        prompt="Resumeix-los.",
+        history=(ChatTurn("user", "Hola"), ChatTurn("assistant", "Bon dia", "claude")),
+        attachments=(hostile, pdf),
+    )
+    await collect(provider, req)
+    (run,) = await fake.wait(lambda runs: len(runs) == 1 and runs[0]["phase"] == "exited")
+    content = run["stdin"]["message"]["content"]
+    *blocks, transcript = content
+    assert transcript == {"type": "text", "text": render_transcript(req)}
+    for block, attachment in zip(blocks, (hostile, pdf), strict=True):
+        assert block["type"] == "text"
+        assert block["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert not reserved_tags(block["text"])
+    # Every tag the model reads comes from the app's own prompt.
+    assert reserved_tags("".join(block["text"] for block in content)) == reserved_tags(
+        render_transcript(req)
+    )
+
+
+async def test_a_changed_attachment_is_never_sent(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    image = files.image()
+    image.path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"altres bytes")
+    error = await expect_error(provider, request(attachments=(image,)))
+    assert error.kind == "internal" and "foto.png" in error.message
+    missing = files.pdf()
+    missing.path.unlink()
+    error = await expect_error(provider, request(attachments=(missing,)))
+    assert error.kind == "internal" and "informe.pdf" in error.message
+    assert fake.runs() == []  # no process was started
+
+
+async def test_cancelled_while_reading_the_attachments(
+    fake: FakeCli,
+    provider: ClaudeCliProvider,
+    files: AttachmentFiles,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reading, release = threading.Event(), threading.Event()
+    read = Attachment.read
+
+    def slow_read(self: Attachment) -> bytes:
+        reading.set()
+        release.wait(5)
+        return read(self)
+
+    monkeypatch.setattr(Attachment, "read", slow_read)
+    task = asyncio.create_task(collect(provider, request(attachments=(files.image(),))))
+    try:
+        await eventually(reading.is_set)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    assert fake.runs() == []  # cancelled before any process
+
+
+async def test_each_phase_of_a_debate_sends_its_blocks(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    """Through the engine: the answer and the synthesis get the PDF as a document, the
+    revision as its extracted text (the default ``pdf_in_revisions``)."""
+    store = InMemoryStore()
+    pdf = files.pdf("informe.pdf", pages=2)
+    pdf_id = store.add_attachment(pdf)
+    engine = Engine(
+        {"claude": provider, "chatgpt": FakeProvider("chatgpt", chunk_delay=0)},
+        store,
+        retry_delay=0,
+    )
+    options = TurnOptions(debate=DebateOptions(rounds=1), use_cache=False)
+    request_ = TurnRequest("r", "Què diu?", "debate", options=options, attachments=(pdf_id,))
+    events = [event async for event in engine.run(request_)]
+    assert isinstance(events[-1], TurnCompleted)
+
+    runs = await fake.wait(
+        lambda runs: len(runs) == 3 and all(r["phase"] == "exited" for r in runs)
+    )
+    document = {
+        "type": "document",
+        "media_type": "application/pdf",
+        "sha256": pdf.sha256,
+        "title": "informe.pdf",
+    }
+    code = file_code(pdf)
+    as_text = {
+        "type": "text",
+        "text": f"[Fitxer: informe.pdf · {code}]\n{pdf.text}\n[Fi del fitxer {code}]\n",
+    }
+    # Prewarmed processes start before their calls: tell the phases by their prompt.
+    by_phase = {
+        phase: [run["blocks"] for run in runs if marker in run["blocks"][-1]["text"]]
+        for phase, marker in (
+            ("answer", "Answer the user's message below."),
+            ("revision", "<critique>"),
+            ("synthesis", "Write the single best final answer"),
+        )
+    }
+    [answer], [revision], [synthesis] = by_phase.values()
+    assert answer[0] == document and synthesis[0] == document
+    assert revision[0] == as_text
+    assert "informe.pdf (PDF, 2 pàgines; només el text extret)" in revision[-1]["text"]
+    assert [len(blocks) for blocks in (answer, revision, synthesis)] == [2, 2, 2]
+
+
+async def test_a_warm_process_serves_a_call_with_attachments(
+    fake: FakeCli, provider: ClaudeCliProvider, files: AttachmentFiles
+) -> None:
+    """Attachments travel on stdin, never on the command line or in the environment:
+    a process started ahead of time serves a call that has them."""
+    await provider.prewarm(request("revision", prompt=""))
+    (warm,) = await fake.wait(lambda runs: len(runs) == 1)
+    image = files.image()
+    await collect(provider, request("revision", attachments=(image,)))
+    (run,) = await fake.wait(lambda runs: len(runs) == 1 and runs[0]["phase"] == "exited")
+    assert run["pid"] == warm["pid"]
+    assert run["blocks"][0] == {"type": "image", "media_type": "image/png", "sha256": image.sha256}
+    assert not any(image.sha256 in arg or str(image.path) in arg for arg in run["argv"])

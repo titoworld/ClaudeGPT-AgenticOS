@@ -1,7 +1,7 @@
 // Which synthesis a debate shows when the first attempt is not the result (audit A1), how
 // a turn ended, live and after a reload (A9, A14, N10), and the tokens of its totals (A7).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Message, TurnEvent, TurnMode, TurnOptions, Usage } from '../lib/protocol';
+import type { Attachment, Message, TurnEvent, TurnMode, TurnOptions, Usage } from '../lib/protocol';
 import {
   cancelledDuelEvents,
   cancelledDuelMessages,
@@ -282,5 +282,66 @@ describe('Turn: totals count every token the calls processed (A7)', () => {
   it('shows a total made only of cache reads', () => {
     const el = render(Turn, { turn: liveTurn(solo({ ...cached, input_tokens: 0, output_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 }), 'solo'), plannedRounds: 0 });
     expect(textOf(el.querySelector('footer.totals'))).toContain('Total 10.000 tokens');
+  });
+});
+
+describe('Turn: the attachments of the question', () => {
+  const image: Attachment = {
+    id: 21,
+    name: 'grafic.png',
+    kind: 'image',
+    mime: 'image/png',
+    size: 240_000,
+    pages: null,
+    width: 1200,
+    height: 800,
+    sha256: 'b'.repeat(64),
+    created_at: '2026-09-28T10:00:00Z',
+    has_thumbnail: true,
+    text_available: false,
+    estimated_tokens: 1247,
+  };
+  const pdf: Attachment = {
+    ...image,
+    id: 22,
+    name: 'informe.pdf',
+    kind: 'pdf',
+    mime: 'application/pdf',
+    pages: 12,
+    width: null,
+    height: null,
+    has_thumbnail: false,
+    text_available: true,
+    estimated_tokens: 43_200,
+  };
+
+  const names = (el: HTMLElement) => [...el.querySelectorAll('.question .att .name')].map((n) => textOf(n));
+
+  it('shows their cards with the question, live and after a reload', () => {
+    const live = createLiveTurn({ requestId: 'r-a', question: 'Què diuen?', mode: 'solo', target: 'claude', attachments: [image, pdf] });
+    const liveEl = render(Turn, { turn: live, plannedRounds: 0 });
+    expect(names(liveEl)).toEqual(['grafic.png', 'informe.pdf']);
+    expect(liveEl.querySelector('.question .att img')?.getAttribute('src')).toBe('/api/attachments/21/thumbnail');
+
+    const [stored] = turnsFromMessages([
+      { id: 1, turn_id: 5, kind: 'question', content: 'Què diuen?', agent: null, round: 0, final: true, created_at: '2026-09-28T10:00:00Z', meta: { mode: 'solo', target: 'claude', attachments: [image, pdf] } },
+      { id: 2, turn_id: 5, kind: 'answer', content: 'Diuen…', agent: 'claude', round: 0, final: true, created_at: '2026-09-28T10:00:01Z', meta: {} },
+    ]);
+    const storedEl = render(Turn, { turn: stored!, plannedRounds: 0 });
+    expect(names(storedEl)).toEqual(['grafic.png', 'informe.pdf']);
+    expect(textOf(storedEl.querySelector('.question'))).toContain('12 pàgines');
+  });
+
+  it('a question without attachments shows none', () => {
+    const el = render(Turn, { turn: createLiveTurn({ requestId: 'r-b', question: 'Hola', mode: 'solo' }), plannedRounds: 0 });
+    expect(el.querySelector('.question .attachments')).toBeNull();
+  });
+
+  it('clicking one opens its preview', async () => {
+    const { viewer } = await import('../lib/viewer.svelte');
+    const el = render(Turn, { turn: createLiveTurn({ requestId: 'r-c', question: 'Mira', mode: 'solo', attachments: [image, pdf] }), plannedRounds: 0 });
+    el.querySelectorAll<HTMLButtonElement>('.question .att button.body')[1]!.click();
+    expect(viewer.current).toEqual(pdf);
+    viewer.close();
   });
 });

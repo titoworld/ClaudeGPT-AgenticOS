@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from pydantic import AliasChoices
 
-from agentic_os import __version__
+from agentic_os import __version__, attachments
 from agentic_os.config import Settings
 from agentic_os.orchestrator.types import EngineConfig
 from agentic_os.providers.claude_cli import CLAUDE_FAMILIES
@@ -62,6 +62,23 @@ DESPLEGAMENT = "docs/DESPLEGAMENT.md"
 LOGIN_BODY = middleware.SMALL_BODY_PATHS["/api/auth/login"]
 BODY_SECONDS = int(middleware.BODY_TIMEOUT_SECONDS)
 assert BODY_SECONDS == middleware.BODY_TIMEOUT_SECONDS  # the docs give whole seconds
+UPLOAD_SECONDS = int(middleware.UPLOAD_TIMEOUT_SECONDS)
+assert UPLOAD_SECONDS == middleware.UPLOAD_TIMEOUT_SECONDS
+
+
+def megabytes(size: int) -> int:
+    assert size % 1_000_000 == 0, size  # the docs give whole megabytes
+    return size // 1_000_000
+
+
+def kilobytes(size: int) -> int:
+    assert size % 1000 == 0, size
+    return size // 1000
+
+
+UPLOAD_MB = megabytes(middleware.LARGE_BODY_PATHS[middleware.UPLOAD_PATH])
+ORPHAN_HOURS = int(attachments.ORPHAN_TTL.total_seconds() // 3600)
+
 
 DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     # WebSocket close codes and limits.
@@ -102,6 +119,41 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     ),
     (DESPLEGAMENT, r"\((\d+ [KM]iB) per a l'inici de sessió", LOGIN_BODY),
     (DESPLEGAMENT, r"no ha arribat sencer en (\d+) segons", BODY_SECONDS),
+    # Attachments.
+    (PROTOCOL, r"; (\d+) s a `PUT /api/attachments`", UPLOAD_SECONDS),
+    (PROTOCOL, r"o (\d+) MB a `PUT /api/attachments`", UPLOAD_MB),
+    (ARQUITECTURA, r"té un límit propi: (\d+) MB", UPLOAD_MB),
+    (ARQUITECTURA, r"té un límit propi: \d+ MB i (\d+) s", UPLOAD_SECONDS),
+    (DESPLEGAMENT, r"té un límit propi: (\d+) MB", UPLOAD_MB),
+    (DESPLEGAMENT, r"té un límit propi: \d+ MB i (\d+) segons", UPLOAD_SECONDS),
+    (PROTOCOL, r"com a molt (\d+) adjunts per missatge", attachments.MAX_ATTACHMENTS),
+    (PROTOCOL, r"com a molt (\d+), cadascun un sol cop", attachments.MAX_ATTACHMENTS),
+    (ARQUITECTURA, r"com a molt (\d+) i \d+ MB entre tots", attachments.MAX_ATTACHMENTS),
+    (PROTOCOL, r"i (\d+) MB entre tots", megabytes(attachments.MAX_TURN_BYTES)),
+    (ARQUITECTURA, r"i (\d+) MB entre tots", megabytes(attachments.MAX_TURN_BYTES)),
+    (PROTOCOL, r"sumen més de (\d+) MB", megabytes(attachments.MAX_TURN_BYTES)),
+    (PROTOCOL, r"imatge: (\d+) MB", megabytes(attachments.MAX_IMAGE_BYTES)),
+    (PROTOCOL, r"imatge: \d+ MB i ([\d.]+) píxels", attachments.MAX_IMAGE_SIDE),
+    (PROTOCOL, r"PDF: (\d+) MB", megabytes(attachments.MAX_PDF_BYTES)),
+    (PROTOCOL, r"PDF: \d+ MB i (\d+) pàgines", attachments.MAX_PDF_PAGES),
+    (PROTOCOL, r"text: (\d+) kB", kilobytes(attachments.MAX_TEXT_BYTES)),
+    (PROTOCOL, r"de més de ([\d.]+) píxels al costat llarg", attachments.DOWNSCALE_EDGE),
+    (PROTOCOL, r"reduïda a ([\d.]+) píxels al costat llarg", attachments.DOWNSCALE_EDGE),
+    (PROTOCOL, r"com a molt ([\d.]+), amb `\(w', h'\)`", attachments.MAX_IMAGE_TOKENS),
+    (PROTOCOL, r"PDF, ([\d.]+) per pàgina", attachments.PDF_PAGE_TOKENS),
+    (PROTOCOL, r"que decideixen els primers (\d+) bytes", attachments.SNIFF_BYTES),
+    (PROTOCOL, r"com a molt (\d+) caràcters \(un de més llarg", attachments.MAX_NAME_LENGTH),
+    (PROTOCOL, r"s'esborra al cap de (\d+) h\b", ORPHAN_HOURS),
+    (PROTOCOL, r"en un procés a part, com a molt (\d+) s", int(attachments.PDF_TIMEOUT_SECONDS)),
+    (DESPLEGAMENT, r"límits de temps \((\d+) segons\)", int(attachments.PDF_TIMEOUT_SECONDS)),
+    (PROTOCOL, r"Si passa d'([\d.]+) caràcters", attachments.MAX_PDF_TEXT_CHARS),
+    (
+        PROTOCOL,
+        r"miniatura: PNG o WebP, com a molt (\d+) kB",
+        kilobytes(attachments.MAX_THUMBNAIL_BYTES),
+    ),
+    (PROTOCOL, r"de com a molt (\d+) kB i \d+ píxels", kilobytes(attachments.MAX_THUMBNAIL_BYTES)),
+    (PROTOCOL, r"de com a molt \d+ kB i (\d+) píxels", attachments.MAX_THUMBNAIL_SIDE),
     # Conversation list and search.
     (PROTOCOL, r"`limit`: d'1 a (\d+)", MAX_LIST_LIMIT),
     (PROTOCOL, r"El text de la cerca pot tenir com a molt (\d+) caràcters", MAX_SEARCH_LENGTH),
@@ -142,7 +194,7 @@ def test_every_number_the_docs_give_is_the_one_the_code_uses(
 
 def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
     protocol = read(PROTOCOL)
-    for limit in (middleware.MAX_BODY_BYTES, LOGIN_BODY):
+    for limit in (middleware.MAX_BODY_BYTES, LOGIN_BODY, UPLOAD_MB * 1_000_000):
         assert f"`{middleware.too_large_detail(limit)}`" in protocol
 
 

@@ -414,6 +414,7 @@ describe('the app when a turn ends (A13)', () => {
     fx: { mode: 'manual', eur_per_usd: 0.9 },
     budgets_eur: { claude: null, chatgpt: null },
     plans_eur: { claude: null, chatgpt: null },
+    pdf_in_revisions: 'text',
   };
 
   it('keeps the pages loaded, and the old conversation that is open stays in the list', async () => {

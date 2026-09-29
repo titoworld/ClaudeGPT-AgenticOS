@@ -8,6 +8,9 @@ restarts for every new question.
 Like a real model it honours ``max_output_tokens`` (about 4 characters per token): a
 longer reply is cut and reported as truncated (``finish_reason`` "max_tokens"). Tests can
 also ask for truncated replies or refusals per call purpose.
+
+Attachments are recorded (``attachments``, one tuple per call) and never read; answers
+and syntheses name them, and their estimated tokens count in the input usage.
 """
 
 from __future__ import annotations
@@ -18,8 +21,10 @@ import re
 import time
 from collections.abc import AsyncIterator, Sequence
 
+from agentic_os.attachments import attachment_tokens
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage, other_agent
 from agentic_os.providers.base import (
+    Attachment,
     GenerationRequest,
     GenerationResult,
     ModelInfo,
@@ -29,7 +34,7 @@ from agentic_os.providers.base import (
     RefusalError,
     TextDelta,
 )
-from agentic_os.providers.prompt_format import AGENT_LABELS
+from agentic_os.providers.prompt_format import AGENT_LABELS, label_of
 
 DEFAULT_AGREEMENTS: tuple[int, ...] = (72, 90)
 UNCHANGED_FROM = 85
@@ -40,6 +45,10 @@ _TAGGED = {
     "user_message": re.compile(r"<user_message>\n(.*?)\n</user_message>", re.DOTALL),
     "previous": re.compile(r"<your_previous_answer>\n(.*?)\n</your_previous_answer>", re.DOTALL),
 }
+_ATTACHMENTS_SECTION = re.compile(r"\A<attachments>\n.*?\n</attachments>\n+", re.DOTALL)
+"""The list of attachments before a solo or duel question (the prompt's own section)."""
+_ATTACHMENTS_REFERENCE = re.compile(r"\A\[Adjunts: [^\n]*\]\n")
+"""The line that stands for a question's attachments in the history."""
 _WORD_RE = re.compile(r"\S+\s*|\s+")
 _CHARS_PER_TOKEN = 4
 REFUSAL_TEXT = "No puc ajudar amb aquesta petició."
@@ -47,6 +56,14 @@ REFUSAL_TEXT = "No puc ajudar amb aquesta petició."
 
 def _estimate(text: str) -> int:
     return max(1, -(-len(text) // _CHARS_PER_TOKEN)) if text else 0
+
+
+def _attachment_tokens(attachment: Attachment) -> int:
+    """Input tokens of an attachment as the call got it: its card's estimate, or the
+    text of a PDF sent as text."""
+    if attachment.kind == "pdf" and attachment.mode == "text":
+        return _estimate(attachment.text or "")
+    return attachment_tokens(attachment)
 
 
 def _topic(question: str) -> str:
@@ -66,7 +83,8 @@ def _chunks(text: str) -> list[str]:
 
 class FakeProvider:
     """Provider that never leaves the process. ``requests`` and ``prewarmed`` record
-    every call, which tests use to check what the engine sent. Results report the
+    every call, which tests use to check what the engine sent, and ``attachments`` the
+    attachments of each call (with the mode it got them in). Results report the
     requested model (``fake-<agent>`` or ``fake-<agent>-mini`` for fast calls by default).
 
     ``fail`` makes the calls of those purposes fail; ``truncate`` cuts their reply in
@@ -95,6 +113,8 @@ class FakeProvider:
         self._revision_question: str | None = None
         self.requests: list[GenerationRequest] = []
         self.prewarmed: list[GenerationRequest] = []
+        self.attachments: list[tuple[Attachment, ...]] = []
+        """The attachments of every call, in call order."""
         self.closed = False
 
     @property
@@ -119,6 +139,7 @@ class FakeProvider:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         self.requests.append(request)
+        self.attachments.append(tuple(request.attachments))
         started = time.monotonic()
         if request.purpose in self._fail:
             await asyncio.sleep(self._chunk_delay)
@@ -146,6 +167,7 @@ class FakeProvider:
         prompt_tokens = _estimate(request.system) + _estimate(request.prompt)
         prompt_tokens += sum(_estimate(turn.content) for turn in request.history)
         prompt_tokens += _estimate(request.context_summary or "")
+        prompt_tokens += sum(_attachment_tokens(a) for a in request.attachments)
         model = request.model or (self.fast_model if request.fast else self.model)
         if refusing:
             await asyncio.sleep(self._chunk_delay)
@@ -205,8 +227,15 @@ class FakeProvider:
         if request.purpose == "revision":
             return self._revision(request.prompt, question)
         if request.purpose == "synthesis":
-            return self._synthesis(question)
-        return self._answer(question)
+            return self._synthesis(question) + self._mention(request.attachments)
+        return self._answer(question) + self._mention(request.attachments)
+
+    @staticmethod
+    def _mention(attachments: Sequence[Attachment]) -> str:
+        """The line that names the attachments of a call ("" without any)."""
+        if not attachments:
+            return ""
+        return "\n\n**Adjunts rebuts:** " + ", ".join(label_of(a) for a in attachments) + "."
 
     @staticmethod
     def _question(prompt: str) -> str:
@@ -214,7 +243,7 @@ class FakeProvider:
             match = _TAGGED[name].search(prompt)
             if match:
                 return match.group(1)
-        return prompt
+        return _ATTACHMENTS_SECTION.sub("", prompt, count=1)
 
     def _answer(self, question: str) -> str:
         topic = _topic(question)
@@ -303,7 +332,11 @@ class FakeProvider:
 
     @staticmethod
     def _summary(request: GenerationRequest) -> str:
-        questions = [_topic(turn.content) for turn in request.history if turn.role == "user"]
+        questions = [
+            _topic(_ATTACHMENTS_REFERENCE.sub("", turn.content))
+            for turn in request.history
+            if turn.role == "user"
+        ]
         listed = "; ".join(f"«{q}»" for q in questions) or "temes diversos"
         previous = f" {request.context_summary}" if request.context_summary else ""
         return f"Resum (demostració):{previous} L'usuari ha preguntat per {listed}."

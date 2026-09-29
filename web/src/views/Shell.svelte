@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import AttachmentViewer from '../components/AttachmentViewer.svelte';
   import CommandPalette from '../components/CommandPalette.svelte';
   import SettingsDrawer from '../components/SettingsDrawer.svelte';
   import Sidebar from '../components/Sidebar.svelte';
@@ -111,6 +112,7 @@
 
 <CommandPalette />
 <SettingsDrawer />
+<AttachmentViewer />
 
 <style>
   .shell {

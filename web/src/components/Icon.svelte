@@ -33,6 +33,14 @@
       '<path d="M12 3.5 13.8 9l5.7 1.8-5.7 1.8L12 18.5l-1.8-5.9L4.5 10.8 10.2 9 12 3.5Z"/><path d="M19 17v4M17 19h4"/>',
     terminal: '<rect x="3.5" y="5" width="17" height="14" rx="2.2"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14.5h4"/>',
     cpu: '<rect x="6.5" y="6.5" width="11" height="11" rx="2.2"/><rect x="9.8" y="9.8" width="4.4" height="4.4" rx=".8"/><path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3"/>',
+    paperclip:
+      '<path d="m20 11.5-7.6 7.6a4.8 4.8 0 0 1-6.8-6.8l7.9-7.9a3.2 3.2 0 0 1 4.5 4.5l-7.9 7.9a1.6 1.6 0 0 1-2.3-2.3l7.3-7.3"/>',
+    download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/>',
+    file: '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8L14 3.5Z"/><path d="M14 3.5V8h4.5"/>',
+    'file-text':
+      '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8L14 3.5Z"/><path d="M14 3.5V8h4.5M9 12.5h6M9 16h6"/>',
+    image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.6"/><path d="m20.5 15.5-5-5L6 20"/>',
+    'chevron-left': '<path d="m15 6-6 6 6 6"/>',
     'mode-solo': '<circle cx="12" cy="12" r="4.2"/><circle cx="12" cy="12" r="8.2" stroke-opacity=".35"/>',
     'mode-duel': '<circle cx="8.7" cy="12" r="5.2"/><circle cx="15.3" cy="12" r="5.2"/>',
     'mode-debate':

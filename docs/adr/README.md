@@ -16,6 +16,7 @@ Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el su
 | 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
 | 0007 | [Resultat del torn desat a la pregunta](0007-resultat-del-torn.md)                        | Proposat |
 | 0008 | [Recompte de tokens i intents declinats](0008-recompte-de-tokens.md)                      | Proposat |
+| 0009 | [Adjunts: imatges, PDF i fitxers de text al xat](0009-adjunts.md)                         | Proposat |
 
 ## Plantilla
 

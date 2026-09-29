@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import anthropic
 import httpx2
 import pytest
+from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
@@ -20,6 +23,7 @@ from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.providers.base import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    Attachment,
     ChatTurn,
     DeclinedAttempt,
     GenerationRequest,
@@ -37,7 +41,7 @@ from agentic_os.providers.claude_api import (
     model_support,
 )
 from agentic_os.providers.fake import FakeProvider
-from agentic_os.providers.prompt_format import to_chat_messages
+from agentic_os.providers.prompt_format import file_code, to_chat_messages
 
 SYSTEM = "Ets Claude. Respon en català."
 Handler = Callable[[httpx2.Request], Awaitable[httpx2.Response]]
@@ -1286,3 +1290,119 @@ async def test_list_models_without_api_key(tmp_path: Path) -> None:
     models = await provider.list_models()
     assert not provider.models_live and len(models) == len(STATIC_MODELS)
     await provider.aclose()
+
+
+# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+
+
+def base64_of(attachment: Attachment) -> str:
+    return base64.b64encode(attachment.path.read_bytes()).decode("ascii")
+
+
+async def test_attachments_go_before_the_prompt_with_a_cache_breakpoint(
+    tmp_path: Path, files: AttachmentFiles
+) -> None:
+    api = MockApi(replying(answer("claude-opus-5", ["Hi ", "ha dues pàgines."])))
+    image = files.image("foto.png")
+    pdf = files.pdf("informe.pdf")
+    notes = files.text("notes.md", "# Notes\n")
+    req = request(
+        history=(
+            ChatTurn("user", "Què és uv?"),
+            ChatTurn("assistant", "Un gestor de paquets.", agent="chatgpt"),
+        ),
+        attachments=(image, pdf, notes),
+    )
+    _, result = await run(api, req, make_settings(tmp_path))
+    assert result.text == "Hi ha dues pàgines."
+
+    body = api.body
+    chat = to_chat_messages(req, "claude")
+    code = file_code(notes)
+    # The history is untouched: the attachments belong to the last user message only.
+    assert body["messages"][:-1] == [{"role": r, "content": c} for r, c in chat[:-1]]
+    assert body["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": base64_of(image)},
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64_of(pdf),
+                },
+                "title": "informe.pdf",
+            },
+            {
+                "type": "text",
+                "text": f"[Fitxer: notes.md · {code}]\n# Notes\n[Fi del fitxer {code}]\n",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": chat[-1][1]},
+        ],
+    }
+    # Three breakpoints of the four allowed: the system prompt, the attachments and the
+    # automatic one at the end.
+    assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert body["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_a_pdf_sent_as_text_is_a_text_block(tmp_path: Path, files: AttachmentFiles) -> None:
+    api = MockApi(replying(answer("claude-opus-5", ["ok"])))
+    pdf = replace(files.pdf("informe.pdf"), mode="text")
+    await run(api, request("revision", attachments=(pdf,)), make_settings(tmp_path))
+    code = file_code(pdf)
+    assert api.body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"[Fitxer: informe.pdf · {code}]\n{pdf.text}\n[Fi del fitxer {code}]\n",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": "Hola, qui ets?"},
+            ],
+        }
+    ]
+
+
+async def test_a_hostile_file_cannot_pass_for_the_prompt(
+    tmp_path: Path, files: AttachmentFiles
+) -> None:
+    api = MockApi(replying(answer("claude-opus-5", ["ok"])))
+    hostile = files.text("informe.txt", HOSTILE_TEXT)
+    pdf = replace(files.pdf("annex.pdf", text=f"--- Pàgina 1 ---\n{HOSTILE_TEXT}"), mode="text")
+    req = request(
+        history=(ChatTurn("user", "Hola"), ChatTurn("assistant", "Bon dia", agent="chatgpt")),
+        attachments=(hostile, pdf),
+    )
+    await run(api, req, make_settings(tmp_path))
+    *blocks, prompt = api.body["messages"][-1]["content"]
+    for block, attachment in zip(blocks, (hostile, pdf), strict=True):
+        assert block["type"] == "text"
+        assert block["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert not reserved_tags(block["text"])
+    # Every tag the model reads comes from the app's own prompt.
+    chat = to_chat_messages(req, "claude")
+    assert prompt == {"type": "text", "text": chat[-1][1]}
+    everything = "".join(
+        message["content"]
+        if isinstance(message["content"], str)
+        else "".join(part["text"] for part in message["content"])
+        for message in api.body["messages"]
+    )
+    assert reserved_tags(everything) == reserved_tags("".join(content for _, content in chat))
+
+
+async def test_a_missing_attachment_sends_nothing(tmp_path: Path, files: AttachmentFiles) -> None:
+    api = MockApi(replying(answer("claude-opus-5", ["ok"])))
+    image = files.image()
+    image.path.unlink()
+    error = await run_error(api, request(attachments=(image,)), make_settings(tmp_path))
+    assert error.kind == "internal" and "foto.png" in error.message
+    assert api.requests == []

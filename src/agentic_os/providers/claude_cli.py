@@ -5,7 +5,10 @@ system prompt, no settings files, no MCP servers and no slash commands, in an em
 private directory and with an allow-listed environment. The rendered transcript is
 written as a single stdin line (``client_composed`` so the CLI never expands
 ``@file`` mentions or dispatches ``/commands``) and stdin is closed, so the process
-exits after the turn.
+exits after the turn. With attachments the message ``content`` is a list of blocks
+(:func:`attachment_blocks`): one per attachment, in order (a base64 ``image``, a base64
+PDF ``document`` with its name as ``title``, or a ``[Fitxer: ...]`` text block), then the
+transcript; the CLI never reads a file itself.
 
 ``prewarm`` starts processes ahead of time (they wait on stdin without calling the
 API) to hide the CLI start-up time. asyncio sets a process's return code a moment after
@@ -40,6 +43,7 @@ refusal as well.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -56,6 +60,7 @@ from typing import Any, Literal, NamedTuple
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
 from agentic_os.providers.base import (
+    Attachment,
     DeclinedAttempt,
     GenerationRequest,
     GenerationResult,
@@ -67,7 +72,7 @@ from agentic_os.providers.base import (
     TextDelta,
     UsageLimit,
 )
-from agentic_os.providers.prompt_format import render_transcript
+from agentic_os.providers.prompt_format import attachment_text, read_files, render_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +201,28 @@ def refusal_error(
         category=category,
         declined=declined,
     )
+
+
+def attachment_blocks(
+    attachments: Sequence[Attachment], files: Sequence[bytes | None]
+) -> list[dict[str, Any]]:
+    """Anthropic content blocks of the attachments, in order (shared with the api
+    provider): an ``image`` or a PDF ``document`` (with its name as ``title``) from the
+    file's bytes (``files``, from :func:`~agentic_os.providers.prompt_format.read_files`),
+    else a text block (a text file, or a PDF in mode "text")."""
+    blocks: list[dict[str, Any]] = []
+    for attachment, data in zip(attachments, files, strict=True):
+        if data is None:
+            blocks.append({"type": "text", "text": attachment_text(attachment)})
+            continue
+        encoded = base64.b64encode(data).decode("ascii")
+        if attachment.kind == "image":
+            source = {"type": "base64", "media_type": attachment.mime, "data": encoded}
+            blocks.append({"type": "image", "source": source})
+        else:
+            source = {"type": "base64", "media_type": "application/pdf", "data": encoded}
+            blocks.append({"type": "document", "source": source, "title": attachment.name})
+    return blocks
 
 
 def _obj(value: object) -> dict[str, Any]:
@@ -475,7 +502,7 @@ class ClaudeCliProvider:
         started = time.monotonic()
         deadline = asyncio.get_running_loop().time() + self._settings.provider_timeout_seconds
         key = self._key(request)
-        line = self._user_line(request)
+        line = self._user_line(request, await read_files(request.attachments))
         worker = self._take_warm(key)
         # A warm process that dies before its turn begins is replaced, once.
         replaceable = worker is not None
@@ -682,10 +709,20 @@ class ClaudeCliProvider:
         ]
 
     @staticmethod
-    def _user_line(request: GenerationRequest) -> bytes:
+    def _user_line(request: GenerationRequest, files: Sequence[bytes | None] = ()) -> bytes:
+        """The only stdin line: the transcript as the message ``content``, or with
+        attachments a list of their blocks (``files`` are their bytes, see
+        :func:`attachment_blocks`) followed by the transcript as a text block."""
+        transcript = render_transcript(request)
+        content: str | list[dict[str, Any]] = transcript
+        if request.attachments:
+            content = [
+                *attachment_blocks(request.attachments, files),
+                {"type": "text", "text": transcript},
+            ]
         message = {
             "type": "user",
-            "message": {"role": "user", "content": render_transcript(request)},
+            "message": {"role": "user", "content": content},
             # Deliver the text verbatim: no @file expansion, no slash commands.
             "client_composed": True,
         }
