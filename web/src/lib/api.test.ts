@@ -182,6 +182,7 @@ describe('attachments (docs/PROTOCOL.md «Adjunts»)', () => {
     has_thumbnail: false,
     text_available: true,
     estimated_tokens: 3600,
+    pdf_notes: { no_text: [], garbled: [], hidden: [] },
   };
 
   /** A fetch that records every request and answers with `answer`. */

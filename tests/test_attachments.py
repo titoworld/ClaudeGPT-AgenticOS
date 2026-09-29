@@ -26,6 +26,7 @@ from attachment_files import (
     webp_lossless,
     webp_lossy,
 )
+from orchestrator.attachment_fixtures import analysed_pages
 
 from agentic_os import attachments
 from agentic_os.attachments import (
@@ -320,6 +321,7 @@ def test_the_snapshot_is_the_protocol_attachment() -> None:
         "has_thumbnail": True,
         "text_available": True,
         "estimated_tokens": 3 * 3600,
+        "pdf_notes": None,  # not analysed (uploaded before the analysis existed)
     }
     text = attachments.snapshot(
         8, attachment(kind="text", mime="text/plain", pages=None, text="x" * 10)
@@ -330,7 +332,29 @@ def test_the_snapshot_is_the_protocol_attachment() -> None:
         attachment(kind="image", mime="image/png", pages=None, text=None, width=56, height=28),
     )
     assert (image["text_available"], image["estimated_tokens"]) == (False, 2)
+    assert (text["pdf_notes"], image["pdf_notes"]) == (None, None)
     assert attachments.attachment_tokens(attachment(pages=2)) == 7200
+
+
+def test_an_analysed_pdf_has_the_notes_of_its_pages() -> None:
+    """The warnings the owner sees on the attachment's card: pages without text (a
+    scan), with unreadable text and with text that may not be visible."""
+    _, pages = analysed_pages(
+        ("Vendes del 2025.", None, "Text \ufffd\ufffd\ufffd", "Conclusions."),
+        **{
+            "1": {"letters": 40},
+            "3": {"garbage": 30, "letters": 30},
+            "4": {"invisible": 40, "letters": 40},
+        },
+    )
+    wire = attachments.snapshot(7, attachment(pages=4, pdf_pages=pages))
+    assert wire["pdf_notes"] == {"no_text": [2], "garbled": [3], "hidden": [4]}
+    clean = dataclasses.replace(pages[0], letters=100)
+    wire = attachments.snapshot(7, attachment(pages=1, pdf_pages=(clean,)))
+    assert wire["pdf_notes"] == {"no_text": [], "garbled": [], "hidden": []}
+    # Only a PDF has them.
+    image = attachment(kind="image", mime="image/png", pages=None, pdf_pages=pages)
+    assert attachments.snapshot(8, image)["pdf_notes"] is None
 
 
 def test_the_timestamps_are_the_stores() -> None:
@@ -521,8 +545,9 @@ async def test_the_reader_is_the_first_process_the_oom_killer_takes(tmp_path: Pa
     fake.mkdir(parents=True)
     (fake / "__init__.py").write_text(
         "from pathlib import Path\n\n"
-        "class _Page:\n"
-        "    def extract_text(self):\n"
+        "class _Page(dict):\n"
+        "    cropbox = (0, 0, 595, 842)\n\n"
+        "    def extract_text(self, **visitors):\n"
         f"        return Path({str(OOM_SCORE)!r}).read_text().strip()\n\n"
         "class PdfReader:\n"
         "    is_encrypted = False\n\n"
@@ -536,4 +561,4 @@ async def test_the_reader_is_the_first_process_the_oom_killer_takes(tmp_path: Pa
     )
     reader = PdfReader(command=[sys.executable, "-c", boot])
     info = await reader.read(write(tmp_path, b"%PDF-"))
-    assert info == attachments.PdfInfo(pages=1, text="--- Pàgina 1 ---\n1000")
+    assert (info.pages, info.text) == (1, "--- Pàgina 1 ---\n1000")

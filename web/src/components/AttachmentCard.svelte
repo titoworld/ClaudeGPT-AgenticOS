@@ -2,11 +2,14 @@
   // An attachment's card, like claude.ai's: its thumbnail (an image's, a PDF's first
   // page), a text file's first lines or an icon, then its name, type, size, pages and
   // estimated tokens, and its state. Names and lines are plain text, with their hidden
-  // characters revealed (PlainText): a file name cannot disguise itself.
+  // characters revealed (PlainText): a file name cannot disguise itself. A PDF the server
+  // analysed also warns of its pages without text, with unreadable text and with text
+  // that may be hidden (lib/pdf-pages.ts).
   import { loadLines } from '../lib/attachment-lines';
   import { formatBytes, pagesLabel, typeLabel, type AttachmentView } from '../lib/attachments';
+  import { pdfNoteLines, type PdfNoteKind } from '../lib/pdf-pages';
   import { formatK } from '../lib/text';
-  import Icon from './Icon.svelte';
+  import Icon, { type IconName } from './Icon.svelte';
   import PlainText from './PlainText.svelte';
 
   interface Props {
@@ -32,6 +35,9 @@
   const lines = $derived(view.lines ?? fetched);
   const meta = $derived([view.pages ? pagesLabel(view.pages) : null, formatBytes(view.size)].filter(Boolean).join(' · '));
   const openable = $derived(!!onopen && view.status === 'ready' && view.id !== null);
+  const notes = $derived(view.status === 'ready' ? pdfNoteLines(view.pdfNotes) : []);
+
+  const NOTE_ICON: Record<PdfNoteKind, IconName> = { no_text: 'image', garbled: 'info', hidden: 'alert' };
 
   $effect(() => {
     const id = view.id;
@@ -70,6 +76,15 @@
     {:else if view.tokens}
       <span class="meta">≈ {formatK(view.tokens)} tokens</span>
     {/if}
+    {#each notes as note (note.kind)}
+      <span class="pdf-note {note.kind}" class:warning={note.kind === 'hidden'} title={note.description}>
+        <Icon name={NOTE_ICON[note.kind]} size={11} />
+        <span class="note-text"
+          >{note.label}: pàg.&nbsp;{#each note.pages as part, i (i)}{#if i > 0}{', '}{/if}<span class="page-part">{part}</span
+            >{/each}</span
+        > <span class="sr-only">({note.description})</span>
+      </span>
+    {/each}
   </span>
 {/snippet}
 
@@ -223,6 +238,35 @@
 
   .state {
     color: var(--accent);
+  }
+
+  /* A warning of the server's analysis of a PDF's pages: it wraps, a page list is information. */
+  .pdf-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-top: 0.1rem;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+
+  .pdf-note :global(.icon) {
+    margin-top: 0.1rem;
+    color: var(--text-muted);
+  }
+
+  .page-part {
+    white-space: nowrap;
+  }
+
+  .pdf-note.warning {
+    color: #ffd99a;
+  }
+
+  .pdf-note.warning :global(.icon) {
+    color: var(--warning);
   }
 
   .error-msg {

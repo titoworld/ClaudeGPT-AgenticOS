@@ -18,6 +18,7 @@ from agentic_os.attachments import attachment_wire
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
+from agentic_os.pdf_facts import PdfNotes
 from agentic_os.pricing import ModelPrice, normalize_model
 from agentic_os.providers.base import MODEL_ID_PATTERN, AttachmentKind, AttachmentMode
 
@@ -559,6 +560,9 @@ class AttachmentRecord:
     ``None`` without one."""
     has_thumbnail: bool
     created_at: datetime
+    pdf_notes: PdfNotes | None = None
+    """The warnings of an analysed PDF's pages (``pdf_facts.pdf_notes``); ``None`` for
+    anything else."""
 
     def to_wire(self) -> Wire:
         return attachment_wire(
@@ -574,6 +578,7 @@ class AttachmentRecord:
             created_at=self.created_at,
             has_thumbnail=self.has_thumbnail,
             text_chars=self.text_chars,
+            pdf_notes=self.pdf_notes,
         )
 
 

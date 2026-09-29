@@ -28,6 +28,7 @@ const attachment = (partial: Partial<Attachment>): Attachment => ({
   has_thumbnail: true,
   text_available: false,
   estimated_tokens: 414,
+  pdf_notes: null,
   ...partial,
 });
 

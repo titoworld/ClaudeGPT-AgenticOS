@@ -21,6 +21,7 @@ from agentic_os.domain import (
     Usage,
 )
 from agentic_os.orchestrator.events import TurnOutcome
+from agentic_os.pdf_facts import PdfCheck
 from agentic_os.providers.base import Attachment
 
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
@@ -171,4 +172,15 @@ class Store(Protocol):
         (their position): a linked attachment is kept while its conversation exists. The
         engine stores a question and its links together instead
         (:attr:`NewMessage.attachments`)."""
+        ...
+
+    async def get_pdf_check(self, sha256: str) -> PdfCheck | None:
+        """Claude's stored check of a PDF's text (docs/adr/0009-adjunts.md), by the PDF's
+        content: the one of the current ``pdf_facts.CHECK_VERSION``, or None when there is
+        none or it is not valid (the PDF is then checked again)."""
+        ...
+
+    async def put_pdf_check(self, sha256: str, check: PdfCheck) -> None:
+        """Store Claude's check of a PDF's text, replacing the one of the same content and
+        ``check.version``: later turns and other conversations reuse it."""
         ...

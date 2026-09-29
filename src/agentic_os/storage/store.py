@@ -4,7 +4,9 @@ plus the persistence needed by the web layer and the security primitives.
 Attachments (docs/adr/0009-adjunts.md): the rows live in the database and the files next
 to it (:mod:`agentic_os.storage.files`). Every change to the files (placing an upload,
 a thumbnail, deleting and sweeping) holds one lock, and the database transactions are
-taken inside it, so a sweep never removes the file of a row being added."""
+taken inside it, so a sweep never removes the file of a row being added. A PDF's row has
+the facts of its pages, and Claude's check of a PDF's text is kept by content (the
+``pdf_checks`` table) while some attachment has that content."""
 
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Self, cast
 
-from agentic_os.attachments import ORPHAN_TTL
+from agentic_os.attachments import ORPHAN_TTL, is_sha256
 from agentic_os.domain import AGENTS, MessageKind
 from agentic_os.fx import FxRate
 from agentic_os.orchestrator.events import TurnOutcome
@@ -33,6 +35,15 @@ from agentic_os.orchestrator.store import (
     SavingRecord,
     StoredMessage,
     UsageRecord,
+)
+from agentic_os.pdf_facts import (
+    CHECK_VERSION,
+    PdfCheck,
+    PdfPage,
+    check_from_json,
+    pages_from_json,
+    pages_to_json,
+    pdf_notes,
 )
 from agentic_os.pricing import normalize_model
 from agentic_os.providers.base import Attachment, AttachmentKind
@@ -87,7 +98,7 @@ _SUMMARY_SELECT: Final = """
 """
 _ATTACHMENT_COLUMNS: Final = (
     "id, sha256, kind, mime, name, size, pages, width, height, has_thumbnail, created_at, "
-    "length(text) AS text_chars"
+    "length(text) AS text_chars, pdf_pages"
 )
 _UNLINKED: Final = (
     "NOT EXISTS (SELECT 1 FROM message_attachments AS l WHERE l.attachment_id = a.id)"
@@ -173,7 +184,19 @@ def _attachment_kind(value: object) -> AttachmentKind:
     return kind
 
 
+def _row_pages(row: sqlite3.Row) -> tuple[PdfPage, ...] | None:
+    """The facts of a PDF's pages as stored; ``None`` for anything but an analysed PDF
+    (facts that are no longer valid are as if there were none)."""
+    if row["kind"] != "pdf":
+        return None
+    pages = pages_from_json(cast(str | None, row["pdf_pages"]))
+    if pages is not None and len(pages) != row["pages"]:
+        return None
+    return pages
+
+
 def _row_to_attachment(row: sqlite3.Row) -> AttachmentRecord:
+    pages = _row_pages(row)
     return AttachmentRecord(
         id=cast(int, row["id"]),
         sha256=str(row["sha256"]),
@@ -187,6 +210,7 @@ def _row_to_attachment(row: sqlite3.Row) -> AttachmentRecord:
         text_chars=cast(int | None, row["text_chars"]),
         has_thumbnail=bool(row["has_thumbnail"]),
         created_at=parse_ts(str(row["created_at"])),
+        pdf_notes=pdf_notes(pages) if pages is not None else None,
     )
 
 
@@ -645,7 +669,8 @@ class SqliteStore:
     async def delete_conversation(self, conversation_id: int) -> bool:
         """Delete the conversation, its messages and the cached answers that came
         from it (usage and savings rows are kept), and the attachments sent in it that
-        no other conversation uses, with their files. Returns ``False`` if missing."""
+        no other conversation uses, with their files and Claude's checks of them.
+        Returns ``False`` if missing."""
         async with self._files_lock:
             async with self._db.transaction() as tx:
                 linked = [
@@ -664,6 +689,7 @@ class SqliteStore:
                 )
                 removed = await _delete_unlinked(tx, linked) if linked else []
                 unused = await _unused_contents(tx, {sha for _, sha in removed})
+                await _forget_checks(tx, unused)
             if removed:
                 await self._remove_files(unused, [attachment_id for attachment_id, _ in removed])
         return deleted > 0
@@ -697,12 +723,18 @@ class SqliteStore:
         width: int | None = None,
         height: int | None = None,
         text: str | None = None,
+        pdf_pages: Sequence[PdfPage] | None = None,
     ) -> AttachmentRecord:
         """Store a finished upload (:meth:`IncomingFile.finish`), already checked, and
         its row. Its file is moved to its content-addressed path, or deleted if that
-        content is already stored. It is an orphan until a turn links it."""
+        content is already stored. It is an orphan until a turn links it. A PDF may come
+        with the facts of its pages (the reader's, ``PdfInfo.pdf_pages``): one for each
+        of its ``pages``, else :class:`ValueError`."""
         if not upload.sha256:
             raise ValueError("the upload is not finished")
+        if pdf_pages is not None and (kind != "pdf" or len(pdf_pages) != pages):
+            raise ValueError("the page facts are not those of this PDF")
+        facts = tuple(pdf_pages) if pdf_pages is not None else None
         now = self._now()
         async with self._files_lock:
             await asyncio.to_thread(self._files.place, upload)
@@ -711,7 +743,8 @@ class SqliteStore:
             async with self._db.transaction() as tx:
                 attachment_id = await tx.insert(
                     "INSERT INTO attachments (sha256, kind, mime, name, size, pages, width, "
-                    "height, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "height, text, pdf_pages, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         upload.sha256,
                         kind,
@@ -722,6 +755,7 @@ class SqliteStore:
                         width,
                         height,
                         text,
+                        pages_to_json(facts) if facts is not None else None,
                         now,
                     ),
                 )
@@ -738,6 +772,7 @@ class SqliteStore:
             text_chars=len(text) if text is not None else None,
             has_thumbnail=False,
             created_at=parse_ts(now),
+            pdf_notes=pdf_notes(facts) if facts is not None else None,
         )
 
     async def get_attachment(self, attachment_id: int) -> AttachmentRecord | None:
@@ -749,8 +784,9 @@ class SqliteStore:
 
     async def get_attachments(self, ids: Sequence[int]) -> list[Attachment]:
         """The attachments with these ids, in the given order, in mode ``"full"``, with
-        their text (engine contract). Raises :class:`AttachmentNotFoundError` with the
-        first id that does not exist, or whose file is gone."""
+        their text and, for an analysed PDF, the facts of its pages (engine contract).
+        Raises :class:`AttachmentNotFoundError` with the first id that does not exist, or
+        whose file is gone."""
         if not ids:
             return []
         async with self._db.transaction(write=False) as tx:
@@ -785,6 +821,7 @@ class SqliteStore:
                     mode="full",
                     created_at=record.created_at,
                     has_thumbnail=record.has_thumbnail,
+                    pdf_pages=_row_pages(row),
                 )
             )
         return attachments
@@ -810,8 +847,8 @@ class SqliteStore:
 
     async def delete_attachment(self, attachment_id: int) -> bool:
         """Delete an attachment never sent in a turn, its thumbnail and, if no other
-        upload has the same content, its file. ``False`` if it does not exist; raises
-        :class:`AttachmentInUseError` if a question has it."""
+        upload has the same content, its file and Claude's check of it. ``False`` if it
+        does not exist; raises :class:`AttachmentInUseError` if a question has it."""
         async with self._files_lock:
             async with self._db.transaction() as tx:
                 row = await tx.fetchone(
@@ -825,6 +862,7 @@ class SqliteStore:
                     raise AttachmentInUseError(attachment_id)
                 await tx.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
                 unused = await _unused_contents(tx, {str(row["sha256"])})
+                await _forget_checks(tx, unused)
             await self._remove_files(unused, [attachment_id])
         return True
 
@@ -850,9 +888,11 @@ class SqliteStore:
     async def purge_attachments(self, now: datetime) -> int:
         """Delete the attachments never sent in a turn that were uploaded
         :data:`~agentic_os.attachments.ORPHAN_TTL` or more before ``now``, with their
-        thumbnails and the files no other row uses; then sweep the files that no row
-        uses and are older than an hour (leftovers of a crash or of a failed upload).
-        Returns how many attachments were deleted."""
+        thumbnails and the files no other row uses; forget Claude's checks of the
+        contents no attachment has any more (also one stored by a turn after its
+        conversation was deleted); then sweep the files that no row uses and are older
+        than an hour (leftovers of a crash or of a failed upload). Returns how many
+        attachments were deleted."""
         cutoff = format_ts(now - ORPHAN_TTL)
         async with self._files_lock:
             async with self._db.transaction() as tx:
@@ -868,16 +908,54 @@ class SqliteStore:
                         (_json_ids([attachment_id for attachment_id, _ in removed]),),
                     )
                 unused = await _unused_contents(tx, {sha for _, sha in removed})
+                forgotten = await tx.execute(
+                    "DELETE FROM pdf_checks WHERE sha256 NOT IN (SELECT sha256 FROM attachments)"
+                )
                 shas = await tx.fetchall("SELECT DISTINCT sha256 FROM attachments")
                 stored = {str(row[0]) for row in shas}
                 ids = {int(row[0]) for row in await tx.fetchall("SELECT id FROM attachments")}
             await self._remove_files(unused, [attachment_id for attachment_id, _ in removed])
             swept = await asyncio.to_thread(self._files.sweep, stored=stored, attachment_ids=ids)
-        if removed or swept:
+        if removed or swept or forgotten:
             logger.info(
-                "Deleted %d attachments never sent and %d unused files", len(removed), swept
+                "Deleted %d attachments never sent, %d unused files and %d unused PDF checks",
+                len(removed),
+                swept,
+                forgotten,
             )
         return len(removed)
+
+    async def get_pdf_check(self, sha256: str) -> PdfCheck | None:
+        """Claude's check of the text of the PDF with this content, of the current
+        :data:`~agentic_os.pdf_facts.CHECK_VERSION`; ``None`` when there is none, or the
+        stored one is not valid (the next turn that needs it checks the PDF again)."""
+        async with self._db.transaction(write=False) as tx:
+            row = await tx.fetchone(
+                "SELECT result FROM pdf_checks WHERE sha256 = ? AND version = ?",
+                (sha256, CHECK_VERSION),
+            )
+        if row is None:
+            return None
+        check = check_from_json(str(row["result"]))
+        if check is None or check.version != CHECK_VERSION:
+            logger.warning("The stored check of a PDF is not valid; it will be checked again")
+            return None
+        return check
+
+    async def put_pdf_check(self, sha256: str, check: PdfCheck) -> None:
+        """Store Claude's check of the text of the PDF with this content, replacing the
+        one of the same version. Raises :class:`ValueError` for a ``sha256`` that is not
+        one."""
+        if not is_sha256(sha256):
+            raise ValueError("not a SHA-256")
+        async with self._db.transaction() as tx:
+            await tx.execute(
+                "INSERT INTO pdf_checks (sha256, version, model, result, created_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (sha256, version) DO UPDATE SET "
+                "model = excluded.model, result = excluded.result, "
+                "created_at = excluded.created_at",
+                (sha256, check.version, check.model, check.to_json(), self._now()),
+            )
 
     async def _remove_files(self, contents: Collection[str], thumbnails: Collection[int]) -> None:
         """Delete these content files and thumbnails (their rows are gone). A failure is
@@ -1280,6 +1358,15 @@ async def _delete_unlinked(tx: Tx, ids: Collection[int]) -> list[tuple[int, str]
             (_json_ids([attachment_id for attachment_id, _ in removed]),),
         )
     return removed
+
+
+async def _forget_checks(tx: Tx, contents: Collection[str]) -> None:
+    """Delete Claude's checks of these contents (no attachment has them any more)."""
+    if contents:
+        await tx.execute(
+            "DELETE FROM pdf_checks WHERE sha256 IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(contents)),),
+        )
 
 
 async def _unused_contents(tx: Tx, contents: Collection[str]) -> list[str]:

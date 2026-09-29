@@ -30,7 +30,7 @@ El propietari va demanar, el 28 de setembre de 2026, poder adjuntar imatges i do
 
 ## Decisió
 
-Es fa en dues etapes: **P7a** (aquest canvi), els adjunts a tots els modes, i **P7b** (prevista), el contrast del PDF per a ChatGPT amb la subscripció.
+Es fa en dues etapes: **P7a**, els adjunts a tots els modes, i **P7b**, el contrast del PDF per a ChatGPT amb la subscripció.
 
 ### P7a. Adjunts a tots els modes
 
@@ -97,22 +97,48 @@ Es fa en dues etapes: **P7a** (aquest canvi), els adjunts a tots els modes, i **
 - A l'API, la memòria cau de prompts (`cache_control` als blocs d'adjunt) fa que les repeticions dins d'un torn costin poc.
 - Cada targeta mostra els tokens estimats abans d'enviar.
 
-**Limitació de P7a.** Codex rep el text del PDF extret pel servidor, sense contrastar i marcat així: d'un PDF escanejat no en rep res. Ho resol P7b.
+**Limitació de P7a.** Codex rep el text del PDF extret pel servidor, sense contrastar i marcat així: d'un PDF escanejat no en rep res. Ho resol P7b, a continuació.
 
-### P7b (prevista). El PDF per a ChatGPT amb la subscripció, contrastat per Claude
+### P7b. El PDF per a ChatGPT amb la subscripció, contrastat per Claude
 
-Només quan ChatGPT funciona amb Codex (mode `cli`): Claude i l'API d'OpenAI ja llegeixen els PDF.
+Només quan ChatGPT funciona amb Codex (mode `cli`): no pot obrir cap PDF i en llegeix el text que el servidor n'ha extret. Claude (CLI o API) i l'API d'OpenAI llegeixen els PDF ells mateixos, i no canvien. Aquest text pot enganyar ChatGPT de tres maneres: una pàgina escanejada no en té, una font sense mapa de caràcters el fa il·legible, i un PDF pot portar text que no es veu a la pàgina (en un mode de renderitzat invisible, minúscul o fora de la pàgina), que ChatGPT llegiria com si hi fos, una via per colar-li instruccions.
 
-1. **Extracció al servidor:** la de P7a (pypdf al procés limitat), que també divideix els PDF llargs en trams de pàgines.
-2. **Comprovacions deterministes per pàgina** (gratuïtes, sempre): sense capa de text o gairebé (una pàgina escanejada o text en imatges); text brossa (U+FFFD, caràcters d'ús privat, `(cid:NN)`, caràcters de control, massa poques lletres); i indicis de text amagat, a partir del flux de contingut amb el visitant d'operadors de pypdf: mode de renderitzat 3 en una pàgina sense imatges (una capa OCR sobre un escaneig és legítima), una lletra molt petita, text fora de la `MediaBox` i farciment blanc quan es pot saber. Els indicis són avisos, no veredictes.
-3. **Contrast de Claude** (la idea del propietari): una crida per PDF (per tram de fins a unes 20 pàgines en els llargs) amb el PDF com a document **i** el text extret de cada pàgina i els indicis del pas 2. Claude només respon les diferències, en JSON per pàgina: `{"page", "status": "ok" | "missing" | "garbled" | "partial" | "hidden", "text", "hidden", "visual"}`. L'anàlisi és estricta: una sortida mal formada, tallada o una negativa marca les pàgines afectades com a «no contrastat», mai com a parcials.
-4. **Quan:** en adjuntar el PDF, si el mode del compositor necessita ChatGPT; si no, quan comença un torn que el necessita (ChatGPT espera, amb un temps màxim). El resultat es desa per `(sha256, versió del contrast, identitat de Claude)` i el reaprofiten totes les fases, els torns posteriors i les altres converses.
-5. **El que veu ChatGPT, pàgina per pàgina:** `ok`, el text extret exacte; `missing`, la transcripció de Claude, marcada «[transcripció de Claude]»; `garbled`, la lectura de Claude, marcada; `partial`, el text extret més el complement de Claude, marcat; `hidden`, el text visible i l'avís «[Avís: la pàgina N conté text que no es veu; no s'ha passat]»; i les descripcions `visual`, marcades «[descripció de Claude]». Una capçalera diu que el text l'ha extret el servidor i l'ha contrastat Claude, i quines parts són de Claude.
-6. Claude també rep els avisos de text amagat amb el seu PDF, de manera que tots dos models el tracten com a sospitós.
-7. **Sense Claude** (mode de demostració, quota esgotada, error, negativa): ChatGPT rep el text extret, amb «[pàgina sense text extraïble]» a les pàgines sense text, i l'adjunt mostra «no contrastat».
-8. **Interfície:** l'estat a la targeta (pujant → contrastant amb Claude → llest, o avisos), per exemple «Text contrastat: 11 de 12 pàgines coincideixen; la 4 és escanejada i l'ha transcrita Claude». La resposta de ChatGPT porta un distintiu quan ha llegit pàgines a través de Claude («Ha llegit les pàgines 4 i 9 a través de Claude»), i els prompts del debat ho diuen: un acord sobre aquestes parts no són dues lectures independents.
-9. **Comptabilitat:** cada crida de contrast és una crida facturada amb el seu propi propòsit, a les estadístiques i al torn que la fa servir primer.
-10. **Límits del contrast** (a l'ajuda de la interfície): és el judici d'un model. Troba bé el text que falta, el text brossa, el text amagat i les pàgines escanejades, però una diferència petita (una xifra en una taula llarga) se li pot escapar. On el PDF té capa de text, ChatGPT continua rebent el text exacte.
+**1. Anàlisi de les pàgines, en pujar el PDF** (gratuïta, a tots els modes). El lector de P7a, en el mateix procés i en la mateixa passada que el text, analitza cada pàgina (`src/agentic_os/attachments.py`, amb els visitants d'operadors de l'extracció de text de pypdf):
+
+- On és el text de la pàgina dins del text desat. També s'analitzen les pàgines que el límit del text deixa fora: les dades surten del seu propi text, que després es descarta.
+- Les lletres i els caràcters trencats del seu text: U+FFFD, caràcters d'ús privat, substituts solitaris i caràcters de control (el que dona una font sense mapa de caràcters).
+- Si dibuixa alguna imatge: a les seves `Resources` o a les dels seus formularis (fins a 5 nivells), o una imatge en línia.
+- El text que mostra sense que es vegi: en un mode de renderitzat que no pinta res (3 o 7); més petit d'1 punt, comptant totes les escales amb què es dibuixa (la mida de la lletra, la matriu de text, la de transformació i la del formulari que el dibuixa); o amb l'origen a més d'1 punt fora de la part visible de la pàgina (la `CropBox` dins de la `MediaBox`). pypdf no segueix el mode de renderitzat ni la mida, així que l'anàlisi els desa amb `q` i els restaura amb `Q`. Un formulari es dibuixa com entre `q` i `Q`: el seu estat no en surt, i no pot restaurar més estats dels que ha desat (una manera de fer passar per visible el text invisible de la pàgina).
+
+D'aquí surten els avisos de cada PDF (`pdf_notes` a l'`Attachment`): les pàgines sense text (menys de 25 lletres), les il·legibles i les que poden amagar text. El text invisible només és sospitós en una pàgina sense imatges: sobre un escaneig és el text reconegut, i és legítim. Són avisos, no veredictes: una pàgina pot amagar text d'altres maneres (blanc sobre blanc, sota una imatge), i per això el contrast de Claude mira la pàgina tal com es veu. Si l'anàlisi no encaixa amb el text, el PDF es desa igualment, sense analitzar, i es llegeix com a P7a. Cap operand estrany no fa perdre el text d'una pàgina: l'anàlisi se'l salta.
+
+**2. Quan es contrasta: quan un torn el necessita, no en pujar el PDF.**
+
+- Un adjunt que el propietari treu del compositor, o que només envia a Claude, no costa res.
+- La resposta de ChatGPT espera el contrast mentre Claude respon: el comença la primera crida de ChatGPT del torn que el necessita, i totes les crides de ChatGPT del torn (respostes, revisions i síntesi) esperen la mateixa tasca.
+- Només en un torn on participa ChatGPT (solo amb ChatGPT, duel o debat) i hi ha un proveïdor de Claude. Mai en una resposta servida des de la memòria cau de torns.
+- El contrast es desa pel contingut del fitxer (`sha256`) i la versió del contrast (no pel model: el d'un altre model de Claude també serveix), i el reaprofiten els torns posteriors i les altres converses. Dos torns alhora poden contrastar el mateix PDF dues vegades: s'accepta, perquè és rar i només costa les crides de més.
+
+**3. Com.** Claude rep el PDF com a document **i** el text extret de cada pàgina, entre dues línies amb un codi diferent del que veu ChatGPT, i els avisos de l'anàlisi. Només escriu les pàgines que difereixen, una línia JSON per pàgina: `missing` (sense text: la transcriu sencera), `garbled` (il·legible: també), `partial` (només la part que falta), `hidden` (el text visible i una cita curta del que no es veu) o `ok` amb una descripció `visual` del que mostren les figures; al final, `{"end": true}`. L'anàlisi és estricta: una línia mal formada, fora d'ordre o tallada pel pressupost acaba la lectura, i només compten les pàgines d'abans.
+
+- El model és el de Claude del torn: qualitat abans que cost, com va triar el propietari. Sense raonament, i amb un pressupost de sortida segons les pàgines (més per a les que cal transcriure).
+- Com a molt 3 crides per PDF, cadascuna des de la pàgina on s'ha quedat l'anterior: unes 60 pàgines escanejades. La resta queden sense contrastar, i ho diuen.
+- Com a molt 2 PDF alhora, i 5 minuts per a tot el contrast del torn: després, ChatGPT llegeix el text sense contrastar.
+- Es desa quan és complet o quan s'han acabat les crides. Mai després d'un error, d'una negativa, d'una crida que no avança, del temps esgotat o d'una cancel·lació: el torn següent ho torna a provar.
+
+**4. El que llegeix ChatGPT, pàgina per pàgina.** El text extret exacte on és correcte; la lectura de Claude, marcada, on hi falta o no es pot llegir, i el seu complement on n'hi falta una part; les descripcions de les figures, marcades. **El text que no es veu no li arriba mai:** rep el text visible i l'avís que la pàgina en té. Cada línia de pàgina porta el codi del fitxer, que ni el PDF ni Claude (que no el veu mai) no poden falsificar. Les pàgines sense contrastar ho diuen.
+
+**5. Avisos a tots els models.** L'etiqueta d'un PDF amb pàgines sospitoses els diu que les tractin amb recel, i les revisions i la síntesi saben quines pàgines ha llegit ChatGPT a través de Claude: on hi coincideixen, és una sola lectura, no dues.
+
+**6. Quan no es pot contrastar** (sense cap proveïdor de Claude, un error, una negativa, el temps esgotat o un PDF sense analitzar): ChatGPT rep el text extret, amb les pàgines sense contrastar marcades, i el torn diu per què.
+
+**7. Interfície i protocol** ([PROTOCOL.md](../PROTOCOL.md)): la targeta de l'adjunt avisa de les pàgines sense text, il·legibles o amb possible text amagat; el torn mostra l'estat del contrast (`pdf.check`: contrastant, contrastat, amb el seu cost o «ja contrastat abans», o sense contrastar i per què); i les respostes de ChatGPT porten un distintiu amb les pàgines que ha llegit a través de Claude, les amagades i les que no s'han contrastat (`meta.pdf_reading`).
+
+**8. Comptabilitat.** Cada crida de contrast és una crida facturada, amb el propòsit `check`: surt a les estadístiques i compta al total del torn que la fa.
+
+**9. Emmagatzematge** (migració 5): la columna `attachments.pdf_pages`, amb les dades de cada pàgina, i la taula `pdf_checks`, amb el contrast per contingut i versió. Un contrast s'esborra quan cap adjunt no fa servir el fitxer: en esborrar l'últim adjunt que el té (sense enviar o amb la seva conversa) o, si en queda algun d'orfe, amb l'escombrada de cada hora.
+
+**10. Límits del contrast.** És el judici d'un model. Troba bé el text que falta, el text il·legible, el text amagat i les pàgines escanejades, però una diferència petita (una xifra en una taula llarga) se li pot escapar. On la capa de text és correcta, ChatGPT continua rebent el text exacte.
 
 ## Alternatives considerades
 
@@ -124,7 +150,11 @@ Només quan ChatGPT funciona amb Codex (mode `cli`): Claude i l'API d'OpenAI ja 
 - **Llegir els PDF al procés del servidor:** un PDF hostil podria encallar o esgotar la memòria del procés que ho serveix tot. Per això es llegeixen en un procés a part amb límits.
 - **Una altra biblioteca de PDF:** PyMuPDF és AGPL i nativa; pdfminer.six és més lenta i porta més dependències. pypdf (6.19.0) és Python pur, BSD-3, sense dependències obligatòries. Al navegador, `pdfjs-dist` (Mozilla, Apache-2.0) fa les miniatures i la vista prèvia.
 - **Enviar els PDF sencers a totes les fases:** és el més simple i el més fidel, però multiplica el cost. La configuració deixa triar al propietari.
-- **Renderitzar les pàgines del PDF com a imatges per a Codex (PDFium o poppler):** més fidel i independent de la capa de text, però amb dependències natives i més tokens. Es guarda per més endavant, com a alternativa a P7b.
+- **Renderitzar les pàgines del PDF com a imatges per a Codex (PDFium o poppler):** més fidel i independent de la capa de text, però amb dependències natives i més tokens a cada crida de ChatGPT. Es guarda per més endavant, com a alternativa a P7b.
+- **Contrastar el PDF en pujar-lo:** el contrast estaria llest abans del torn, però cada PDF pujat costaria una crida de Claude, també els que el propietari treu del compositor o només envia a Claude.
+- **Contrastar amb un model barat de Claude (el ràpid):** costaria menys, però transcriure pàgines escanejades i trobar text amagat és on més compta la qualitat. El propietari va triar el model del torn.
+- **Un interruptor per desactivar el contrast:** de moment no; s'hi pot afegir més endavant si el propietari el vol.
+- **Detectar el text amagat només per la capa de text (sense Claude):** l'anàlisi en troba els indicis, però no veu el text blanc sobre blanc ni el que queda sota una imatge, i no pot llegir una pàgina escanejada. Per això és un avís i el contrast el fa Claude, que veu la pàgina.
 - **Que Codex llegeixi el PDF amb les seves eines:** l'aplicació li desactiva les eines i el fa córrer en mode només lectura, i l'app-server 0.157.1 no té cap entrada de document.
 - **Fer les miniatures al servidor:** caldria renderitzar imatges i PDF al servidor (dependències natives). El navegador les fa un sol cop i les puja.
 
@@ -134,7 +164,9 @@ Només quan ChatGPT funciona amb Codex (mode `cli`): Claude i l'API d'OpenAI ja 
 - Canvia el protocol ([PROTOCOL.md](../PROTOCOL.md) i `web/src/lib/protocol.ts`): les rutes `/api/attachments`, el camp `attachments` de `turn.start`, `meta.attachments` de la pregunta, `pdf_in_revisions` als `RuntimeSettings` i els estats `415` i `507`.
 - Canvien els contractes interns: `Attachment` i `GenerationRequest.attachments` (`providers/base.py`); `get_attachments`, `link_attachments`, `discard_conversation` i `NewMessage.attachments` (la pregunta i els seus enllaços en una transacció) del `Store`; `TurnRequest.attachments` i `pdf_in_revisions`; i la versió de la clau de la memòria cau de torns (6).
 - L'esquema de la base de dades passa a la versió 4. El volum de dades, i les seves còpies, creixen amb els adjunts enviats.
-- Codex rep els PDF com a text sense contrastar fins a P7b.
-- Seguretat: cap fitxer pujat no es serveix com a HTML; `nosniff` i una política `sandbox` a tots; els PDF només els llegeix un procés limitat; el cos gran només l'admet una ruta amb sessió; el text dels fitxers no pot passar per part del prompt; i cap registre no desa els noms dels fitxers.
+- Amb Codex, cada PDF d'un torn costa crides de Claude la primera vegada que es fa servir (el contrast), i la resposta de ChatGPT l'espera; els torns següents el reaprofiten.
+- L'esquema de la base de dades passa a la versió 5 (P7b): `attachments.pdf_pages` i la taula `pdf_checks`. Els PDF pujats abans no tenen anàlisi i es llegeixen com a P7a.
+- Canvien el protocol (`Attachment.pdf_notes`, l'esdeveniment `pdf.check`, `meta.pdf_reading` i el `pdf_reading` opcional de `stream.completed`) i els contractes interns: `Attachment.pdf_pages` i `pdf_check`, el propòsit `check`, i `get_pdf_check` i `put_pdf_check` del `Store`.
+- Seguretat: cap fitxer pujat no es serveix com a HTML; `nosniff` i una política `sandbox` a tots; els PDF només els llegeix un procés limitat; el cos gran només l'admet una ruta amb sessió; el text dels fitxers no pot passar per part del prompt; el text d'un PDF que no es veu no arriba mai a ChatGPT amb la subscripció, i tots els models reben l'avís de les pàgines on n'hi pot haver; i cap registre no desa els noms dels fitxers.
 - Caddy (`deploy/Caddyfile`) té un límit propi per a la pujada: cal reiniciar-lo en actualitzar (`docker compose restart caddy`, ja als passos d'«Actualitzar» de [DESPLEGAMENT.md](../DESPLEGAMENT.md)).
 - Aquesta decisió és una proposta fins que el propietari l'accepti.

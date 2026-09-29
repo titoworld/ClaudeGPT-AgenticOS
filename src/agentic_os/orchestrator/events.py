@@ -15,6 +15,11 @@ from agentic_os.domain import AgentName, MessageKind, TurnMode, Usage
 Section = Literal["text", "critique", "answer"]
 """text: plain answer/synthesis stream. critique/answer: parts of a debate revision."""
 
+PdfCheckState = Literal["checking", "checked", "unchecked"]
+"""Where Claude's check of a PDF for ChatGPT is (docs/adr/0009-adjunts.md): running, done
+with at least one page checked, or done with none (it failed, took too long, the PDF was
+not analysed or there is no Claude)."""
+
 Wire = dict[str, object]
 
 
@@ -100,6 +105,72 @@ class StreamDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class PdfReading:
+    """How ChatGPT, when it cannot open PDFs (Codex), read one PDF of the question: as
+    the text the server extracted, with the pages Claude's check read for it
+    (docs/adr/0009-adjunts.md). ChatGPT's messages keep it (``meta.pdf_reading``)."""
+
+    attachment_id: int
+    name: str
+    checked: bool
+    """Claude checked at least one page of it."""
+    claude_pages: tuple[int, ...] = ()
+    """Pages ChatGPT read, all or in part, as Claude read them."""
+    hidden_pages: tuple[int, ...] = ()
+    """Pages with text that is not visible, which ChatGPT did not get."""
+    unchecked_pages: tuple[int, ...] = ()
+    """Pages nobody checked: ChatGPT read the extracted text as it is."""
+    reason: str | None = None
+    """Why pages remain unchecked (Catalan); None when every page was checked."""
+
+    def to_wire(self) -> Wire:
+        return {
+            "attachment_id": self.attachment_id,
+            "name": self.name,
+            "checked": self.checked,
+            "claude_pages": list(self.claude_pages),
+            "hidden_pages": list(self.hidden_pages),
+            "unchecked_pages": list(self.unchecked_pages),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PdfCheckChanged:
+    """Claude's check of a PDF of the question for ChatGPT started or ended (it runs
+    while Claude answers, before ChatGPT's first call of the turn)."""
+
+    request_id: str
+    attachment_id: int
+    name: str
+    state: PdfCheckState
+    claude_pages: tuple[int, ...] = ()
+    hidden_pages: tuple[int, ...] = ()
+    unchecked_pages: tuple[int, ...] = ()
+    reused: bool = False
+    """An earlier turn's check, stored: no call was made for it in this turn."""
+    usage: Usage | None = None
+    """What this turn's calls for the PDF billed (None while checking, or reused)."""
+    reason: str | None = None
+    """Why pages remain unchecked (Catalan), as :attr:`PdfReading.reason`."""
+
+    def to_wire(self) -> Wire:
+        return {
+            "type": "pdf.check",
+            "request_id": self.request_id,
+            "attachment_id": self.attachment_id,
+            "name": self.name,
+            "state": self.state,
+            "claude_pages": list(self.claude_pages),
+            "hidden_pages": list(self.hidden_pages),
+            "unchecked_pages": list(self.unchecked_pages),
+            "reused": self.reused,
+            "usage": self.usage.to_dict() if self.usage is not None else None,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class StreamCompleted:
     request_id: str
     stream_id: str
@@ -121,6 +192,9 @@ class StreamCompleted:
     unchanged_note: str | None = None
     """Debate revisions only: the short note written after UNCHANGED, as the message's
     ``meta.unchanged_note``. On the wire only when set."""
+    pdf_reading: tuple[PdfReading, ...] = ()
+    """ChatGPT's messages when it cannot open PDFs: how it read each PDF of the question,
+    as the message's ``meta.pdf_reading``. On the wire only when there is any."""
 
     def to_wire(self) -> Wire:
         wire: Wire = {
@@ -141,6 +215,8 @@ class StreamCompleted:
             wire["finish_reason"] = self.finish_reason
         if self.unchanged_note:
             wire["unchanged_note"] = self.unchanged_note
+        if self.pdf_reading:
+            wire["pdf_reading"] = [reading.to_wire() for reading in self.pdf_reading]
         return wire
 
 
@@ -321,6 +397,7 @@ class TurnOutcome:
 ServerEvent = (
     TurnStarted
     | PhaseChanged
+    | PdfCheckChanged
     | StreamStarted
     | StreamDelta
     | StreamCompleted

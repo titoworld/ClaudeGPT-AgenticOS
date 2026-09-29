@@ -4,6 +4,7 @@
   import { formatInt, formatMs } from '../lib/format';
   import type { StreamView } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
+  import PdfReadingBadge from './PdfReadingBadge.svelte';
 
   interface Props {
     stream: StreamView;
@@ -48,6 +49,9 @@
   {/if}
   {#if stream.cached}
     <span class="chip cache"><Icon name="cache" size={12} />des de la memòria cau</span>
+  {/if}
+  {#if stream.pdfReading.length}
+    <PdfReadingBadge readings={stream.pdfReading} />
   {/if}
 </footer>
 

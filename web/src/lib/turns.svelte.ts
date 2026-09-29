@@ -15,6 +15,9 @@ import type {
   ErrorInfo,
   Message,
   MessageKind,
+  PdfCheckState,
+  PdfNotes,
+  PdfReading,
   Phase,
   Savings,
   TurnEvent,
@@ -59,6 +62,32 @@ export interface StreamView {
   unchangedNote: string | null;
   /** Synthesis stored without calling any model: an agent's latest answer kept as final. */
   degraded: boolean;
+  /**
+   * ChatGPT's messages when it cannot open PDFs (the subscription): how it read each PDF of
+   * the question (live event or stored message); empty otherwise.
+   */
+  pdfReading: PdfReading[];
+}
+
+/**
+ * Claude's check of a PDF of the question for ChatGPT with the subscription, as the turn's
+ * `pdf.check` events tell it (docs/adr/0009-adjunts.md). Pages as in PdfReading.
+ */
+export interface PdfCheckView {
+  attachmentId: number;
+  name: string;
+  state: PdfCheckState;
+  claudePages: number[];
+  hiddenPages: number[];
+  uncheckedPages: number[];
+  /** An earlier turn's check, stored: no call was made for it in this turn. */
+  reused: boolean;
+  /** What this turn's calls for the PDF billed (null while checking, or reused). */
+  usage: Usage | null;
+  /** Why pages remain unchecked (Catalan); null when none does. */
+  reason: string | null;
+  /** Meaning of `usage.cost_usd`: the app sets it from Claude's provider mode. */
+  costBasis: CostBasis | null;
 }
 
 export interface TurnView {
@@ -73,6 +102,12 @@ export interface TurnView {
   question: string;
   /** The question's attachments, in order (live: those sent; stored: `meta.attachments`). */
   attachments: Attachment[];
+  /**
+   * Claude's check of the question's PDFs for ChatGPT, one per PDF, as the events came
+   * (`pdfChecks` orders them). Live only: a stored turn has none, its ChatGPT messages say
+   * how it read them (`StreamView.pdfReading`).
+   */
+  pdfChecks: PdfCheckView[];
   createdAt: string;
   status: TurnStatus;
   phase: Phase | null;
@@ -142,6 +177,7 @@ export function createLiveTurn(input: NewTurnInput): TurnView {
     options: input.options ?? null,
     question: input.question,
     attachments: [...(input.attachments ?? [])],
+    pdfChecks: [],
     createdAt: input.createdAt ?? new Date().toISOString(),
     status: 'pending',
     phase: null,
@@ -182,6 +218,7 @@ function newStream(id: string, agent: Agent, kind: StreamKind, round: number, mo
     finishReason: null,
     unchangedNote: null,
     degraded: false,
+    pdfReading: [],
   };
 }
 
@@ -214,6 +251,23 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       if (ev.phase === 'compaction') turn.compacted = true;
       if (turn.status === 'pending') turn.status = 'running';
       break;
+    case 'pdf.check': {
+      if (turn.status === 'pending') turn.status = 'running';
+      const facts = {
+        name: ev.name,
+        state: ev.state,
+        claudePages: asPages(ev.claude_pages),
+        hiddenPages: asPages(ev.hidden_pages),
+        uncheckedPages: asPages(ev.unchecked_pages),
+        reused: ev.reused === true,
+        usage: ev.usage ?? null,
+        reason: asText(ev.reason),
+      };
+      const known = turn.pdfChecks.find((c) => c.attachmentId === ev.attachment_id);
+      if (known) Object.assign(known, facts);
+      else turn.pdfChecks.push({ attachmentId: ev.attachment_id, ...facts, costBasis: null });
+      break;
+    }
     case 'stream.started': {
       if (turn.status === 'pending') turn.status = 'running';
       if (turn.streams.some((s) => s.id === ev.stream_id)) break;
@@ -240,6 +294,7 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       s.truncated = ev.truncated === true;
       s.finishReason = asText(ev.finish_reason);
       s.unchangedNote = s.unchanged ? asText(ev.unchanged_note) : null;
+      s.pdfReading = asPdfReadings(ev.pdf_reading);
       break;
     }
     case 'stream.failed': {
@@ -291,6 +346,20 @@ export function turnUsage(turn: TurnView): Usage | null {
 }
 
 // ------------------------------------------------------------ view helpers
+
+/**
+ * The checks of the turn's PDFs in the order of its attachments (the events come as each
+ * check starts or ends); those of attachments the turn does not know yet (a turn replayed
+ * after a reload, until its question is loaded) after them, in the order they came.
+ */
+export function pdfChecks(turn: TurnView): PdfCheckView[] {
+  const order = new Map(turn.attachments.map((a, i) => [a.id, i]));
+  const at = (check: PdfCheckView) => order.get(check.attachmentId) ?? Number.MAX_SAFE_INTEGER;
+  return turn.pdfChecks
+    .map((check, i) => ({ check, i }))
+    .sort((a, b) => at(a.check) - at(b.check) || a.i - b.i)
+    .map(({ check }) => check);
+}
 
 export interface RoundGroup {
   round: number;
@@ -476,6 +545,35 @@ function asOptions(v: unknown): TurnOptions | null {
   };
 }
 
+/** Page numbers (from 1) of a list; anything else in it is left out. */
+const asPages = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1) : [];
+
+/** The warnings of a stored PDF's pages (`pdf_notes`), or null when there are none it can read. */
+function asPdfNotes(v: unknown): PdfNotes | null {
+  if (!isRecord(v)) return null;
+  return { no_text: asPages(v.no_text), garbled: asPages(v.garbled), hidden: asPages(v.hidden) };
+}
+
+/** How ChatGPT read one PDF (`pdf_reading`), or null when the entry is not one. */
+function asPdfReading(v: unknown): PdfReading | null {
+  if (!isRecord(v)) return null;
+  const id = asNumber(v.attachment_id);
+  if (id == null || !Number.isInteger(id) || typeof v.name !== 'string' || typeof v.checked !== 'boolean') return null;
+  return {
+    attachment_id: id,
+    name: v.name,
+    checked: v.checked,
+    claude_pages: asPages(v.claude_pages),
+    hidden_pages: asPages(v.hidden_pages),
+    unchecked_pages: asPages(v.unchecked_pages),
+    reason: asText(v.reason),
+  };
+}
+
+const asPdfReadings = (v: unknown): PdfReading[] =>
+  Array.isArray(v) ? v.map(asPdfReading).filter((r): r is PdfReading => r != null) : [];
+
 const ATTACHMENT_KINDS: readonly string[] = ['image', 'pdf', 'text'];
 
 /** An attachment of a stored question (`meta.attachments`), or null when it is not one. */
@@ -498,6 +596,7 @@ function asAttachment(v: unknown): Attachment | null {
     has_thumbnail: v.has_thumbnail === true,
     text_available: v.text_available === true,
     estimated_tokens: asNumber(v.estimated_tokens) ?? 0,
+    pdf_notes: v.kind === 'pdf' ? asPdfNotes(v.pdf_notes) : null,
   };
 }
 
@@ -695,6 +794,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       s.finishReason = asText(meta.finish_reason);
       s.unchangedNote = s.unchanged ? asText(meta.unchanged_note) : null;
       s.degraded = meta.degraded === true;
+      s.pdfReading = asPdfReadings(meta.pdf_reading);
       streams.push(s);
       savings = asSavings(meta.savings) ?? savings;
       consensus = asConsensus(meta.consensus) ?? consensus;
@@ -730,6 +830,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       options: asOptions(qmeta.options),
       question: question?.content ?? '',
       attachments: asAttachments(qmeta.attachments),
+      pdfChecks: [],
       createdAt: question?.created_at ?? group[0]!.created_at,
       status,
       phase: last ? (last.kind === 'revision' ? 'revision' : last.kind === 'synthesis' ? 'synthesis' : 'answer') : null,

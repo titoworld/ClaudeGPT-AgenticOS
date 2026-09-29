@@ -16,7 +16,18 @@ from typing import Any
 
 import httpx
 import pytest
-from attachment_files import blank_pdf, encrypted_pdf, gif, jpeg, pdf, png, webp_lossy
+from attachment_files import (
+    Page,
+    blank_pdf,
+    drawn_pdf,
+    encrypted_pdf,
+    gif,
+    jpeg,
+    pdf,
+    png,
+    shown,
+    webp_lossy,
+)
 from starlette.testclient import TestClient
 
 from agentic_os import attachments
@@ -142,6 +153,7 @@ async def test_an_uploaded_image_is_described_and_served_in_place(h: Harness) ->
         "has_thumbnail": False,
         "text_available": False,
         "estimated_tokens": 58 * 43,
+        "pdf_notes": None,
     }
     assert (await h.client.get(f"{UPLOAD}/{wire['id']}")).json() == wire
 
@@ -207,6 +219,37 @@ async def test_a_pdf_can_be_read_in_ranges(h: Harness) -> None:
 async def test_a_pdf_without_text_has_none_available(h: Harness) -> None:
     wire = await h.uploaded(pdf([None]), "escanejat.pdf")
     assert (wire["pages"], wire["text_available"]) == (1, False)
+    assert wire["pdf_notes"] == {"no_text": [1], "garbled": [], "hidden": []}
+
+
+SUMMARY = "Resum de l'informe de vendes del segon trimestre de l'any"
+ANALYSED = drawn_pdf(
+    [
+        Page(shown(SUMMARY)),
+        Page(b"q 595 0 0 842 0 0 cm /Im1 Do Q", image=True),  # a scanned page
+        Page(shown(SUMMARY) + shown("Nota oculta per als models", y=600, mode=3)),
+    ]
+)
+"""A PDF whose second page is a scan and whose third has invisible text."""
+ANALYSED_NOTES = {"no_text": [2], "garbled": [], "hidden": [3]}
+
+
+async def test_an_uploaded_pdf_has_the_notes_of_its_pages(h: Harness) -> None:
+    """The reader analyses every page as it reads the text: the card warns of the pages
+    without text, with unreadable text and with text that may not be visible."""
+    wire = await h.uploaded(ANALYSED, "informe.pdf")
+    assert (wire["pages"], wire["text_available"]) == (3, True)
+    assert wire["pdf_notes"] == ANALYSED_NOTES
+    assert (await h.client.get(f"{UPLOAD}/{wire['id']}")).json() == wire
+    [stored] = await h.state.store.get_attachments([wire["id"]])
+    assert stored.pdf_pages is not None
+    assert [(page.number, page.images, page.invisible) for page in stored.pdf_pages] == [
+        (1, False, 0),
+        (2, True, 0),
+        (3, False, 26),
+    ]
+    # Only a PDF has notes.
+    assert (await h.uploaded(b"# Notes", "notes.md"))["pdf_notes"] is None
 
 
 async def test_the_type_comes_from_the_content(h: Harness) -> None:
@@ -588,3 +631,121 @@ def test_a_turn_with_a_missing_attachment_fails(
             "positius).",
             "request_id": "s",
         }
+
+
+def test_the_question_keeps_the_notes_of_its_pdfs(
+    client: tuple[TestClient, AppState, str, dict[AgentName, FakeProvider]],
+) -> None:
+    """``meta.attachments`` of the question is the ``Attachment`` of each file as it was
+    when the turn started: an analysed PDF has its notes there too, and the models get
+    the facts of its pages."""
+    test_client, _, token, providers = client
+    report = test_client.put(
+        UPLOAD, params={"name": "informe.pdf"}, content=ANALYSED, headers=ORIGIN_HEADERS
+    ).json()
+    with test_client.websocket_connect("/api/ws", headers=socket_headers(token)) as ws:
+        assert ws.receive_json()["type"] == "hello"
+        ws.send_json(
+            {
+                "type": "turn.start",
+                "request_id": "amb-informe",
+                "text": "Què diu l'informe?",
+                "mode": "solo",
+                "target": "claude",
+                "attachments": [report["id"]],
+            }
+        )
+        events: list[dict[str, Any]] = []
+        while not events or events[-1]["type"] not in ("turn.completed", "turn.failed"):
+            events.append(ws.receive_json())
+    assert events[-1]["type"] == "turn.completed", events[-1]
+    [[sent]] = providers["claude"].attachments
+    assert sent.pdf_pages is not None and len(sent.pdf_pages) == 3
+    assert sent.pdf_notes is not None and sent.pdf_notes.to_wire() == ANALYSED_NOTES
+    detail = test_client.get(f"/api/conversations/{events[-1]['conversation_id']}").json()
+    [meta] = detail["messages"][0]["meta"]["attachments"]
+    assert meta == report
+    assert meta["pdf_notes"] == ANALYSED_NOTES
+
+
+def turn_events(ws: Any, request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Start a turn on a socket and read its events up to the last one."""
+    ws.send_json({"type": "turn.start", **request})
+    events: list[dict[str, Any]] = []
+    while not events or events[-1]["type"] not in ("turn.completed", "turn.failed"):
+        events.append(ws.receive_json())
+    return events
+
+
+def test_claudes_check_reaches_the_socket_and_is_kept_for_later_turns(tmp_path: Path) -> None:
+    """With a ChatGPT that cannot open PDFs (Codex), a turn with an analysed PDF has
+    Claude check its text: ``pdf.check`` is one more event of the turn (its ``seq``, its
+    replay), ChatGPT's answer says how it read the PDF, live and reloaded, and the check
+    stored in the database serves the next turn without any call."""
+    claude = FakeProvider("claude", chunk_delay=0)
+    chatgpt = FakeProvider("chatgpt", chunk_delay=0, mode="cli")
+    providers: dict[AgentName, Provider] = {"claude": claude, "chatgpt": chatgpt}
+    app = create_app(make_settings(tmp_path), providers=providers, clock=Clock())
+    with TestClient(app, base_url="https://testserver") as test_client:
+        state: AppState = app.state.aos
+        assert test_client.portal is not None
+        token = test_client.portal.call(
+            functools.partial(state.sessions.create, T0, ip=None, user_agent=None)
+        )
+        test_client.cookies.set(COOKIE, token)
+        report = test_client.put(
+            UPLOAD, params={"name": "informe.pdf"}, content=ANALYSED, headers=ORIGIN_HEADERS
+        ).json()
+        request = {"text": "Què diu l'informe?", "mode": "duel", "attachments": [report["id"]]}
+        with test_client.websocket_connect("/api/ws", headers=socket_headers(token)) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            first = turn_events(ws, {**request, "request_id": "primer"})
+        assert first[-1]["type"] == "turn.completed", first[-1]
+        assert [event["seq"] for event in first] == list(range(1, len(first) + 1))
+        checks = [event for event in first if event["type"] == "pdf.check"]
+        assert [(c["state"], c["attachment_id"], c["name"]) for c in checks] == [
+            ("checking", report["id"], "informe.pdf"),
+            ("checked", report["id"], "informe.pdf"),
+        ]
+        assert checks[-1]["reused"] is False and checks[-1]["unchecked_pages"] == []
+        chatgpt_stream = next(
+            event["stream_id"]
+            for event in first
+            if event["type"] == "stream.started" and event["agent"] == "chatgpt"
+        )
+        [completed] = [
+            event
+            for event in first
+            if event["type"] == "stream.completed" and event["stream_id"] == chatgpt_stream
+        ]
+        [reading] = completed["pdf_reading"]
+        assert (reading["attachment_id"], reading["checked"]) == (report["id"], True)
+        # The check is stored by the file's content, in the database.
+        stored = test_client.portal.call(state.store.get_pdf_check, report["sha256"])
+        assert stored is not None and stored.complete
+
+        with test_client.websocket_connect("/api/ws", headers=socket_headers(token)) as ws:
+            ws.receive_json()
+            ws.send_json({"type": "turn.subscribe", "request_id": "primer", "after_seq": 0})
+            replay = [ws.receive_json() for _ in first]
+        assert replay == first
+
+        conversation = first[-1]["conversation_id"]
+        detail = test_client.get(f"/api/conversations/{conversation}").json()
+        [answer] = [
+            message
+            for message in detail["messages"]
+            if message["kind"] == "answer" and message["agent"] == "chatgpt"
+        ]
+        assert answer["meta"]["pdf_reading"] == completed["pdf_reading"]
+
+        calls = len(claude.requests)
+        with test_client.websocket_connect("/api/ws", headers=socket_headers(token)) as ws:
+            ws.receive_json()
+            again = turn_events(
+                ws, {**request, "request_id": "segon", "text": "I les conclusions?"}
+            )
+        assert again[-1]["type"] == "turn.completed", again[-1]
+        [reused] = [event for event in again if event["type"] == "pdf.check"]
+        assert (reused["state"], reused["reused"], reused["usage"]) == ("checked", True, None)
+        assert [r.purpose for r in claude.requests[calls:]] == ["answer"]  # no check call

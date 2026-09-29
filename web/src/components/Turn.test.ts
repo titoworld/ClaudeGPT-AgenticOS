@@ -300,6 +300,7 @@ describe('Turn: the attachments of the question', () => {
     has_thumbnail: true,
     text_available: false,
     estimated_tokens: 1247,
+    pdf_notes: null,
   };
   const pdf: Attachment = {
     ...image,

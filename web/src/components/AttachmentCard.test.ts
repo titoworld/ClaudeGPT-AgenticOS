@@ -1,7 +1,8 @@
 // An attachment's card, in the composer and in a question (like claude.ai): its thumbnail,
 // the first lines of a text file or an icon, its name, type, size, pages and estimated
 // tokens, and its state (uploading, ready or an error in Catalan). A ready one opens its
-// preview; in the composer it can be removed, and retried after a failed connection.
+// preview; in the composer it can be removed, and retried after a failed connection. A
+// PDF also shows the warnings of the server's analysis of its pages (P7b).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
 import type { AttachmentView } from '../lib/attachments';
@@ -25,6 +26,7 @@ const view = (partial: Partial<AttachmentView>): AttachmentView => ({
   status: 'ready',
   error: null,
   retryable: false,
+  pdfNotes: null,
   ...partial,
 });
 
@@ -121,5 +123,52 @@ describe('AttachmentCard', () => {
     expect(open.title).toBe('Obre la vista prèvia');
     open.click();
     expect(onopen).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AttachmentCard: the warnings of a PDF's pages (the server's analysis)", () => {
+  const pdf = (partial: Partial<AttachmentView>) =>
+    view({ name: 'informe.pdf', kind: 'pdf', mime: 'application/pdf', size: 1_234_567, pages: 12, tokens: 43_200, ...partial });
+  const notes = (root: HTMLElement) => [...root.querySelectorAll('.pdf-note')];
+
+  it('a line per kind under its meta, each with what it means for its title and for screen readers', () => {
+    const root = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [2, 5], garbled: [3], hidden: [7] } }) });
+    const lines = notes(root);
+    expect(lines.map((n) => textOf(n.querySelector('.note-text')))).toEqual([
+      'Sense text: pàg. 2, 5',
+      'Text il·legible: pàg. 3',
+      'Possible text ocult: pàg. 7',
+    ]);
+    const scan =
+      'Pàgines sense text extraïble: escanejades, o amb el text dibuixat com a imatge. Els models que obren el PDF les llegeixen com a imatge.';
+    expect(lines[0]!.getAttribute('title')).toBe(scan);
+    expect(textOf(lines[0]!.querySelector('.sr-only'))).toBe(`(${scan})`);
+    expect(lines.every((n) => n.getAttribute('title') && textOf(n.querySelector('.sr-only')))).toBe(true);
+    // Only the text that may be hidden is a warning (its colour); the icons are decoration.
+    expect(lines.map((n) => n.classList.contains('warning'))).toEqual([false, false, true]);
+    expect(lines.every((n) => n.querySelector('svg')?.getAttribute('aria-hidden') === 'true')).toBe(true);
+    // Under the meta: after the pages, the size and the tokens.
+    const info = root.querySelector('.info')!;
+    expect(textOf(info)).toMatch(/12 pàgines · 1,2 MB ≈ 43,2k tokens Sense text: pàg\. 2, 5/);
+  });
+
+  it('page lists are compact', () => {
+    const root = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [2, 3, 4, 9], garbled: [], hidden: [] } }) });
+    expect(notes(root).map((n) => textOf(n.querySelector('.note-text')))).toEqual(['Sense text: pàg. 2–4, 9']);
+  });
+
+  it('none for a PDF without warnings or not analysed, nor for other files', () => {
+    for (const partial of [
+      { pdfNotes: { no_text: [], garbled: [], hidden: [] } },
+      { pdfNotes: null },
+    ] as Partial<AttachmentView>[]) {
+      expect(notes(render(AttachmentCard, { view: pdf(partial) }))).toEqual([]);
+    }
+    expect(notes(render(AttachmentCard, { view: view({}) }))).toEqual([]);
+  });
+
+  it("in a question's card they are part of the button that opens its preview", () => {
+    const root = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [], garbled: [], hidden: [7] } }), onopen: vi.fn() });
+    expect(textOf(root.querySelector('button.body .pdf-note .note-text'))).toBe('Possible text ocult: pàg. 7');
   });
 });

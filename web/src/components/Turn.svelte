@@ -10,6 +10,7 @@
     INCOMPLETE_KIND,
     isTerminal,
     keptAnswers,
+    pdfChecks,
     revisionRounds,
     shownSynthesis,
     streamsByAgent,
@@ -22,6 +23,7 @@
   import AttachmentCard from './AttachmentCard.svelte';
   import DebateStepper from './DebateStepper.svelte';
   import Icon from './Icon.svelte';
+  import PdfChecks from './PdfChecks.svelte';
   import RevisionRound from './RevisionRound.svelte';
   import SavingsChip from './SavingsChip.svelte';
 
@@ -43,6 +45,8 @@
   const fallbackNote = $derived(synthesisNote(turn, synthesis));
   const threshold = $derived(turn.options?.debate.consensus_threshold ?? DEFAULT_CONSENSUS_THRESHOLD);
   const soloAgent = $derived(answers.claude ? 'claude' : answers.chatgpt ? 'chatgpt' : (turn.target ?? 'claude'));
+  // Claude's check of the question's PDFs for ChatGPT with the subscription (live turns).
+  const checks = $derived(pdfChecks(turn));
   // However the turn ended: a failed or cancelled one may have billed calls too.
   const usage = $derived(isTerminal(turn.status) ? turnUsage(turn) : null);
   // Every token its calls processed, the provider's cache included (ADR 0008).
@@ -106,6 +110,10 @@
 
   {#if active && turn.phase === 'compaction'}
     <p class="notice"><Icon name="refresh" size={14} />Compactant l'historial per estalviar tokens…</p>
+  {/if}
+
+  {#if checks.length}
+    <PdfChecks {checks} eurPerUsd={app.eurPerUsd} />
   {/if}
 
   {#if turn.mode === 'solo'}

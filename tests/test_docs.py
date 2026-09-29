@@ -20,8 +20,9 @@ from pathlib import Path
 import pytest
 from pydantic import AliasChoices
 
-from agentic_os import __version__, attachments
+from agentic_os import __version__, attachments, pdf_facts
 from agentic_os.config import Settings
+from agentic_os.orchestrator import pdf_check
 from agentic_os.orchestrator.types import EngineConfig
 from agentic_os.providers.claude_cli import CLAUDE_FAMILIES
 from agentic_os.server import middleware, turns, ws
@@ -78,6 +79,12 @@ def kilobytes(size: int) -> int:
 
 UPLOAD_MB = megabytes(middleware.LARGE_BODY_PATHS[middleware.UPLOAD_PATH])
 ORPHAN_HOURS = int(attachments.ORPHAN_TTL.total_seconds() // 3600)
+CHECK_MINUTES = int(pdf_check.CHECK_TIMEOUT_SECONDS // 60)
+assert CHECK_MINUTES * 60 == pdf_check.CHECK_TIMEOUT_SECONDS  # the docs give whole minutes
+GARBAGE_PERCENT = round(pdf_facts.GARBAGE_RATIO * 100)
+TINY_POINTS = int(attachments.TINY_POINTS)
+OFFPAGE_POINTS = int(attachments.OFFPAGE_MARGIN)
+assert (TINY_POINTS, OFFPAGE_POINTS) == (attachments.TINY_POINTS, attachments.OFFPAGE_MARGIN)
 
 
 DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
@@ -154,6 +161,23 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     ),
     (PROTOCOL, r"de com a molt (\d+) kB i \d+ píxels", kilobytes(attachments.MAX_THUMBNAIL_BYTES)),
     (PROTOCOL, r"de com a molt \d+ kB i (\d+) píxels", attachments.MAX_THUMBNAIL_SIDE),
+    # The pages of a PDF, and Claude's check of its text for ChatGPT.
+    (PROTOCOL, r"`no_text`: menys de (\d+) lletres", pdf_facts.NO_TEXT_LETTERS),
+    (PROTOCOL, r"`garbled`: (\d+) caràcters trencats o més", pdf_facts.GARBAGE_MIN),
+    (PROTOCOL, r"i almenys el (\d+) % del text", GARBAGE_PERCENT),
+    (PROTOCOL, r"`hidden`: (\d+) caràcters o més", pdf_facts.HIDDEN_MIN),
+    (PROTOCOL, r"més petit d'(\d+) punt", TINY_POINTS),
+    (ARQUITECTURA, r"més petit d'(\d+) punt", TINY_POINTS),
+    (PROTOCOL, r"l'origen a més d'(\d+) punt fora", OFFPAGE_POINTS),
+    (PROTOCOL, r"ChatGPT espera el contrast com a molt (\d+) minuts", CHECK_MINUTES),
+    (ARQUITECTURA, r"la mateixa tasca, com a molt (\d+) minuts", CHECK_MINUTES),
+    (PROTOCOL, r"Són com a molt (\d+) crides per PDF", pdf_check.MAX_CHECK_CALLS),
+    (ARQUITECTURA, r"Són com a molt (\d+) crides per PDF", pdf_check.MAX_CHECK_CALLS),
+    (ARQUITECTURA, r"com a molt (\d+) PDF alhora", pdf_check.CHECK_CONCURRENCY),
+    (ARQUITECTURA, r"contrastos de PDF: ([\d.]+) tokens", pdf_check.CHECK_BASE_TOKENS),
+    (ARQUITECTURA, r"més ([\d.]+) per cada pàgina de la crida", pdf_check.CHECK_TEXT_PAGE_TOKENS),
+    (ARQUITECTURA, r"i ([\d.]+) per cada altra pàgina", pdf_check.CHECK_PAGE_TOKENS),
+    (ARQUITECTURA, r"altra pàgina, com a molt ([\d.]+), amb", pdf_check.CHECK_MAX_TOKENS),
     # Conversation list and search.
     (PROTOCOL, r"`limit`: d'1 a (\d+)", MAX_LIST_LIMIT),
     (PROTOCOL, r"El text de la cerca pot tenir com a molt (\d+) caràcters", MAX_SEARCH_LENGTH),

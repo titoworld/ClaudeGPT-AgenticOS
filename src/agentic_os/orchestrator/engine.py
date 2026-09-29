@@ -15,6 +15,13 @@ and keeps their metadata there (``meta.attachments``). Answers and the synthesis
 every one whole; the revisions get images and text files whole and the PDFs as
 ``pdf_in_revisions`` says (their extracted text, or the document), except a PDF without
 any text, which goes whole. Later turns only see a reference to them.
+
+A ChatGPT that cannot open PDFs (Codex) reads their text as Claude checked it
+(orchestrator/pdf_check.py): its first call of the turn starts the check, which runs while
+Claude answers, and every call of ChatGPT waits for that same check before it starts
+(``pdf.check`` events). The check's calls are billed to the turn; ChatGPT's messages say
+how it read each PDF (``meta.pdf_reading``), and so do the revisions and the synthesis
+(``prompts.pdf_reading_note``). A replay from the turn cache checks nothing.
 """
 
 from __future__ import annotations
@@ -63,6 +70,8 @@ from agentic_os.orchestrator.cache import (
 from agentic_os.orchestrator.events import (
     Consensus,
     ErrorInfo,
+    PdfCheckChanged,
+    PdfReading,
     PhaseChanged,
     Savings,
     ServerEvent,
@@ -84,9 +93,19 @@ from agentic_os.orchestrator.memory import (
     compaction_cut,
     context_from_history,
 )
+from agentic_os.orchestrator.pdf_check import (
+    CHECK_CONCURRENCY,
+    CHECK_FAILED,
+    CHECK_TIMED_OUT,
+    CHECK_TIMEOUT_SECONDS,
+    CheckOutcome,
+    check_pdf,
+    unchecked_pages,
+)
 from agentic_os.orchestrator.prompts import (
     answer_prompt,
     debate_answer_prompt,
+    pdf_reading_note,
     revision_prompt,
     synthesis_prompt,
     system_prompt,
@@ -111,6 +130,7 @@ from agentic_os.providers.base import (
     Provider,
     ProviderError,
     TextDelta,
+    reads_pdfs,
 )
 from agentic_os.providers.prompt_format import AGENT_LABELS, has_text
 
@@ -235,6 +255,15 @@ class _Turn:
     savings_write: asyncio.Task[None] | None = None
     """The write of the turn's saving rows, once started (shielded from cancellation):
     from then on the outcome carries them, even if the turn is cancelled."""
+    check_task: asyncio.Task[None] | None = None
+    """Claude's check of the question's PDFs for a ChatGPT that cannot open them (see
+    :meth:`Engine._check_pdfs`), started by ChatGPT's first call that needs it."""
+    pdf_reading: tuple[PdfReading, ...] | None = None
+    """How ChatGPT reads each PDF of the question, once that check has ended."""
+    recheck: bool = False
+    """A PDF's check ended in a way the next turn retries (an error, a refusal, a reply
+    that made no progress, a timeout): the turn is never cached, so asking the same
+    question checks it again instead of replaying an unchecked reading."""
 
     @property
     def request_id(self) -> str:
@@ -330,6 +359,72 @@ def _cost_basis(mode: ProviderMode, usage: Usage) -> str | None:
     return None
 
 
+def _pages_json(pages: Sequence[int]) -> list[JsonValue]:
+    return [*pages]
+
+
+def _pdf_reading_json(readings: Sequence[PdfReading]) -> list[JsonValue]:
+    """``meta.pdf_reading`` of ChatGPT's message: :meth:`PdfReading.to_wire` as JSON."""
+    return [
+        {
+            "attachment_id": reading.attachment_id,
+            "name": reading.name,
+            "checked": reading.checked,
+            "claude_pages": _pages_json(reading.claude_pages),
+            "hidden_pages": _pages_json(reading.hidden_pages),
+            "unchecked_pages": _pages_json(reading.unchecked_pages),
+            "reason": reading.reason,
+        }
+        for reading in readings
+    ]
+
+
+def _pages_from_json(value: JsonValue | None) -> tuple[int, ...]:
+    items = value if isinstance(value, list) else []
+    return tuple(item for item in items if isinstance(item, int) and not isinstance(item, bool))
+
+
+def _pdf_reading_from_json(value: JsonValue | None) -> tuple[PdfReading, ...]:
+    """The readings of a stored ``meta.pdf_reading`` (a replayed message), skipping any
+    entry that is not one."""
+    readings: list[PdfReading] = []
+    for entry in value if isinstance(value, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        attachment_id, name = entry.get("attachment_id"), entry.get("name")
+        checked, reason = entry.get("checked"), entry.get("reason")
+        if not isinstance(attachment_id, int) or isinstance(attachment_id, bool):
+            continue
+        if not isinstance(name, str) or not isinstance(checked, bool):
+            continue
+        readings.append(
+            PdfReading(
+                attachment_id,
+                name,
+                checked,
+                _pages_from_json(entry.get("claude_pages")),
+                _pages_from_json(entry.get("hidden_pages")),
+                _pages_from_json(entry.get("unchecked_pages")),
+                reason if isinstance(reason, str) else None,
+            )
+        )
+    return tuple(readings)
+
+
+def _pdf_reading(attachment_id: int, attachment: Attachment, outcome: CheckOutcome) -> PdfReading:
+    """How ChatGPT reads a PDF after its check ended with ``outcome``."""
+    check = outcome.check if outcome.check is not None and outcome.check.covered > 0 else None
+    return PdfReading(
+        attachment_id=attachment_id,
+        name=attachment.name,
+        checked=check is not None,
+        claude_pages=check.claude_pages if check is not None else (),
+        hidden_pages=check.hidden_pages if check is not None else (),
+        unchecked_pages=unchecked_pages(attachment, check),
+        reason=outcome.reason,
+    )
+
+
 def _consensus_json(consensus: Consensus) -> dict[str, JsonValue]:
     scores: dict[str, JsonValue] = {agent: score for agent, score in consensus.scores.items()}
     return {"reached": consensus.reached, "round": consensus.round, "scores": scores}
@@ -361,12 +456,16 @@ class Engine:
         *,
         clock: Callable[[], datetime] = _utc_now,
         retry_delay: float = 0.5,
+        check_timeout: float = CHECK_TIMEOUT_SECONDS,
     ) -> None:
         self._providers = dict(providers)
         self._store = store
         self._config = config
         self._clock = clock
         self._retry_delay = retry_delay
+        self._check_timeout = check_timeout
+        """How long ChatGPT waits for Claude's check of a turn's PDFs (see
+        :meth:`_check_pdfs`)."""
         self._identities: dict[AgentName, str] = {}
         self._status_checks: dict[AgentName, asyncio.Task[None]] = {}
         """The latest status check of each agent (see :meth:`_identity`)."""
@@ -439,6 +538,10 @@ class Engine:
         try:
             await self._run_turn(turn, threshold)
         except asyncio.CancelledError:
+            # Claude's check of the PDFs runs in a task of its own: it stops first, so
+            # that what its calls billed is final when the outcome counts it.
+            if turn.check_task is not None:
+                await _cancel_and_wait((turn.check_task,))
             current = asyncio.current_task()
             if current is not None and current.cancelling():
                 # Cancelled by the owner, a closed iterator or a shutdown: the turn's
@@ -762,8 +865,11 @@ class Engine:
     ) -> None:
         await self._record_savings(turn)
         # Only whole, complete turns are replayed: never one with a failed, degraded or
-        # cut-off message, nor one whose key does not say which models answered.
-        complete = not turn.degraded and not turn.failed_agents and not turn.truncated
+        # cut-off message, nor one whose key does not say which models answered, nor one
+        # where ChatGPT read a PDF whose check the next turn would try again.
+        complete = (
+            not turn.degraded and not turn.failed_agents and not turn.truncated and not turn.recheck
+        )
         if cache_key is not None and complete and turn.stored:
             try:
                 await self._store.cache_put(
@@ -1023,7 +1129,12 @@ class Engine:
         if synthesizer in turn.failed_agents:
             order.reverse()  # it already failed in this turn: try the other one first
         prompt = synthesis_prompt(
-            turn.question, answers.text, critiques, answers.cut, turn.attachments
+            turn.question,
+            answers.text,
+            critiques,
+            answers.cut,
+            turn.attachments,
+            reading_note=self._reading_note(turn),
         )
         extra: dict[str, JsonValue] = {"consensus": _consensus_json(consensus)}
         for agent in order:
@@ -1076,6 +1187,10 @@ class Engine:
         if truncated:
             _set_truncated(meta, answers.cut[agent])
             turn.truncated = True
+        # ChatGPT's answer, written from its reading of the PDFs: it keeps saying so.
+        pdf_reading = self._reading_of(turn, agent)
+        if pdf_reading:
+            meta["pdf_reading"] = _pdf_reading_json(pdf_reading)
         _set_unstored(meta, turn.accounting)
         message_id = await self._store.add_message(
             NewMessage(
@@ -1100,6 +1215,7 @@ class Engine:
                 None,
                 truncated=truncated,
                 finish_reason=answers.cut[agent] if truncated else None,
+                pdf_reading=pdf_reading,
             )
         )
 
@@ -1166,6 +1282,8 @@ class Engine:
                     truncated=meta.get("truncated") is True,
                     finish_reason=_meta_text(meta, "finish_reason"),
                     unchanged_note=_meta_text(meta, "unchanged_note"),
+                    # How the original ChatGPT read the PDFs (nothing is checked again).
+                    pdf_reading=_pdf_reading_from_json(meta.get("pdf_reading")),
                 )
             )
         if turn.request.mode == "debate" and consensus is None:
@@ -1184,6 +1302,172 @@ class Engine:
                 cached=True,
             )
         )
+
+    # -- Claude's check of the PDFs for ChatGPT -----------------------------------------
+
+    async def _checked_pdfs(self, turn: _Turn) -> tuple[PdfReading, ...]:
+        """Start Claude's check of the question's PDFs, once per turn, and wait for it:
+        every call of a ChatGPT that cannot open PDFs waits for this same check. It runs
+        in a task of its own (the turn's background, cancelled with the turn), so the
+        calls that do not wait for it, Claude's answer first, go on meanwhile. How
+        ChatGPT reads each PDF once it has ended."""
+        if turn.check_task is None:
+            task = asyncio.create_task(self._check_pdfs(turn), name=f"check-{turn.request_id}")
+            turn.check_task = task
+            turn.background.add(task)
+            task.add_done_callback(turn.background.discard)
+        await asyncio.shield(turn.check_task)
+        return turn.pdf_reading or ()
+
+    @staticmethod
+    def _with_checks(turn: _Turn, attachments: tuple[Attachment, ...]) -> tuple[Attachment, ...]:
+        """A request's attachments (the question's, in order, each in its call's mode) with
+        the check of each PDF."""
+        return tuple(
+            replace(attachment, pdf_check=source.pdf_check)
+            if attachment.kind == "pdf"
+            else attachment
+            for attachment, source in zip(attachments, turn.attachments, strict=True)
+        )
+
+    async def _check_pdfs(self, turn: _Turn) -> None:
+        """Claude's check of the text of the question's PDFs (pdf_check.check_pdf), for a
+        ChatGPT that cannot open them: CHECK_CONCURRENCY PDFs at a time, a file attached
+        twice one after the other (the second reuses what the first stored), all within
+        the engine's check timeout, past which the checks still running are cancelled and
+        their PDFs are read unchecked. The start and the end of each PDF's check are
+        events of the turn (``PdfCheckChanged``). Then the question's attachments carry
+        their checks, so the later calls of every agent get them (the label notes), and
+        :attr:`_Turn.pdf_reading` says how ChatGPT reads each PDF."""
+        pdfs = [
+            (index, attachment_id, attachment)
+            for index, (attachment_id, attachment) in enumerate(
+                zip(turn.request.attachments, turn.attachments, strict=True)
+            )
+            if attachment.kind == "pdf"
+        ]
+        outcomes: dict[int, CheckOutcome] = {}
+        # What each PDF's calls have billed so far: a check cut short by the timeout too.
+        spent = {index: Usage() for index, _, _ in pdfs}
+        slots = asyncio.Semaphore(CHECK_CONCURRENCY)
+        files: dict[str, asyncio.Lock] = {}
+
+        async def check_one(index: int, attachment_id: int, attachment: Attachment) -> None:
+            async with files.setdefault(attachment.sha256, asyncio.Lock()), slots:
+                outcome = await self._check_pdf(turn, attachment_id, attachment, spent, index)
+            outcomes[index] = outcome
+            turn.emit(self._check_changed(turn, attachment_id, attachment, outcome))
+
+        try:
+            async with asyncio.timeout(self._check_timeout), asyncio.TaskGroup() as group:
+                for index, attachment_id, attachment in pdfs:
+                    group.create_task(check_one(index, attachment_id, attachment))
+        except TimeoutError:
+            logger.warning("Claude's check of the PDFs of turn %s took too long", turn.request_id)
+        for index, attachment_id, attachment in pdfs:
+            if index not in outcomes:
+                outcome = CheckOutcome(None, False, spent[index], CHECK_TIMED_OUT, final=False)
+                outcomes[index] = outcome
+                turn.emit(self._check_changed(turn, attachment_id, attachment, outcome))
+        turn.attachments = tuple(
+            replace(attachment, pdf_check=outcomes[index].check)
+            if index in outcomes
+            else attachment
+            for index, attachment in enumerate(turn.attachments)
+        )
+        turn.pdf_reading = tuple(
+            _pdf_reading(attachment_id, attachment, outcomes[index])
+            for index, attachment_id, attachment in pdfs
+        )
+        turn.recheck = any(not outcome.final for outcome in outcomes.values())
+
+    async def _check_pdf(
+        self,
+        turn: _Turn,
+        attachment_id: int,
+        attachment: Attachment,
+        spent: dict[int, Usage],
+        index: int,
+    ) -> CheckOutcome:
+        """One PDF's check, with the turn's Claude model: its calls are billed to the turn
+        (a usage row each, purpose "check", and the turn's total) and added to
+        ``spent[index]``. An unexpected error leaves the PDF unchecked (it is logged)."""
+        claude = self._providers.get("claude")
+
+        async def record(
+            model: str,
+            usage: Usage,
+            latency_ms: int,
+            ttft_ms: int | None,
+            error: ProviderError | None,
+        ) -> Usage:
+            model = model or self._models.get("claude", "")
+            if error is not None and not is_billed(usage):
+                priced = Usage()
+            else:
+                priced = replace(usage, cost_usd=estimate_cost_usd(model, usage, turn.prices))
+            spent[index] += priced
+            turn.accounting.add_spent(priced)
+            await self._record_usage(
+                turn,
+                "claude",
+                "check",
+                model=model,
+                usage=priced,
+                latency_ms=latency_ms,
+                ttft_ms=ttft_ms,
+                error=error,
+            )
+            return priced
+
+        def started() -> None:
+            turn.emit(PdfCheckChanged(turn.request_id, attachment_id, attachment.name, "checking"))
+
+        try:
+            return await check_pdf(
+                attachment,
+                provider=claude,
+                model=turn.request.models.get("claude"),
+                store=self._store,
+                record=record,
+                on_start=started,
+            )
+        except Exception:
+            logger.exception("Claude's check of a PDF of turn %s failed", turn.request_id)
+            reason = CHECK_FAILED.format(message="S'ha produït un error intern.")
+            return CheckOutcome(None, False, spent[index], reason, final=False)
+
+    @staticmethod
+    def _check_changed(
+        turn: _Turn, attachment_id: int, attachment: Attachment, outcome: CheckOutcome
+    ) -> PdfCheckChanged:
+        """The event of a PDF whose check has ended."""
+        reading = _pdf_reading(attachment_id, attachment, outcome)
+        return PdfCheckChanged(
+            turn.request_id,
+            attachment_id,
+            attachment.name,
+            "checked" if reading.checked else "unchecked",
+            claude_pages=reading.claude_pages,
+            hidden_pages=reading.hidden_pages,
+            unchecked_pages=reading.unchecked_pages,
+            reused=outcome.reused,
+            usage=None if outcome.reused else outcome.usage,
+            reason=outcome.reason,
+        )
+
+    def _reading_of(self, turn: _Turn, agent: AgentName) -> tuple[PdfReading, ...]:
+        """How ``agent`` read the question's PDFs, when it cannot open them and this turn
+        checked them for it (empty otherwise)."""
+        if not turn.pdf_reading or reads_pdfs(self._providers[agent]):
+            return ()
+        return turn.pdf_reading
+
+    @staticmethod
+    def _reading_note(turn: _Turn) -> str:
+        """What the revisions and the synthesis are told of how ChatGPT read the PDFs, when
+        it cannot open them (the turn checked them for it); "" otherwise."""
+        return pdf_reading_note(turn.attachments) if turn.pdf_reading else ""
 
     # -- model calls -------------------------------------------------------------------
 
@@ -1235,6 +1519,7 @@ class Engine:
                 own_incomplete=agent in answers.cut,
                 other_incomplete=other in answers.cut,
                 attachments=attachments,
+                reading_note=self._reading_note(turn),
             ),
             purpose="revision",
             model=turn.request.models.get(agent),
@@ -1304,8 +1589,15 @@ class Engine:
         previous: str | None = None,
         extra_meta: Mapping[str, JsonValue] | None = None,
     ) -> _Outcome:
-        """One model call: stream it, retry once if allowed, store and report the message."""
+        """One model call: stream it, retry once if allowed, store and report the message.
+
+        A ChatGPT that cannot open PDFs first waits for Claude's check of the question's
+        PDFs (the turn's one check, started by its first call) and gets them with it."""
         provider = self._providers[agent]
+        pdf_reading: tuple[PdfReading, ...] = ()
+        if not reads_pdfs(provider) and any(a.kind == "pdf" for a in request.attachments):
+            pdf_reading = await self._checked_pdfs(turn)
+            request = replace(request, attachments=self._with_checks(turn, request.attachments))
         stream_id = uuid.uuid4().hex
         turn.emit(
             StreamStarted(
@@ -1448,6 +1740,8 @@ class Engine:
             meta.update(critique=critique or "", agreement=agreement, unchanged=unchanged)
             if note:
                 meta["unchanged_note"] = note
+        if pdf_reading:
+            meta["pdf_reading"] = _pdf_reading_json(pdf_reading)
         if extra_meta:
             meta.update(extra_meta)
         if final:
@@ -1483,6 +1777,7 @@ class Engine:
                 truncated=result.truncated,
                 finish_reason=result.finish_reason if result.truncated else None,
                 unchanged_note=note,
+                pdf_reading=pdf_reading,
             )
         )
         return _Outcome(

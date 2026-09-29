@@ -188,6 +188,11 @@ interface Attachment {             // un fitxer adjunt (vegeu «Adjunts»)
   has_thumbnail: boolean;          // el navegador n'ha pujat la miniatura
   text_available: boolean;         // text: sempre; PDF: se n'ha pogut extreure el text
   estimated_tokens: number;        // tokens d'entrada aproximats per crida
+  pdf_notes: {                     // avisos de les pàgines d'un PDF analitzat (vegeu «Adjunts»);
+    no_text: number[];             // null en els altres. Números de pàgina, des de l'1:
+    garbled: number[];             // sense text (escanejades), amb el text il·legible
+    hidden: number[];              // i amb possible text que no es veu
+  } | null;
 }
 
 interface Stats {
@@ -255,10 +260,17 @@ Els fitxers que el propietari adjunta a una pregunta ([ADR 0009](adr/0009-adjunt
   - Massa gran: `413`, amb el límit del tipus (`El fitxer és massa gran: una imatge pot tenir com a molt 7 MB.`). No vàlid (buit, sense nom, una imatge il·legible, massa píxels o pàgines, un PDF xifrat o malmès): `422`.
 - **Pujada:** `PUT /api/attachments?name=<nom>`, amb el fitxer com a cos. Necessita la sessió i l'`Origin`, com totes les escriptures. El servidor escriu el cos en un fitxer temporal a mesura que arriba i el talla al límit del seu tipus, que decideixen els primers 16 bytes: si el `Content-Length` ja el passa, respon `413` de seguida, sense llegir-ne més. `name` és el nom que es mostra (i el que dona l'extensió d'un fitxer de text): se'n queda l'última part d'un camí, en NFC, sense caràcters de control ni de format invisibles (com els que capgiren el sentit del text), amb els espais seguits com un de sol i com a molt 200 caràcters (un de més llarg es talla i conserva l'extensió). Un adjunt que no s'envia en cap torn s'esborra al cap de 24 h.
 - **Text d'un PDF:** el servidor el llegeix amb pypdf en un procés a part, com a molt 60 s. Té un bloc per pàgina, introduït per la línia `--- Pàgina N ---`, i els models el reben quan no reben el document (vegeu `pdf_in_revisions` i l'ADR). `text_available` és `false` si no se n'ha pogut extreure cap text: un PDF escanejat, o un error o el temps esgotat mentre se n'extreia (si ni tan sols se'n poden comptar les pàgines, la pujada dona `422`). Si passa d'1.000.000 caràcters, es talla i acaba amb l'avís `[Text retallat: el text extret del PDF passava de 1.000.000 caràcters.]`.
+- **Pàgines d'un PDF** (`pdf_notes`): en la mateixa passada, el lector analitza cada pàgina, també les que el límit del text deixa fora: on és el seu text dins del text desat, quantes lletres i quants caràcters trencats té (U+FFFD, caràcters d'ús privat o de control: una font sense mapa de caràcters), si dibuixa alguna imatge i quant text mostra que no es veu: en un mode de renderitzat invisible (3 o 7), més petit d'1 punt (amb totes les escales amb què es dibuixa) o amb l'origen a més d'1 punt fora de la part visible de la pàgina (la `CropBox` dins de la `MediaBox`). `pdf_notes` en dona els avisos, per pàgina:
+  - `no_text`: menys de 25 lletres (una pàgina escanejada, o text dibuixat com a imatge);
+  - `garbled`: 5 caràcters trencats o més, i almenys el 5 % del text (una pàgina sense text no hi surt);
+  - `hidden`: 10 caràcters o més que no es veuen. El text invisible només hi compta en una pàgina sense imatges: sobre un escaneig és el text reconegut, legítim.
+
+  Són avisos, no veredictes. Un PDF que no s'ha pogut analitzar té `pdf_notes: null`, com les imatges, els fitxers de text i els PDF pujats abans que existís l'anàlisi. Els `meta.attachments` desats abans no porten la clau.
+- **Contrast de Claude** ([ADR 0009](adr/0009-adjunts.md)): ChatGPT amb la subscripció (Codex, mode `cli`) no pot obrir cap PDF i en llegeix el text extret, pàgina per pàgina. En un torn on participa i la pregunta porta PDF analitzats, Claude contrasta aquest text amb el document (en un duel o un debat, mentre respon): a les pàgines on el text extret hi falta o no es pot llegir, ChatGPT llegeix el que hi llegeix Claude, marcat, i el text que no es veu no li arriba mai. ChatGPT espera el contrast com a molt 5 minuts; després llegeix el text sense contrastar. Són com a molt 3 crides per PDF: les pàgines que no hi caben queden sense contrastar, i ho diuen. El contrast es desa pel contingut del fitxer, i el reaprofiten els torns posteriors i les altres converses; s'esborra quan cap adjunt no fa servir el fitxer. Es veu amb l'esdeveniment `pdf.check` i amb `meta.pdf_reading` dels missatges de ChatGPT. Les crides es facturen amb el propòsit `check` i compten al total del torn.
 - **`estimated_tokens`** (aproximats, per a cada crida que rep l'adjunt): imatge `ceil(w'/28) · ceil(h'/28)`, com a molt 4.784, amb `(w', h')` la imatge reduïda a 2.576 píxels al costat llarg (mai ampliada); PDF, 3.600 per pàgina; text, `ceil(caràcters / 4)`.
 - **Contingut** (`GET /api/attachments/{id}/content`): el fitxer tal com es va pujar, amb el tipus detectat (`text/plain; charset=utf-8` per al text), `X-Content-Type-Options: nosniff` i `Content-Security-Policy: default-src 'none'; sandbox`. Les imatges porten `Content-Disposition: inline`; els PDF i el text, `attachment` (es descarreguen). En tots dos casos, amb el nom: `filename` en ASCII i `filename*` en UTF-8. Res del que es puja no es serveix com a HTML. Admet `Range`.
 - **Miniatures:** el navegador en fa una en adjuntar el fitxer i la puja a `PUT /api/attachments/{id}/thumbnail`: una imatge PNG o WebP (pel contingut) de com a molt 100 kB i 512 píxels per costat; si no, `415`, `413` o `422`. Una miniatura nova substitueix l'anterior. `GET` la retorna, amb les mateixes capçaleres que una imatge, o `404` si no en té.
-- **Esborrar:** `DELETE /api/attachments/{id}` esborra un adjunt que no s'ha enviat mai (el propietari l'ha tret del compositor): `204`. Si ja és a una pregunta, `409`, i s'esborra amb la seva conversa: esborrar una conversa esborra els adjunts que només feia servir ella. Dues pujades del mateix fitxer en comparteixen la còpia, que s'esborra quan cap adjunt no la fa servir.
+- **Esborrar:** `DELETE /api/attachments/{id}` esborra un adjunt que no s'ha enviat mai (el propietari l'ha tret del compositor): `204`. Si ja és a una pregunta, `409`, i s'esborra amb la seva conversa: esborrar una conversa esborra els adjunts que només feia servir ella. Dues pujades del mateix fitxer en comparteixen la còpia, que s'esborra quan cap adjunt no la fa servir, i el contrast de Claude, amb ella.
 
 ### Resultat del torn (`meta.outcome` de la pregunta)
 
@@ -271,8 +283,9 @@ interface TurnOutcome {
   failures: { agent: Agent; kind: string; message: string; round: number }[];
                                    // les fallades de crida del torn (stream.failed), en ordre
   usage: Usage;                    // total del torn: totes les crides facturades (resums de
-                                   // compactació, crides fallides, intents declinats i crides
-                                   // sense missatge incloses); el mateix usage de l'esdeveniment final
+                                   // compactació, contrastos de PDF, crides fallides, intents
+                                   // declinats i crides sense missatge incloses); el mateix
+                                   // usage de l'esdeveniment final
   savings: object;                 // com el savings de turn.completed (vegeu més avall);
                                    // zeros en un torn fallit o cancel·lat (no registra estalvis),
                                    // tret d'un torn cancel·lat quan ja desava els seus
@@ -294,6 +307,22 @@ interface TurnOutcome {
 - Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
 - Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`) i `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva, i `unchanged_note` (opcional) és la nota curta que el model va escriure després d'`UNCHANGED`, a la mateixa línia (com a molt 200 caràcters). `content` també conté la resposta anterior (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
 - Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
+- Missatges de ChatGPT (`answer`, `revision`, `synthesis`) d'una pregunta amb PDF quan no els pot obrir (la subscripció, vegeu «Contrast de Claude» a «Adjunts»): `pdf_reading`, com ha llegit cada PDF, en l'ordre dels adjunts:
+
+  ```ts
+  interface PdfReading {
+    attachment_id: number; name: string;
+    checked: boolean;              // Claude n'ha contrastat alguna pàgina
+    claude_pages: number[];        // pàgines que ChatGPT ha llegit, senceres o en part, tal com
+                                   // les ha llegit Claude (sense text, il·legibles, incompletes
+                                   // o amb text que no es veu)
+    hidden_pages: number[];        // pàgines amb text que no es veu: ChatGPT no l'ha rebut
+    unchecked_pages: number[];     // pàgines que ningú no ha contrastat: el text extret tal com és
+    reason: string | null;         // per què queden pàgines sense contrastar (null si no en queda cap)
+  }
+  ```
+
+  Una resposta servida des de la memòria cau de torns conserva el `meta` desat.
 - Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). Cada missatge final porta també `unstored_usage` (`Usage`) si fins llavors hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, negatives, límit de sortida esgotat sense text, intents declinats).
 - Total d'un torn recarregat: `outcome.usage` de la pregunta, tal com és (no s'hi tornen a sumar `compaction_usage` ni `unstored_usage`). És igual al `usage` de l'esdeveniment final i a la suma de les files d'ús del torn més les dels seus resums de compactació, que es desen sense `turn_id` perquè es fan abans que existeixi la pregunta. Per als torns sense `outcome` (desats abans de l'ADR 0007), la suma dels `usage` dels seus missatges, més `compaction_usage` i l'`unstored_usage` de l'últim missatge final, que no inclou una crida fallida que acabés després que l'altre agent d'un duel hagués desat la seva resposta.
 
@@ -342,7 +371,8 @@ Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del 
 | `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`) |
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
 | `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
-| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason` i `unchanged_note` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. Tots tres valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
+| `pdf.check` | `attachment_id`, `name`, `state` (`checking`, `checked`, `unchecked`), `claude_pages`, `hidden_pages`, `unchecked_pages` (números de pàgina, com a `PdfReading`), `reused`, `usage` (`Usage` o `null`), `reason` (text o `null`) | Claude contrasta un PDF de la pregunta per a ChatGPT amb la subscripció (vegeu «Contrast de Claude» a «Adjunts»). `checking` quan comença, abans de la primera crida de ChatGPT, que l'espera (no n'hi ha si el contrast ja estava desat); després `checked` (almenys una pàgina contrastada) o `unchecked` (cap: la comprovació ha fallat, Claude no l'ha volgut fer, ha trigat massa, el PDF no s'ha pogut analitzar o no hi ha Claude). `reused`: el contrast d'un torn anterior, sense cap crida en aquest. `usage`: el que han facturat les crides d'aquest torn per a aquest PDF, amb el cost (`null` mentre contrasta i si és reutilitzat). `reason`: per què queden pàgines sense contrastar, en català (`null` si no en queda cap). Forma part dels esdeveniments del torn (amb `seq` i reenviat per `turn.subscribe`) |
+| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason`, `unchanged_note` i `pdf_reading` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. `pdf_reading` (`PdfReading[]`) diu com ha llegit ChatGPT els PDF quan no els pot obrir. Tots valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
 | `stream.failed` | `stream_id`, `error: {kind, message}`; opcional: `usage` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa. `usage` és el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text); només hi és quan se'n sap una facturació |
 | `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached` | Torn acabat |
 | `turn.failed` | `error: {kind, message}`, `usage` | Torn avortat. `usage` és el total del torn fins aleshores, el mateix d'`outcome.usage` (zero si ha fallat abans de cap crida) |
@@ -354,7 +384,7 @@ Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "co
 
 ### Ordre típic d'un debat
 
-1. `turn.started` → `phase(answer, 0)` → dos `stream.started` (Claude i ChatGPT en paral·lel) amb els seus `stream.delta` (`section: "text"`) i `stream.completed`.
+1. `turn.started` → `phase(answer, 0)` → dos `stream.started` (Claude i ChatGPT en paral·lel) amb els seus `stream.delta` (`section: "text"`) i `stream.completed`. Si ChatGPT funciona amb la subscripció i la pregunta porta PDF analitzats, abans del `stream.started` de ChatGPT arriben els `pdf.check` de cada PDF (`checking` i, en acabar el contrast, `checked` o `unchecked`) mentre Claude ja respon.
 2. Per a cada ronda `r`: `phase(revision, r)` → dos fluxos amb `section` `critique` i després `answer`; `stream.completed` porta `agreement`.
 3. Si tots dos arriben al llindar de consens, s'aturen les rondes (estalvi `early_stop`).
 4. `phase(synthesis, r)` → un flux de l'agent sintetitzador → `turn.completed`.

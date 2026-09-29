@@ -171,6 +171,19 @@ export const CONVERSATION_QUERY_MAX_LENGTH = 200;
 
 export type AttachmentKind = 'image' | 'pdf' | 'text';
 
+/**
+ * The warnings of the server's analysis of an attached PDF's pages (docs/PROTOCOL.md
+ * «Adjunts»), by kind: page numbers, from 1. Warnings, not verdicts.
+ */
+export interface PdfNotes {
+  /** Pages without text: scans, or text drawn as an image. */
+  no_text: number[];
+  /** Pages whose extracted text is unreadable (a font without a character map). */
+  garbled: number[];
+  /** Pages that may hold text that is not visible: invisible, tiny or off the page. */
+  hidden: number[];
+}
+
 /** A file attached to a question (docs/PROTOCOL.md «Adjunts»). */
 export interface Attachment {
   id: number;
@@ -191,6 +204,37 @@ export interface Attachment {
   text_available: boolean;
   /** Approximate input tokens of each call that gets it. */
   estimated_tokens: number;
+  /**
+   * An analysed PDF: the warnings of its pages. Null for images, text files and PDFs the
+   * server could not analyse (questions stored before the analysis do not have the key).
+   */
+  pdf_notes: PdfNotes | null;
+}
+
+/**
+ * Where Claude's check of a PDF for ChatGPT with the subscription is (docs/adr/0009-adjunts.md):
+ * running, done with at least one page checked, or done with none (it failed, took too
+ * long, the PDF was not analysed or there is no Claude).
+ */
+export type PdfCheckState = 'checking' | 'checked' | 'unchecked';
+
+/**
+ * How ChatGPT, when it cannot open PDFs (the subscription: Codex), read one PDF of the
+ * question: the text the server extracted, with the pages Claude's check read for it.
+ */
+export interface PdfReading {
+  attachment_id: number;
+  name: string;
+  /** Claude checked at least one page of it. */
+  checked: boolean;
+  /** Pages ChatGPT read, all or in part, as Claude read them. */
+  claude_pages: number[];
+  /** Pages with text that is not visible: ChatGPT did not get it. */
+  hidden_pages: number[];
+  /** Pages nobody checked: ChatGPT read their extracted text as it is. */
+  unchecked_pages: number[];
+  /** Why pages remain unchecked (Catalan); null when none does. */
+  reason: string | null;
 }
 
 /** Attachments of one message. */
@@ -272,6 +316,11 @@ export interface MessageMeta {
    * "interrupted" or a provider-specific string. Set when relevant (a truncated answer).
    */
   finish_reason?: string;
+  /**
+   * ChatGPT's messages (answers, revisions, synthesis) of a question with PDFs when it
+   * cannot open them: how it read each one, in the order of the attachments.
+   */
+  pdf_reading?: PdfReading[];
   [key: string]: unknown;
 }
 
@@ -397,6 +446,26 @@ export type TurnEvent =
     })
   | (TurnEventBase & { type: 'phase'; phase: Phase; round: number })
   | (TurnEventBase & {
+      /**
+       * Claude's check of a PDF of the question for ChatGPT with the subscription: "checking"
+       * when it starts (never for a check an earlier turn stored), then "checked" or
+       * "unchecked". Its pages as in PdfReading.
+       */
+      type: 'pdf.check';
+      attachment_id: number;
+      name: string;
+      state: PdfCheckState;
+      claude_pages: number[];
+      hidden_pages: number[];
+      unchecked_pages: number[];
+      /** An earlier turn's check, stored: no call was made for it in this turn. */
+      reused: boolean;
+      /** What this turn's calls for the PDF billed, with the cost (null while checking, or reused). */
+      usage: Usage | null;
+      /** Why pages remain unchecked (Catalan); null when none does. */
+      reason: string | null;
+    })
+  | (TurnEventBase & {
       type: 'stream.started';
       stream_id: string;
       agent: Agent;
@@ -421,6 +490,8 @@ export type TurnEvent =
       finish_reason?: string;
       /** Unchanged revision: the model's short note, as the stored `meta.unchanged_note`. */
       unchanged_note?: string;
+      /** ChatGPT when it cannot open PDFs: how it read each one, as the stored `meta.pdf_reading`. */
+      pdf_reading?: PdfReading[];
     })
   | (TurnEventBase & {
       type: 'stream.failed';

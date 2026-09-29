@@ -91,7 +91,7 @@ async def test_version_1_databases_are_migrated(tmp_path: Path) -> None:
 
     db = await Database.open(path)
     try:
-        assert await db.schema_version() == SCHEMA_VERSION == 4
+        assert await db.schema_version() == SCHEMA_VERSION == 5
         async with db.transaction(write=False) as tx:
             rows = await tx.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
             row = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
@@ -145,7 +145,7 @@ async def test_version_2_savings_get_their_value_from_the_turns_meta(tmp_path: P
 
     async with await SqliteStore.open(path) as store:
         async with store._db.transaction(write=False) as tx:
-            assert await tx.user_version() == SCHEMA_VERSION == 4
+            assert await tx.user_version() == SCHEMA_VERSION == 5
             rows = await tx.fetchall("SELECT turn_id, kind, cost_usd FROM savings ORDER BY id")
         assert [tuple(row) for row in rows] == [
             (1, "compaction", 0.004),

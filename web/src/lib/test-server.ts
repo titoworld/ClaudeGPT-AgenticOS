@@ -10,6 +10,7 @@ import {
   type AttachmentKind,
   type ConversationDetail,
   type ConversationSummary,
+  type Message,
   type ModelCatalog,
   type MonthSpend,
   type Pricing,
@@ -81,6 +82,8 @@ export class FakeApi {
   providers: ProviderStatus[] = [];
   /** GET /api/conversations (every page) and, by id, GET/PATCH/DELETE /api/conversations/{id}. */
   conversations: ConversationSummary[] = [];
+  /** The stored messages of GET /api/conversations/{id}, by conversation id (none by default). */
+  readonly messages = new Map<number, Message[]>();
   /** GET /api/spend; null answers 503. */
   spend: MonthSpend | null = null;
   /** GET /api/models; null answers 503. */
@@ -148,6 +151,8 @@ export class FakeApi {
       has_thumbnail: false,
       text_available: kind !== 'image',
       estimated_tokens: kind === 'image' ? 414 : kind === 'pdf' ? 3600 : Math.ceil(body.length / 4),
+      // Every PDF is analysed: without warnings unless a test says otherwise.
+      pdf_notes: kind === 'pdf' ? { no_text: [], garbled: [], hidden: [] } : null,
       ...this.describeUpload?.(name, body),
     };
   }
@@ -231,7 +236,7 @@ export class FakeApi {
     if (!summary) return json({ detail: 'La conversa no existeix.' }, 404);
     switch (method) {
       case 'GET':
-        return json({ ...summary, summary: null, messages: [] } satisfies ConversationDetail);
+        return json({ ...summary, summary: null, messages: this.messages.get(id) ?? [] } satisfies ConversationDetail);
       case 'PATCH': {
         const { title } = JSON.parse(String(init.body)) as { title: string };
         const renamed = { ...summary, title };

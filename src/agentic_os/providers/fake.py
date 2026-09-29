@@ -11,6 +11,11 @@ also ask for truncated replies or refusals per call purpose.
 
 Attachments are recorded (``attachments``, one tuple per call) and never read; answers
 and syntheses name them, and their estimated tokens count in the input usage.
+
+Claude's check of a PDF for ChatGPT (purpose "check", docs/adr/0009-adjunts.md) replies
+with the test's ``check_replies`` in turn, or says every page is right (``{"end": true}``).
+A fake can report another ``mode``, so that a test has a ChatGPT that cannot open PDFs
+(mode "cli", like Codex) without any process.
 """
 
 from __future__ import annotations
@@ -52,6 +57,8 @@ _ATTACHMENTS_REFERENCE = re.compile(r"\A\[Adjunts: [^\n]*\]\n")
 _WORD_RE = re.compile(r"\S+\s*|\s+")
 _CHARS_PER_TOKEN = 4
 REFUSAL_TEXT = "No puc ajudar amb aquesta petició."
+CHECK_REPLY = '{"end": true}'
+"""The default reply of a check call: every page's extracted text is right."""
 
 
 def _estimate(text: str) -> int:
@@ -89,7 +96,11 @@ class FakeProvider:
 
     ``fail`` makes the calls of those purposes fail; ``truncate`` cuts their reply in
     half (a truncated result); ``refuse`` makes them raise :class:`RefusalError` with
-    the billed usage, after streaming ``refuse_after`` chunks."""
+    the billed usage, after streaming ``refuse_after`` chunks.
+
+    ``mode`` is the mode it reports (``"fake"`` by default). ``check_replies`` are the
+    replies of its successive "check" calls (the last one repeats; by default
+    :data:`CHECK_REPLY`)."""
 
     def __init__(
         self,
@@ -101,6 +112,8 @@ class FakeProvider:
         truncate: set[Purpose] | None = None,
         refuse: set[Purpose] | None = None,
         refuse_after: int = 0,
+        mode: ProviderMode = "fake",
+        check_replies: Sequence[str] | None = None,
     ) -> None:
         self._agent: AgentName = agent
         self._chunk_delay = chunk_delay
@@ -109,6 +122,9 @@ class FakeProvider:
         self._truncate = frozenset(truncate or ())
         self._refuse = frozenset(refuse or ())
         self._refuse_after = refuse_after
+        self._mode: ProviderMode = mode
+        self._check_replies = tuple(check_replies) if check_replies else (CHECK_REPLY,)
+        self._checks = 0
         self._revisions = 0
         self._revision_question: str | None = None
         self.requests: list[GenerationRequest] = []
@@ -123,7 +139,7 @@ class FakeProvider:
 
     @property
     def mode(self) -> ProviderMode:
-        return "fake"
+        return self._mode
 
     @property
     def model(self) -> str:
@@ -194,7 +210,7 @@ class FakeProvider:
     async def status(self) -> ProviderStatus:
         return ProviderStatus(
             agent=self._agent,
-            mode="fake",
+            mode=self._mode,
             available=True,
             model=self.model,
             detail="Mode demostració",
@@ -223,6 +239,10 @@ class FakeProvider:
     def _compose(self, request: GenerationRequest) -> str:
         if request.purpose == "summary":
             return self._summary(request)
+        if request.purpose == "check":
+            reply = self._check_replies[min(self._checks, len(self._check_replies) - 1)]
+            self._checks += 1
+            return reply
         question = self._question(request.prompt)
         if request.purpose == "revision":
             return self._revision(request.prompt, question)

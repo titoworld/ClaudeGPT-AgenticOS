@@ -18,7 +18,7 @@ import {
   type AttachmentStatus,
   type AttachmentView,
 } from './attachments';
-import { MAX_ATTACHMENTS, type Attachment, type AttachmentKind } from './protocol';
+import { MAX_ATTACHMENTS, type Attachment, type AttachmentKind, type PdfNotes } from './protocol';
 import { toasts } from './toasts.svelte';
 
 type Work = typeof import('./attachment-work');
@@ -94,6 +94,11 @@ export class DraftAttachment implements AttachmentView {
 
   get tokens(): number | null {
     return this.attachment?.estimated_tokens ?? this.estimate;
+  }
+
+  /** The server's analysis of a PDF's pages, once uploaded. */
+  get pdfNotes(): PdfNotes | null {
+    return this.attachment?.pdf_notes ?? null;
   }
 
   fail(err: unknown): void {

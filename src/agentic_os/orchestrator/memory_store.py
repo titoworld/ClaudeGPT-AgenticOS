@@ -23,6 +23,7 @@ from agentic_os.orchestrator.store import (
     StoredMessage,
     UsageRecord,
 )
+from agentic_os.pdf_facts import CHECK_VERSION, PdfCheck, check_from_json
 from agentic_os.providers.base import Attachment
 
 
@@ -51,6 +52,8 @@ class InMemoryStore:
         self.attachments: dict[int, Attachment] = {}
         self.attachment_links: dict[int, tuple[int, ...]] = {}
         """Attachment ids of each question message, in order."""
+        self.pdf_checks: dict[tuple[str, int], str] = {}
+        """Claude's checks of PDFs by (sha256, version), as JSON like the SQLite store."""
         self._next_conversation_id = 1
         self._next_message_id = 1
         self._next_attachment_id = 1
@@ -193,6 +196,14 @@ class InMemoryStore:
             raise ValueError(f"message {message_id} already has attachments")
         self._check_links(ids)
         self.attachment_links[message_id] = tuple(ids)
+
+    async def get_pdf_check(self, sha256: str) -> PdfCheck | None:
+        """The check of the current version, through a JSON round trip (see the
+        protocol)."""
+        return check_from_json(self.pdf_checks.get((sha256, CHECK_VERSION)))
+
+    async def put_pdf_check(self, sha256: str, check: PdfCheck) -> None:
+        self.pdf_checks[(sha256, check.version)] = check.to_json()
 
     def _check_links(self, ids: Sequence[int]) -> None:
         """Each id once, and every one an attachment that exists."""

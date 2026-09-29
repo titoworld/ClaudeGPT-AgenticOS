@@ -192,6 +192,22 @@ describe('Composer: attaching files', () => {
     expect(e.app.composer.attachments.items[0]!.status).toBe('ready');
   });
 
+  it("an uploaded PDF shows the warnings of the server's analysis of its pages", async () => {
+    const { e, root } = await ready();
+    server.describeUpload = (name) =>
+      name === 'escanejat.pdf' ? { pages: 9, pdf_notes: { no_text: [1, 2, 3, 9], garbled: [], hidden: [4] } } : {};
+    choose(root, [new File(['%PDF-1.7\n%âãÏÓ\n'], 'escanejat.pdf', { type: 'application/pdf' }), png()]);
+    // Nothing is known of its pages while it uploads.
+    expect(root.querySelector('.pdf-note')).toBeNull();
+    await settle();
+    const [pdf, image] = cards(root);
+    expect([...pdf!.querySelectorAll('.pdf-note .note-text')].map((n) => e.textOf(n))).toEqual([
+      'Sense text: pàg. 1–3, 9',
+      'Possible text ocult: pàg. 4',
+    ]);
+    expect(image!.querySelector('.pdf-note')).toBeNull();
+  });
+
   it('the remove button takes the card away and deletes the upload', async () => {
     const { e, root } = await ready();
     choose(root, [png()]);

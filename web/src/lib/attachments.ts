@@ -6,7 +6,8 @@
 //   refuse is never uploaded (a large refused upload would only show a network error:
 //   the server answers before it has read it all).
 // - Which images are downscaled before the upload, and how they are encoded.
-// - What an attachment's card says: type, size, pages, estimated tokens.
+// - What an attachment's card says: type, size, pages, estimated tokens (and a PDF's
+//   page warnings: lib/pdf-pages.ts).
 
 import {
   DOWNSCALE_EDGE,
@@ -20,6 +21,7 @@ import {
   TEXT_EXTENSIONS,
   type Attachment,
   type AttachmentKind,
+  type PdfNotes,
 } from './protocol';
 
 /** A file that is refused: `status` is what the server answers for it (413, 415, 422). */
@@ -299,6 +301,8 @@ export interface AttachmentView {
   error: string | null;
   /** Its upload failed for a reason a retry can fix (the connection...). */
   retryable: boolean;
+  /** A PDF the server analysed: the warnings of its pages (lib/pdf-pages.ts says them). */
+  pdfNotes: PdfNotes | null;
 }
 
 /** The card of an uploaded attachment (a question's, or one given back to the composer). */
@@ -317,5 +321,6 @@ export function attachmentView(a: Attachment, lines: string | null = null): Atta
     status: 'ready',
     error: null,
     retryable: false,
+    pdfNotes: a.pdf_notes ?? null,
   };
 }

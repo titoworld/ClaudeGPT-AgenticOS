@@ -11,11 +11,12 @@ from dataclasses import replace
 from agentic_os.domain import AgentName, TurnMode, TurnOptions, Usage
 from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
+from agentic_os.pdf_facts import CHECK_VERSION
 from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import Attachment, AttachmentMode
 from agentic_os.providers.prompt_format import has_text
 
-CACHE_KEY_VERSION = 6
+CACHE_KEY_VERSION = 7
 """Bump when prompts, the replay format or the key itself change, to invalidate old
 entries (2: the question keeps its inner whitespace; 3: earlier entries may hold replies
 that were cut off, duplicated by a Codex retry or mangled by the revision parser, which
@@ -24,7 +25,9 @@ input + output only and hide the attempts declined before a fallback in the serv
 message's usage, so a hit would report a saving with the old token count and value
 the declined tokens at the serving model's rates; 5: the key includes the attachments
 and the system prompt says how to treat them; 6: a file's text is neutralized and
-enclosed, and a PDF without text goes whole to the revisions)."""
+enclosed, and a PDF without text goes whole to the revisions; 7: ChatGPT with the
+subscription reads a PDF's text as Claude checked it, the prompts warn of hidden text and
+say which pages ChatGPT read through Claude, and the key has the check's version)."""
 
 
 def _digest(payload: object) -> str:
@@ -64,10 +67,12 @@ def turn_cache_key(
 
     ``identities`` maps each agent taking part to its provider identity
     (``"<mode>:<model>"``, with the model requested for this turn). The attachments
-    count by content and name (the prompts name them), in order. The solo target, the
-    debate options and ``pdf_in_revisions`` (how the revisions get the PDFs that have
-    text: one without any goes whole) only count where they change what the models get,
-    so irrelevant differences do not cause misses.
+    count by content and name (the prompts name them), in order, and with a PDF the
+    version of Claude's check of its text (``pdf_facts.CHECK_VERSION``: a ChatGPT that
+    cannot open PDFs reads what it found). The solo target, the debate options and
+    ``pdf_in_revisions`` (how the revisions get the PDFs that have text: one without any
+    goes whole) only count where they change what the models get, so irrelevant
+    differences do not cause misses.
     """
     debate = options.debate
     revises_pdf = (
@@ -91,6 +96,11 @@ def turn_cache_key(
             ),
             "question": normalize_question(question),
             "attachments": [[attachment.sha256, attachment.name] for attachment in attachments],
+            "pdf_check": (
+                CHECK_VERSION
+                if any(attachment.kind == "pdf" for attachment in attachments)
+                else None
+            ),
             "pdf_in_revisions": pdf_in_revisions if revises_pdf else None,
             "context": context_fingerprint,
             "providers": {agent: identities[agent] for agent in sorted(identities)},

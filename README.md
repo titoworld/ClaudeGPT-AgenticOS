@@ -18,6 +18,7 @@ El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiq
   - Hi ha memòria cau de torns sencers.
   - Cada estalvi es veu al tauler.
 - **Adjunts al xat:** imatges (PNG, JPEG, GIF, WebP), PDF i fitxers de text, amb miniatures com a claude.ai. Tria'ls, arrossega'ls o enganxa les imatges; cada targeta mostra els tokens estimats abans d'enviar. Els models reben el fitxer mateix (ChatGPT amb la subscripció, el text dels PDF); a les revisions d'un debat, els PDF hi van com a text per estalviar tokens (els escanejats, sencers), si no tries el contrari a la configuració.
+- **PDF contrastats per Claude per a ChatGPT amb la subscripció:** Codex no pot obrir cap PDF i en llegeix el text; Claude el contrasta amb el document i li passa les pàgines escanejades o il·legibles tal com les llegeix, mai el text amagat, i la targeta avisa de les pàgines sospitoses.
 - **Subscripcions via les CLI oficials** (Claude Code i Codex), o claus d'API, o un mode de demostració sense cost.
 - **Model a triar per a cada agent.** Amb claus d'API i amb Codex, la llista es demana en directe al proveïdor, així que els models nous hi surten sols. Amb la CLI de Claude són els àlies `opus`, `sonnet`, `haiku` i `fable`, que sempre apunten a l'última versió. També pots escriure qualsevol identificador.
 - **Tokens i euros:**

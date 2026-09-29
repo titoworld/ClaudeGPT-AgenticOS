@@ -6,6 +6,9 @@ metadata, content, thumbnail and deletion of the files attached to questions.
 - An upload is the raw file as the body. Its type comes from its content, never from
   its name or ``Content-Type``; the body is written to a private temporary file as it
   arrives and cut at the limit of its type (413), which its first bytes decide.
+- A PDF's text and the facts of its pages come from the PDF reader's own process
+  (:class:`~agentic_os.attachments.PdfReader`); its ``Attachment`` carries the warnings
+  of its pages (``pdf_notes``: without text, unreadable, possibly hidden text).
 - Nothing uploaded is ever served as a document of the app's origin except images:
   PDFs and text files are downloads (``Content-Disposition: attachment``), and every
   file carries ``X-Content-Type-Options: nosniff`` and a policy that forbids it any
@@ -117,7 +120,13 @@ async def _store(
         )
     info = await state.pdf.read(upload.path)
     return await store.add_attachment(
-        upload, kind="pdf", mime=found.mime, name=name, pages=info.pages, text=info.text
+        upload,
+        kind="pdf",
+        mime=found.mime,
+        name=name,
+        pages=info.pages,
+        text=info.text,
+        pdf_pages=info.pdf_pages,
     )
 
 

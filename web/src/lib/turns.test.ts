@@ -5,6 +5,7 @@ import {
   keptAnswers,
   latestAgreement,
   mergeTurns,
+  pdfChecks,
   revisionRounds,
   shownSynthesis,
   streamsByAgent,
@@ -17,7 +18,7 @@ import {
   type TurnView,
 } from './turns.svelte';
 import { turnCost } from './costs';
-import type { Attachment } from './protocol';
+import type { Attachment, PdfReading } from './protocol';
 import {
   cancelledDebateEvents,
   cancelledDebateMessages,
@@ -737,6 +738,7 @@ describe('the attachments of a question (docs/PROTOCOL.md «Adjunts»)', () => {
     has_thumbnail: true,
     text_available: false,
     estimated_tokens: 414,
+    pdf_notes: null,
     ...partial,
   });
 
@@ -764,5 +766,231 @@ describe('the attachments of a question (docs/PROTOCOL.md «Adjunts»)', () => {
     ]);
     expect(withBad!.attachments.map((a) => a.id)).toEqual([4]);
     expect(without!.attachments).toEqual([]);
+  });
+
+  it("a stored PDF keeps the warnings of its pages; one stored before the analysis has none", () => {
+    const pdf = (id: number, pdf_notes: unknown) =>
+      ({ ...attachment(id), name: `doc-${id}.pdf`, kind: 'pdf', mime: 'application/pdf', pages: 9, pdf_notes }) as Attachment;
+    const { pdf_notes: _dropped, ...before } = pdf(4, null); // stored before P7b: no key at all
+    const [turn] = turnsFromMessages([
+      message({
+        id: 1, turn_id: 1, kind: 'question', content: 'Llegeix-los', final: true,
+        meta: {
+          mode: 'solo',
+          attachments: [
+            pdf(1, { no_text: [2, 5], garbled: [3], hidden: [7] }),
+            pdf(2, null),
+            before as Attachment,
+            pdf(3, { no_text: [1, 'x', 0, 2.5, 4], garbled: 'no', hidden: null }),
+            { ...attachment(5), pdf_notes: { no_text: [1], garbled: [], hidden: [] } },
+          ],
+        },
+      }),
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'claude', content: 'Fet', final: true }),
+    ]);
+    expect(turn!.attachments.map((a) => a.pdf_notes)).toEqual([
+      { no_text: [2, 5], garbled: [3], hidden: [7] },
+      null,
+      null,
+      { no_text: [1, 4], garbled: [], hidden: [] },
+      null, // an image never has any
+    ]);
+  });
+});
+
+// ------------------------------------------------ Claude's check of the PDFs for ChatGPT (P7b)
+
+const CHECK_USAGE = { ...priced(9000, 700, 0.0123), cache_read_tokens: 2000 };
+
+/** A duel whose question has two PDFs: Claude answers while it checks them for ChatGPT. */
+function checkedDuelEvents(requestId = 'rc'): TurnEvent[] {
+  return sequence(requestId, [
+    { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+    { type: 'phase', phase: 'answer', round: 0 },
+    { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-opus' },
+    {
+      type: 'pdf.check', attachment_id: 7, name: 'informe.pdf', state: 'checking',
+      claude_pages: [], hidden_pages: [], unchecked_pages: [], reused: false, usage: null, reason: null,
+    },
+    // The second one was checked in an earlier turn: no call, no «checking».
+    {
+      type: 'pdf.check', attachment_id: 8, name: 'annex.pdf', state: 'checked',
+      claude_pages: [], hidden_pages: [], unchecked_pages: [], reused: true, usage: null, reason: null,
+    },
+    {
+      type: 'pdf.check', attachment_id: 7, name: 'informe.pdf', state: 'checked',
+      claude_pages: [2, 5], hidden_pages: [5], unchecked_pages: [], reused: false, usage: CHECK_USAGE, reason: null,
+    },
+    { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'gpt-5' },
+  ]);
+}
+
+const pdfAttachment = (id: number, name: string): Attachment => ({
+  id,
+  name,
+  kind: 'pdf',
+  mime: 'application/pdf',
+  size: 120_000,
+  pages: 12,
+  width: null,
+  height: null,
+  sha256: String(id).repeat(64).slice(0, 64),
+  created_at: '2026-09-29T10:00:00Z',
+  has_thumbnail: false,
+  text_available: true,
+  estimated_tokens: 43_200,
+  pdf_notes: { no_text: [], garbled: [], hidden: [] },
+});
+
+describe("Claude's check of the PDFs for ChatGPT (pdf.check)", () => {
+  it('follows each PDF from checking to checked, with what its calls cost', () => {
+    const turn = live('rc');
+    const events = checkedDuelEvents();
+    applyAll(turn, events.slice(0, 4));
+    expect(turn.pdfChecks).toEqual([
+      {
+        attachmentId: 7, name: 'informe.pdf', state: 'checking', claudePages: [], hiddenPages: [], uncheckedPages: [],
+        reused: false, usage: null, reason: null, costBasis: null,
+      },
+    ]);
+    applyAll(turn, events.slice(4));
+    expect(turn.pdfChecks).toEqual([
+      {
+        attachmentId: 7, name: 'informe.pdf', state: 'checked', claudePages: [2, 5], hiddenPages: [5], uncheckedPages: [],
+        reused: false, usage: CHECK_USAGE, reason: null, costBasis: null,
+      },
+      {
+        attachmentId: 8, name: 'annex.pdf', state: 'checked', claudePages: [], hiddenPages: [], uncheckedPages: [],
+        reused: true, usage: null, reason: null, costBasis: null,
+      },
+    ]);
+  });
+
+  it('a PDF nobody could check says why', () => {
+    const turn = live('ru');
+    applyAll(turn, sequence('ru', [
+      { type: 'turn.started', conversation_id: 3, turn_id: 13, mode: 'solo', new_conversation: false },
+      {
+        type: 'pdf.check', attachment_id: 7, name: 'informe.pdf', state: 'unchecked', claude_pages: [], hidden_pages: [],
+        unchecked_pages: [1, 2, 3], reused: false, usage: null, reason: 'Claude no està disponible per contrastar-lo.',
+      },
+    ]));
+    expect(turn.pdfChecks).toMatchObject([
+      { attachmentId: 7, state: 'unchecked', uncheckedPages: [1, 2, 3], reason: 'Claude no està disponible per contrastar-lo.' },
+    ]);
+  });
+
+  it('shows them in the order of the attachments, whatever order they ended in', () => {
+    const turn = createLiveTurn({
+      requestId: 'rc', question: 'Compara-ho', mode: 'duel', conversationId: 3,
+      attachments: [pdfAttachment(8, 'annex.pdf'), pdfAttachment(7, 'informe.pdf')],
+    });
+    applyAll(turn, checkedDuelEvents());
+    expect(pdfChecks(turn).map((c) => c.name)).toEqual(['annex.pdf', 'informe.pdf']);
+    // A replayed turn whose attachments are not known yet: the order they came in.
+    const replayed = live('rc');
+    applyAll(replayed, checkedDuelEvents());
+    expect(pdfChecks(replayed).map((c) => c.name)).toEqual(['informe.pdf', 'annex.pdf']);
+  });
+
+  it('is part of the replay: duplicates are ignored, a replay from the start rebuilds it', () => {
+    const turn = live('rc');
+    const events = checkedDuelEvents();
+    applyAll(turn, events);
+    expect(applyAll(turn, events)).toBe(0);
+    const fresh = live('rc');
+    applyAll(fresh, events);
+    expect(fresh.pdfChecks).toEqual(turn.pdfChecks);
+    expect(turn.pdfChecks).toHaveLength(2);
+  });
+
+  it('a stored turn has none: its ChatGPT messages say how it read the PDFs', () => {
+    const [stored] = turnsFromMessages(debateMessages(), 7);
+    expect(stored!.pdfChecks).toEqual([]);
+  });
+});
+
+describe('how ChatGPT read the PDFs when it cannot open them (meta.pdf_reading)', () => {
+  const READING: PdfReading = {
+    attachment_id: 7,
+    name: 'informe.pdf',
+    checked: true,
+    claude_pages: [2, 5],
+    hidden_pages: [5],
+    unchecked_pages: [],
+    reason: null,
+  };
+  const UNCHECKED: PdfReading = {
+    attachment_id: 8,
+    name: 'annex.pdf',
+    checked: false,
+    claude_pages: [],
+    hidden_pages: [],
+    unchecked_pages: [1, 2],
+    reason: 'La comprovació de Claude ha trigat massa.',
+  };
+
+  const completed = (reading?: PdfReading[]): TurnEvent[] =>
+    sequence('rr', [
+      { type: 'turn.started', conversation_id: 3, turn_id: 14, mode: 'duel', new_conversation: false },
+      { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-opus' },
+      { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'gpt-5' },
+      { type: 'stream.completed', stream_id: 'c', message_id: 15, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null, unchanged: false },
+      {
+        type: 'stream.completed', stream_id: 'g', message_id: 16, usage: usage(10, 5), latency_ms: 1, ttft_ms: 1, agreement: null,
+        unchanged: false, ...(reading ? { pdf_reading: reading } : {}),
+      },
+    ]);
+
+  it('comes with stream.completed of each ChatGPT message, live', () => {
+    const turn = live('rr');
+    applyAll(turn, completed([READING, UNCHECKED]));
+    const { claude, chatgpt } = streamsByAgent(turn, 'answer');
+    expect(chatgpt!.pdfReading).toEqual([READING, UNCHECKED]);
+    expect(claude!.pdfReading).toEqual([]);
+    const plain = live('rr');
+    applyAll(plain, completed());
+    expect(streamsByAgent(plain, 'answer').chatgpt!.pdfReading).toEqual([]);
+  });
+
+  it('is read from the stored meta after a reload, the same as live', () => {
+    const turn = live('rr');
+    applyAll(turn, completed([READING, UNCHECKED]));
+    const [stored] = turnsFromMessages([
+      message({ id: 14, turn_id: 14, kind: 'question', content: 'Pregunta?', final: true, meta: { mode: 'duel' } }),
+      message({ id: 15, turn_id: 14, kind: 'answer', agent: 'claude', content: 'A', final: true, meta: { usage: usage(10, 5) } }),
+      message({ id: 16, turn_id: 14, kind: 'answer', agent: 'chatgpt', content: 'B', final: true, meta: { usage: usage(10, 5), pdf_reading: [READING, UNCHECKED] } }),
+    ]);
+    const reloaded = streamsByAgent(stored!, 'answer');
+    expect(reloaded.chatgpt!.pdfReading).toEqual(streamsByAgent(turn, 'answer').chatgpt!.pdfReading);
+    expect(reloaded.claude!.pdfReading).toEqual([]);
+  });
+
+  it('skips entries it cannot use, and pages that are not page numbers', () => {
+    const [stored] = turnsFromMessages([
+      message({ id: 20, turn_id: 20, kind: 'question', content: 'Q', final: true, meta: { mode: 'solo', target: 'chatgpt' } }),
+      message({
+        id: 21, turn_id: 20, kind: 'answer', agent: 'chatgpt', content: 'A', final: true,
+        meta: {
+          pdf_reading: [
+            { ...READING, claude_pages: [2, '3', 0, 5.5, 5], reason: 7 },
+            { ...READING, attachment_id: 'x' },
+            { ...READING, name: null },
+            { ...READING, checked: 'yes' },
+            null,
+            { attachment_id: 9, name: 'nou.pdf', checked: false },
+          ] as unknown as PdfReading[],
+        },
+      }),
+    ]);
+    expect(stored!.streams[0]!.pdfReading).toEqual([
+      { ...READING, claude_pages: [2, 5], reason: null },
+      { attachment_id: 9, name: 'nou.pdf', checked: false, claude_pages: [], hidden_pages: [], unchecked_pages: [], reason: null },
+    ]);
+    const [none] = turnsFromMessages([
+      message({ id: 30, turn_id: 30, kind: 'question', content: 'Q', final: true, meta: { mode: 'solo' } }),
+      message({ id: 31, turn_id: 30, kind: 'answer', agent: 'chatgpt', content: 'A', final: true, meta: { pdf_reading: 'no' as unknown as PdfReading[] } }),
+    ]);
+    expect(none!.streams[0]!.pdfReading).toEqual([]);
   });
 });

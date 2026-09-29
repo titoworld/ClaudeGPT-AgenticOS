@@ -8,6 +8,7 @@
   import AgreementMeter from './AgreementMeter.svelte';
   import Icon from './Icon.svelte';
   import Markdown from './Markdown.svelte';
+  import PdfReadingBadge from './PdfReadingBadge.svelte';
   import PlainText from './PlainText.svelte';
   import StreamStatus from './StreamStatus.svelte';
   import TruncationNote from './TruncationNote.svelte';
@@ -67,6 +68,9 @@
               <span class="unchanged-note"
                 ><span class="sr-only">Nota del model:</span> «<PlainText text={s.unchangedNote} />»</span>
             {/if}
+          {/if}
+          {#if s?.pdfReading.length}
+            <PdfReadingBadge readings={s.pdfReading} />
           {/if}
           {#if cut}
             <StreamStatus status="truncated" />

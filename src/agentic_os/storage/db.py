@@ -1,7 +1,8 @@
 """SQLite access layer: one aiosqlite connection plus forward-only schema migrations.
 
 The attachments' bytes are not in the database: :mod:`agentic_os.storage.files` keeps
-them next to it, and the ``attachments`` table describes them.
+them next to it, and the ``attachments`` table describes them (with the facts of a PDF's
+pages); ``pdf_checks`` keeps Claude's check of a PDF's text, by content.
 
 The connection also has the SQL functions the queries use: ``aos_fold`` (the
 case- and accent-insensitive form of a text that conversation searches compare, see
@@ -227,7 +228,28 @@ _V4: Final[tuple[str, ...]] = (
     "CREATE INDEX message_attachments_attachment ON message_attachments (attachment_id)",
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3, _V4)
+_V5: Final[tuple[str, ...]] = (
+    # What the PDF reader found on each page of a PDF (P7b of docs/adr/0009-adjunts.md):
+    # a JSON list of pdf_facts.PdfPage. NULL for images, text files and the PDFs that
+    # were not analysed (uploaded before, or the reader could not): those are read as
+    # before, unchecked.
+    "ALTER TABLE attachments ADD COLUMN pdf_pages TEXT",
+    # Claude's check of the text extracted from a PDF (pdf_facts.PdfCheck as JSON), by
+    # content and check version: every later turn and conversation with the same file
+    # reuses it. It goes when no attachment has the content any more.
+    """
+    CREATE TABLE pdf_checks (
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        version INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (sha256, version)
+    )
+    """,
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3, _V4, _V5)
 """Statements of each schema version, oldest first. Append only."""
 
 SCHEMA_VERSION: Final = len(MIGRATIONS)

@@ -249,6 +249,7 @@ describe('what a card says', () => {
       has_thumbnail: true,
       text_available: true,
       estimated_tokens: 43_200,
+      pdf_notes: { no_text: [2, 5], garbled: [], hidden: [7] },
     };
     expect(contentUrl(12)).toBe('/api/attachments/12/content');
     expect(thumbnailUrl(12)).toBe('/api/attachments/12/thumbnail');
@@ -263,8 +264,10 @@ describe('what a card says', () => {
       lines: null,
       status: 'ready',
       error: null,
+      pdfNotes: { no_text: [2, 5], garbled: [], hidden: [7] },
     });
     expect(attachmentView({ ...attachment, has_thumbnail: false }).thumbnail).toBeNull();
+    expect(attachmentView({ ...attachment, pdf_notes: null }).pdfNotes).toBeNull();
   });
 
   it('the file picker offers what the server takes', () => {

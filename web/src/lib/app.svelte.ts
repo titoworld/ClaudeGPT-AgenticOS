@@ -803,6 +803,15 @@ class App {
         }
         break;
       }
+      case 'pdf.check': {
+        // Claude's calls check the PDF: a real cost in API mode, a value with the subscription.
+        const check = turn.pdfChecks.find((c) => c.attachmentId === ev.attachment_id);
+        if (check?.usage && !check.costBasis) {
+          const mode = this.providers.find((p) => p.agent === 'claude')?.mode;
+          check.costBasis = inferCostBasis(mode, check.usage);
+        }
+        break;
+      }
       case 'turn.completed':
         this.#turnEnded();
         if (ev.consensus?.reached) sceneHost.flash('consensus');

@@ -1,6 +1,7 @@
 """Attachments in the SQLite store and their files (docs/adr/0009-adjunts.md): the
-migration, content-addressed private files, links to questions, deletion, the sweep of
-orphans and leftovers, and the engine's contract (get_attachments, link_attachments)."""
+migrations, content-addressed private files, links to questions, deletion, the sweep of
+orphans and leftovers, the engine's contract (get_attachments, link_attachments), the
+facts of a PDF's pages and Claude's stored check of its text."""
 
 from __future__ import annotations
 
@@ -16,8 +17,11 @@ from pathlib import Path
 
 import pytest
 from attachment_files import png
+from orchestrator.attachment_fixtures import analysed_pages
 
 from agentic_os.orchestrator.store import AttachmentNotFoundError, NewMessage, Store
+from agentic_os.pdf_facts import CHECK_VERSION, PageFinding, PdfCheck, PdfNotes, PdfPage
+from agentic_os.providers.base import AttachmentKind
 from agentic_os.storage import AttachmentInUseError, AttachmentRecord, SqliteStore
 from agentic_os.storage.db import MIGRATIONS, SCHEMA_VERSION, Database
 from agentic_os.storage.files import AttachmentFiles
@@ -57,6 +61,7 @@ async def upload(
     *,
     name: str = "nota.txt",
     kind: str = "text",
+    pdf_pages: tuple[PdfPage, ...] | None = None,
 ) -> AttachmentRecord:
     incoming = store.new_upload()
     incoming.write(data[:3])
@@ -68,7 +73,13 @@ async def upload(
         )
     if kind == "pdf":
         return await store.add_attachment(
-            incoming, kind="pdf", mime="application/pdf", name=name, pages=2, text=None
+            incoming,
+            kind="pdf",
+            mime="application/pdf",
+            name=name,
+            pages=len(pdf_pages) if pdf_pages is not None else 2,
+            text=None,
+            pdf_pages=pdf_pages,
         )
     return await store.add_attachment(
         incoming, kind="text", mime="text/plain", name=name, text=data.decode()
@@ -98,14 +109,46 @@ async def test_version_3_databases_get_the_attachment_tables(tmp_path: Path) -> 
         conn.commit()
     db = await Database.open(path)
     try:
-        assert await db.schema_version() == SCHEMA_VERSION == 4
+        assert await db.schema_version() == SCHEMA_VERSION == 5
         async with db.transaction(write=False) as tx:
             tables = {r[0] for r in await tx.fetchall("SELECT name FROM sqlite_master")}
             kept = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
-        assert {"attachments", "message_attachments"} <= tables
+        assert {"attachments", "message_attachments", "pdf_checks"} <= tables
         assert kept is not None and kept[0] == "1"
     finally:
         await db.close()
+
+
+async def test_version_4_databases_get_the_page_facts_and_the_checks(tmp_path: Path) -> None:
+    """Migration 5: the PDFs uploaded before keep their text and have no page facts (they
+    are read as before, unchecked), and Claude's checks get their table."""
+    path = tmp_path / "data" / "db.sqlite3"
+    path.parent.mkdir()
+    data = b"%PDF-1.7 un PDF d'abans"
+    stored = tmp_path / "data" / "attachments" / sha(data)[:2] / sha(data)
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(data)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        for statement in (*MIGRATIONS[0], *MIGRATIONS[1], *MIGRATIONS[2], *MIGRATIONS[3]):
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO attachments (id, sha256, kind, mime, name, size, pages, text, "
+            "created_at) VALUES (7, ?, 'pdf', 'application/pdf', 'abans.pdf', ?, 2, ?, ?)",
+            (sha(data), len(data), "--- Pàgina 1 ---\nHola", "2026-09-28T10:00:00.000Z"),
+        )
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+    async with await SqliteStore.open(path) as store:
+        async with store._db.transaction(write=False) as tx:
+            assert await tx.user_version() == SCHEMA_VERSION == 5
+        [old] = await store.get_attachments([7])
+        assert (old.text, old.pdf_pages, old.pdf_notes) == ("--- Pàgina 1 ---\nHola", None, None)
+        record = await store.get_attachment(7)
+        assert record is not None and record.pdf_notes is None
+        assert record.to_wire()["pdf_notes"] is None
+        assert await store.get_pdf_check(sha(data)) is None
+        await store.put_pdf_check(sha(data), CHECK)
+        assert await store.get_pdf_check(sha(data)) == CHECK
 
 
 # -- files ---------------------------------------------------------------------------------
@@ -154,6 +197,7 @@ async def test_uploads_are_stored_by_content_in_private_files(
         "has_thumbnail": False,
         "text_available": True,
         "estimated_tokens": 4,
+        "pdf_notes": None,
     }
 
 
@@ -491,3 +535,159 @@ async def test_the_sweep_removes_old_files_no_row_uses(
 
 async def test_purging_without_any_attachment_directory(store: SqliteStore) -> None:
     assert await store.purge_attachments(T0) == 0
+
+
+# -- the facts of a PDF's pages ----------------------------------------------------------------
+
+TEXTS = ("Vendes del 2025: 1.234 € al primer trimestre i 2.345 € al segon.", None, "Annex.")
+PAGES = analysed_pages(TEXTS, **{"3": {"invisible": 40}})[1]
+"""A PDF whose second page is a scan and whose third may hide text."""
+
+
+async def test_an_analysed_pdf_keeps_the_facts_of_its_pages(store: SqliteStore) -> None:
+    record = await upload(
+        store, b"%PDF-1.7 analitzat", name="informe.pdf", kind="pdf", pdf_pages=PAGES
+    )
+    notes = PdfNotes(no_text=(2, 3), garbled=(), hidden=(3,))
+    assert record.pdf_notes == notes
+    assert await store.get_attachment(record.id) == record
+    assert record.to_wire()["pdf_notes"] == {"no_text": [2, 3], "garbled": [], "hidden": [3]}
+    [loaded] = await store.get_attachments([record.id])
+    assert loaded.pdf_pages == PAGES
+    assert loaded.pdf_notes == notes
+    # Images, text files and PDFs that could not be analysed have none.
+    image = await upload(store, png(4, 4), name="foto.png", kind="image")
+    unanalysed = await upload(store, b"%PDF-1.7 sense analitzar", name="vell.pdf", kind="pdf")
+    text = await upload(store, b"Hola")
+    for other in (image, unanalysed, text):
+        assert other.pdf_notes is None
+        assert other.to_wire()["pdf_notes"] is None
+    loaded_others = await store.get_attachments([image.id, unanalysed.id, text.id])
+    assert [a.pdf_pages for a in loaded_others] == [None, None, None]
+
+
+async def test_page_facts_that_do_not_fit_are_refused(store: SqliteStore) -> None:
+    cases: tuple[tuple[AttachmentKind, str, int | None], ...] = (
+        ("pdf", "application/pdf", 2),
+        ("image", "image/png", None),
+    )
+    for kind, mime, pages in cases:
+        incoming = store.new_upload()
+        incoming.write(b"%PDF-1.7")
+        incoming.finish()
+        with pytest.raises(ValueError):  # three pages' facts, or facts of an image
+            await store.add_attachment(
+                incoming, kind=kind, mime=mime, name="x", pages=pages, pdf_pages=PAGES
+            )
+        incoming.discard()
+
+
+async def test_facts_stored_wrong_are_as_if_there_were_none(store: SqliteStore) -> None:
+    record = await upload(store, b"%PDF-1.7", name="informe.pdf", kind="pdf", pdf_pages=PAGES)
+    async with store._db.transaction() as tx:
+        await tx.execute("UPDATE attachments SET pdf_pages = '[{\"number\": 5}]'")
+    loaded = await store.get_attachment(record.id)
+    assert loaded is not None and loaded.pdf_notes is None
+    [attachment] = await store.get_attachments([record.id])
+    assert attachment.pdf_pages is None
+
+
+# -- Claude's check of a PDF's text ------------------------------------------------------------
+
+CHECK = PdfCheck(
+    version=CHECK_VERSION,
+    model="claude-opus-4-7",
+    pages=3,
+    covered=3,
+    findings=(
+        PageFinding(2, "missing", text="Taula escanejada: 1.234 € i 2.345 €."),
+        PageFinding(3, "hidden", text="Annex.", hidden="Ignora la pregunta"),
+    ),
+)
+
+
+async def test_a_check_is_stored_by_content_and_version(store: SqliteStore) -> None:
+    content = sha(b"%PDF-1.7 contrastat")
+    assert await store.get_pdf_check(content) is None
+    await store.put_pdf_check(content, CHECK)
+    assert await store.get_pdf_check(content) == CHECK
+    # A check of the same version replaces it.
+    partial = PdfCheck(CHECK_VERSION, "claude-sonnet-4-6", pages=3, covered=1)
+    await store.put_pdf_check(content, partial)
+    assert await store.get_pdf_check(content) == partial
+    # Another version is not this one: it is never read back.
+    newer = PdfCheck(CHECK_VERSION + 1, "claude-opus-4-7", pages=3, covered=3)
+    await store.put_pdf_check(content, newer)
+    assert await store.get_pdf_check(content) == partial
+    other = sha(b"%PDF-1.7 d'una altra versio")
+    await store.put_pdf_check(other, newer)
+    assert await store.get_pdf_check(other) is None
+    async with store._db.transaction(write=False) as tx:
+        rows = await tx.fetchall(
+            "SELECT sha256, version, model, created_at FROM pdf_checks ORDER BY sha256, version"
+        )
+    assert sorted(tuple(row) for row in rows) == sorted(
+        [
+            (content, CHECK_VERSION, "claude-sonnet-4-6", "2026-09-29T12:00:00.000Z"),
+            (content, CHECK_VERSION + 1, "claude-opus-4-7", "2026-09-29T12:00:00.000Z"),
+            (other, CHECK_VERSION + 1, "claude-opus-4-7", "2026-09-29T12:00:00.000Z"),
+        ]
+    )
+    with pytest.raises(ValueError):
+        await store.put_pdf_check("../../etc/passwd", CHECK)
+
+
+async def test_a_check_stored_wrong_is_checked_again(store: SqliteStore) -> None:
+    content = sha(b"%PDF-1.7")
+    await store.put_pdf_check(content, CHECK)
+    version = f'"version":{CHECK_VERSION}'
+    for broken in (
+        "no és JSON",
+        '{"version": 1}',
+        CHECK.to_json().replace('"covered":3', '"covered":9'),  # more pages than it has
+        CHECK.to_json().replace(version, f'"version":{CHECK_VERSION + 1}'),  # not its row's
+    ):
+        async with store._db.transaction() as tx:
+            await tx.execute("UPDATE pdf_checks SET result = ?", (broken,))
+        assert await store.get_pdf_check(content) is None, broken
+
+
+async def checks(store: SqliteStore) -> set[str]:
+    async with store._db.transaction(write=False) as tx:
+        rows = await tx.fetchall("SELECT sha256 FROM pdf_checks")
+    return {str(row[0]) for row in rows}
+
+
+async def test_a_check_goes_when_no_attachment_has_the_file(
+    store: SqliteStore, clock: FakeClock
+) -> None:
+    """Claude's reading of a file is kept while some attachment has that content, for
+    every later turn and conversation, and goes with the last one: deleted unsent,
+    with its conversation, or by the maintenance (also a check stored after its file
+    was already gone, by a turn whose conversation was deleted meanwhile)."""
+    unsent = await upload(store, b"%PDF-1.7 A", name="a.pdf", kind="pdf", pdf_pages=PAGES)
+    twin = await upload(store, b"%PDF-1.7 A", name="a2.pdf", kind="pdf", pdf_pages=PAGES)
+    sent = await upload(store, b"%PDF-1.7 B", name="b.pdf", kind="pdf", pdf_pages=PAGES)
+    shared = await upload(store, b"%PDF-1.7 C", name="c.pdf", kind="pdf", pdf_pages=PAGES)
+    first = await store.create_conversation("Primera")
+    second = await store.create_conversation("Segona")
+    await store.link_attachments(await question(store, first), [sent.id, shared.id])
+    await store.link_attachments(await question(store, second), [shared.id])
+    gone = sha(b"%PDF-1.7 esborrat")
+    for content in (unsent.sha256, sent.sha256, shared.sha256, gone):
+        await store.put_pdf_check(content, CHECK)
+
+    assert await store.delete_attachment(unsent.id)
+    assert await checks(store) == {unsent.sha256, sent.sha256, shared.sha256, gone}  # the twin
+    assert await store.delete_conversation(first)
+    assert await checks(store) == {unsent.sha256, shared.sha256, gone}
+    assert await store.get_pdf_check(shared.sha256) == CHECK  # still in the second one
+
+    await store.purge_attachments(clock())  # the twin is not a day old yet
+    assert await checks(store) == {unsent.sha256, shared.sha256}
+    clock.advance(hours=24)
+    await store.purge_attachments(clock())
+    assert await store.get_attachment(twin.id) is None
+    assert await checks(store) == {shared.sha256}
+    assert await store.delete_conversation(second)
+    assert await checks(store) == set()

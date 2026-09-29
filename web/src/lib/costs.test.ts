@@ -47,6 +47,7 @@ function stream(partial: Partial<StreamView>): StreamView {
     finishReason: null,
     unchangedNote: null,
     degraded: false,
+    pdfReading: [],
     ...partial,
   };
 }

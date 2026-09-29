@@ -26,7 +26,7 @@
 Per decidir amb el propietari segons l'ús real:
 
 - [x] Adjunts a les preguntes: imatges, PDF i fitxers de text, amb miniatures, a tots els modes ([ADR 0009](adr/0009-adjunts.md))
-- [ ] PDF per a ChatGPT amb la subscripció: el text extret, contrastat per Claude (P7b, [ADR 0009](adr/0009-adjunts.md))
+- [x] PDF per a ChatGPT amb la subscripció: el text extret, contrastat per Claude, i avisos de les pàgines sense text, il·legibles o amb text amagat (P7b, [ADR 0009](adr/0009-adjunts.md))
 - [ ] Exportar converses (Markdown/PDF)
 - [ ] Avisos quan una finestra de subscripció o el pressupost s'acosta al límit (correu o Telegram)
 - [ ] Plantilles de consell per a tasques habituals (revisar codi, redactar, investigar)

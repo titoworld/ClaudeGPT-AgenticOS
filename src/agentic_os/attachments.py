@@ -11,6 +11,11 @@
   huge PDF cannot stall or exhaust the server; the server process itself never parses
   a PDF. If the container runs out of memory anyway, the reader is the process the
   kernel kills first (:data:`OOM_SCORE_ADJ`).
+- In the same pass as the text, the reader analyses every page (:class:`PageSigns`):
+  where its text is in the stored text, its letters and broken characters, whether it
+  draws an image, and the text it shows invisibly, smaller than a point or off its
+  visible box (``pdf_facts.PdfPage``). Claude's check of the text that ChatGPT with
+  the subscription reads starts from these facts.
 - The display name of an upload is sanitized: no path, no control or invisible format
   characters (bidirectional overrides...), bounded length.
 - ``estimated_tokens``: an approximation shown before sending (see :func:`estimate_tokens`).
@@ -30,9 +35,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from agentic_os.orchestrator.store import JsonValue
+from agentic_os.pdf_facts import PdfNotes, PdfPage, pages_from_data
 from agentic_os.providers.base import Attachment, AttachmentKind
 
 # -- limits ------------------------------------------------------------------------------
@@ -89,6 +95,17 @@ OOM_SCORE_ADJ: Final = 1000
 MAX_PDF_TEXT_CHARS: Final = 1_000_000
 """Characters of the text kept from a PDF (about 250 000 tokens): beyond it the text is
 cut, with a notice at the end."""
+TINY_POINTS: Final = 1.0
+"""Text shown smaller than this many points, every scale it is drawn with included,
+cannot be read on the page."""
+OFFPAGE_MARGIN: Final = 1.0
+"""Points outside a page's visible box beyond which the origin of a text is off the page."""
+INVISIBLE_MODES: Final = frozenset({3, 7})
+"""Text render modes that paint nothing: 3 (neither fill nor stroke) and 7 (only add to
+the clipping path)."""
+MAX_FORM_DEPTH: Final = 5
+"""Levels of forms (a form drawn by a form...) in whose resources a page's images are
+looked for."""
 
 # Token estimate (approximate, shown on the attachment card before sending).
 IMAGE_TOKEN_PATCH: Final = 28
@@ -511,9 +528,14 @@ def attachment_wire(
     created_at: datetime | None,
     has_thumbnail: bool,
     text_chars: int | None,
+    pdf_notes: PdfNotes | None = None,
 ) -> dict[str, JsonValue]:
     """``Attachment`` of docs/PROTOCOL.md. ``text_chars`` are the characters of the
-    stored text (a text file's content, a PDF's extracted text), ``None`` without one."""
+    stored text (a text file's content, a PDF's extracted text), ``None`` without one;
+    ``pdf_notes``, the warnings of an analysed PDF's pages (``None`` for anything else)."""
+    notes: JsonValue = None
+    if pdf_notes is not None:
+        notes = {kind: list(pages) for kind, pages in pdf_notes.to_wire().items()}
     return {
         "id": attachment_id,
         "name": name,
@@ -530,12 +552,13 @@ def attachment_wire(
         "estimated_tokens": estimate_tokens(
             kind, width=width, height=height, pages=pages, chars=text_chars
         ),
+        "pdf_notes": notes,
     }
 
 
 def snapshot(attachment_id: int, attachment: Attachment) -> dict[str, JsonValue]:
     """The ``Attachment`` wire of an attachment the store gave the engine (the question's
-    ``meta.attachments``)."""
+    ``meta.attachments``), with the notes of an analysed PDF's pages."""
     return attachment_wire(
         attachment_id,
         name=attachment.name,
@@ -549,6 +572,7 @@ def snapshot(attachment_id: int, attachment: Attachment) -> dict[str, JsonValue]
         created_at=attachment.created_at,
         has_thumbnail=attachment.has_thumbnail,
         text_chars=len(attachment.text) if attachment.text is not None else None,
+        pdf_notes=attachment.pdf_notes,
     )
 
 
@@ -561,6 +585,9 @@ class PdfInfo:
     text: str | None
     """The extracted text, one block per page introduced by «--- Pàgina N ---»; ``None``
     when it could not be extracted or no page has any (a scanned PDF)."""
+    pdf_pages: tuple[PdfPage, ...] | None = None
+    """What the reader found on each page (``text[start:end]`` is a page's text); ``None``
+    when the PDF could not be analysed (it is then read as before, unchecked)."""
 
 
 def page_header(number: int) -> str:
@@ -578,18 +605,394 @@ def clean_text(text: str) -> str:
     return fixed.replace("\x00", "")
 
 
-def _page_texts(pages: Sequence[str], limit: int) -> str | None:
-    """The text of a PDF from the text of each page (see :class:`PdfInfo`)."""
-    if not any(text.strip() for text in pages):
+Span = tuple[int | None, int | None, bool]
+"""Where a page's text is in a PDF's stored text: ``start``, ``end`` (``None`` when none of
+it is stored) and whether the text's limit cut any of it off (``pdf_facts.PdfPage``)."""
+
+
+class StoredText:
+    """The stored text of a PDF, built page by page: a block per page, «--- Pàgina N ---»
+    and the page's text (without the line breaks it starts with or the white space it
+    ends with), blocks apart by a blank line, and the whole cut at ``limit`` characters
+    with :func:`cut_notice`. Once past the limit a page's text is no longer kept (only
+    whether it had any), so a PDF of long pages does not fill the reader's memory."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._blocks: list[str] = []
+        self._length = 0
+        """Characters of the blocks kept, joined."""
+        self._spans: list[tuple[int, int] | None] = []
+        self._lost: list[bool] = []
+        """Pages with text that came after the limit."""
+
+    def add(self, text: str) -> None:
+        """The next page's extracted text."""
+        body = text.lstrip("\r\n").rstrip()
+        if self._length > self._limit:
+            self._spans.append(None)
+            self._lost.append(bool(body))
+            return
+        header = f"{page_header(len(self._spans) + 1)}\n"
+        start = self._length + (2 if self._blocks else 0) + len(header)
+        self._blocks.append(header + body)
+        self._length = start + len(body)
+        self._spans.append((start, start + len(body)) if body else None)
+        self._lost.append(False)
+
+    def finish(self) -> tuple[str | None, list[Span]]:
+        """The stored text (``None`` when no page has any) and each page's :data:`Span`:
+        the page the cut goes through ends at it, and the later ones are not stored."""
+        if not any(self._lost) and all(span is None for span in self._spans):
+            return None, [(None, None, False)] * len(self._spans)
+        text = "\n\n".join(self._blocks)
+        kept = len(text)
+        if kept > self._limit:
+            kept = len(text[: self._limit].rstrip())
+            text = f"{text[:kept]}\n\n{cut_notice(self._limit)}"
+        spans: list[Span] = []
+        for span, lost in zip(self._spans, self._lost, strict=True):
+            if span is None:
+                spans.append((None, None, lost))
+            elif span[1] <= kept:
+                spans.append((span[0], span[1], False))
+            elif span[0] < kept:
+                spans.append((span[0], kept, True))
+            else:
+                spans.append((None, None, True))
+        return text, spans
+
+
+def text_counts(text: str) -> tuple[int, int, int]:
+    """Characters of a page's extracted text other than white space, its letters, and
+    its broken characters: U+FFFD, private-use characters, lone surrogates and control
+    characters other than tab and line breaks (what a font without a usable character
+    map yields)."""
+    chars = letters = garbage = 0
+    for char in text:
+        if not char.isspace():
+            chars += 1
+        if char.isalpha():
+            letters += 1
+        elif char == "\ufffd":
+            garbage += 1
+        else:
+            category = unicodedata.category(char)
+            if category in ("Co", "Cs") or (category == "Cc" and char not in "\t\n\r"):
+                garbage += 1
+    return chars, letters, garbage
+
+
+# What the reader's page analysis walks is pypdf's objects (only ever imported in the
+# reader's process): it reads them as plain dictionaries, lists and numbers, resolving
+# indirect references, and never trusts their shape.
+
+Matrix = tuple[float, float, float, float, float, float]
+"""A PDF matrix ``[a b c d e f]``, of row vectors: a point ``(x, y)`` goes to
+``(a·x + c·y + e, b·x + d·y + f)``."""
+IDENTITY: Final[Matrix] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+Box = tuple[float, float, float, float]
+"""Left, bottom, right and top of a rectangle, in points."""
+_SHOWING: Final = frozenset({b"Tj", b"TJ", b"'", b'"'})
+"""The operators that show text."""
+_INLINE_IMAGES: Final = frozenset({b"BI", b"INLINE IMAGE"})
+
+
+def multiply(first: Sequence[float], second: Sequence[float]) -> Matrix:
+    """The matrix that applies ``first`` and then ``second``."""
+    a, b, c, d, e, f = first[:6]
+    g, h, i, j, k, m = second[:6]
+    return (
+        a * g + b * i,
+        a * h + b * j,
+        c * g + d * i,
+        c * h + d * j,
+        e * g + f * i + k,
+        e * h + f * j + m,
+    )
+
+
+def _resolved(value: object) -> object:
+    """A PDF object itself, not the indirect reference to it."""
+    get_object = getattr(value, "get_object", None)
+    return get_object() if callable(get_object) else value
+
+
+def _entry(mapping: object, key: object) -> object:
+    """``mapping[key]`` of a PDF dictionary, resolved; ``None`` when it is not one or has
+    no such entry."""
+    if not isinstance(mapping, dict):
         return None
-    blocks = [
-        f"{page_header(number)}\n{text.lstrip(chr(13) + chr(10)).rstrip()}"
-        for number, text in enumerate(pages, 1)
+    return _resolved(mapping.get(key))
+
+
+def _numbers(value: object, count: int) -> list[float] | None:
+    """The ``count`` finite numbers of a PDF array, or ``None``."""
+    value = _resolved(value)
+    if not isinstance(value, (list, tuple)) or len(value) != count:
+        return None
+    numbers: list[float] = []
+    for item in value:
+        item = _resolved(item)
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            return None
+        try:
+            number = float(item)
+        except OverflowError:  # an integer too long for a float
+            return None
+        if not math.isfinite(number):
+            return None
+        numbers.append(number)
+    return numbers
+
+
+def _matrix(value: object) -> Matrix:
+    """A form's ``/Matrix`` (the identity when it has none, or not a valid one)."""
+    numbers = _numbers(value, 6)
+    if numbers is None:
+        return IDENTITY
+    a, b, c, d, e, f = numbers
+    return (a, b, c, d, e, f)
+
+
+def _box(value: object) -> Box | None:
+    numbers = _numbers(value, 4)
+    if numbers is None:
+        return None
+    left, bottom, right, top = numbers
+    return (min(left, right), min(bottom, top), max(left, right), max(bottom, top))
+
+
+def visible_box(page: Any) -> Box | None:
+    """The part of a page a viewer shows: its crop box within its media box (``None``
+    when the page does not say)."""
+    try:
+        crop = _box(list(page.cropbox))
+    except Exception:
+        crop = None
+    try:
+        media = _box(list(page.mediabox))
+    except Exception:
+        media = None
+    if crop is None or media is None:
+        return crop or media
+    return (
+        max(crop[0], media[0]),
+        max(crop[1], media[1]),
+        min(crop[2], media[2]),
+        min(crop[3], media[3]),
+    )
+
+
+def has_images(resources: object, depth: int = 0, seen: set[int] | None = None) -> bool:
+    """Whether a page's (or a form's) resources have an image, their own or one of their
+    forms' (:data:`MAX_FORM_DEPTH` levels down): a page that draws a scan or a picture.
+    It counts the images a page could draw, which is enough to tell a scan with its
+    recognized text in an invisible layer from a page that hides text."""
+    seen = set() if seen is None else seen
+    xobjects = _entry(_resolved(resources), "/XObject")
+    if not isinstance(xobjects, dict) or id(xobjects) in seen:
+        return False
+    seen.add(id(xobjects))
+    for value in list(xobjects.values()):
+        xobject = _resolved(value)
+        subtype = _entry(xobject, "/Subtype")
+        if subtype == "/Image":
+            return True
+        if (
+            subtype == "/Form"
+            and depth < MAX_FORM_DEPTH
+            and has_images(_entry(xobject, "/Resources"), depth + 1, seen)
+        ):
+            return True
+    return False
+
+
+def shown_characters(operands: object) -> int:
+    """Characters a text-showing operator shows: its string operands, and the strings of
+    a ``TJ`` array (approximate: a two-byte font counts each character twice)."""
+    if not isinstance(operands, list):
+        return 0
+    count = 0
+    for operand in operands:
+        if isinstance(operand, (str, bytes)):
+            count += len(operand)
+        elif isinstance(operand, list):
+            count += sum(len(item) for item in operand if isinstance(item, (str, bytes)))
+    return count
+
+
+@dataclass(frozen=True, slots=True)
+class _Drawing:
+    """What a ``Do`` saves (a form is drawn as if between ``q`` and ``Q``), and the
+    resources and matrix of the stream that draws it."""
+
+    mode: int
+    size: float
+    depth: int
+    floor: int
+    resources: object
+    base: Matrix
+
+
+class PageSigns:
+    """The signs of text that a page does not show, gathered while pypdf extracts its
+    text (``extract_text``'s operator visitors: :meth:`before` and :meth:`after` each
+    operator).
+
+    It follows what pypdf's extraction does not: the text render mode and the font
+    size, which ``q`` saves and ``Q`` restores; and the matrix each form is drawn with
+    (pypdf reads a form's content from its own origin). A form is drawn as if between
+    ``q`` and ``Q``: its state stays inside it, and it cannot restore more states than
+    it saved. Every character a text-showing operator shows counts as ``invisible`` in
+    a render mode that paints nothing, else as ``tiny`` when its size, every scale
+    included, is under :data:`TINY_POINTS`; and as ``offpage`` when the text's origin is
+    more than :data:`OFFPAGE_MARGIN` outside the page's visible box.
+
+    ``images`` starts as whether the page's resources have an image (:func:`has_images`)
+    and an inline image makes it true.
+
+    An operand it cannot use (a mode that is not a number...) is skipped: the visitors
+    never raise, so they never cost the page its text."""
+
+    def __init__(self, resources: object, box: Box | None, *, images: bool = False) -> None:
+        self.images = images
+        self.invisible = 0
+        self.tiny = 0
+        self.offpage = 0
+        self._box = box
+        self._mode = 0
+        self._size = 0.0
+        """No size until a ``Tf``: text shown without one is not readable."""
+        self._saved: list[tuple[int, float]] = []
+        self._floor = 0
+        """The saved states of the stream being read start here (a form's ``Q`` cannot
+        restore the states of the stream that draws it)."""
+        self._resources = resources
+        self._base = IDENTITY
+        """From the space of the stream being read (a form's) to the page's."""
+        self._drawings: list[_Drawing] = []
+
+    def before(self, operator: object, operands: object, cm: object, tm: object) -> None:
+        with contextlib.suppress(Exception):
+            self._before(operator, operands, cm)
+
+    def after(self, operator: object, operands: object, cm: object, tm: object) -> None:
+        # Text is counted once pypdf has placed it: «'» and «"» move to the next line
+        # first.
+        with contextlib.suppress(Exception):
+            if operator == b"Do":
+                self._drawn()
+            elif operator in _SHOWING:
+                self._shown(operands, cm, tm)
+
+    def _before(self, operator: object, operands: Any, cm: Any) -> None:
+        if operator == b"q":
+            self._saved.append((self._mode, self._size))
+        elif operator == b"Q":
+            if len(self._saved) > self._floor:
+                self._mode, self._size = self._saved.pop()
+        elif operator == b"Tr":
+            self._mode = int(operands[0])
+        elif operator == b"Tf":
+            self._size = abs(float(operands[1]))
+        elif operator == b"Do":
+            # Saved first: whatever happens next, the matching after() restores it.
+            self._drawings.append(
+                _Drawing(
+                    self._mode,
+                    self._size,
+                    len(self._saved),
+                    self._floor,
+                    self._resources,
+                    self._base,
+                )
+            )
+            self._floor = len(self._saved)
+            form = _entry(_entry(self._resources, "/XObject"), operands[0])
+            if _entry(form, "/Subtype") == "/Form":
+                matrix = multiply(_matrix(_entry(form, "/Matrix")), cm)
+                self._base = multiply(matrix, self._base)
+                self._resources = _entry(form, "/Resources")
+        elif operator in _INLINE_IMAGES:
+            self.images = True
+
+    def _drawn(self) -> None:
+        if not self._drawings:
+            return
+        drawing = self._drawings.pop()
+        self._mode, self._size = drawing.mode, drawing.size
+        self._floor, self._resources, self._base = drawing.floor, drawing.resources, drawing.base
+        del self._saved[drawing.depth :]
+
+    def _shown(self, operands: object, cm: Any, tm: Any) -> None:
+        count = shown_characters(operands)
+        if not count:
+            return
+        a, b, c, d, x, y = multiply(multiply(tm, cm), self._base)
+        if self._mode in INVISIBLE_MODES:
+            self.invisible += count
+        elif self._size * math.sqrt(abs(a * d - b * c)) < TINY_POINTS:
+            self.tiny += count
+        box = self._box
+        if box is not None and not (
+            box[0] - OFFPAGE_MARGIN <= x <= box[2] + OFFPAGE_MARGIN
+            and box[1] - OFFPAGE_MARGIN <= y <= box[3] + OFFPAGE_MARGIN
+        ):
+            self.offpage += count
+
+
+def read_page(page: Any) -> tuple[str, PageSigns]:
+    """A page's extracted text, as pypdf gives it, and the signs of text it does not
+    show. Raises whatever pypdf raises on the text."""
+    try:
+        resources = _resolved(page.get("/Resources"))
+    except Exception:  # a broken reference: as if the page had no resources
+        resources = None
+    try:
+        images = has_images(resources)
+    except Exception:  # a broken resource: no image, so invisible text stays suspect
+        images = False
+    signs = PageSigns(resources, visible_box(page), images=images)
+    text = page.extract_text(visitor_operand_before=signs.before, visitor_operand_after=signs.after)
+    return text or "", signs
+
+
+def read_pages(pages: Sequence[Any], limit: int) -> tuple[str | None, list[PdfPage]]:
+    """The stored text of a PDF's pages (:class:`StoredText`, cut at ``limit``) and the
+    facts of every page, also of those after the limit (from their own text, which is
+    then dropped). The counts of characters are of the text as pypdf gives it, broken
+    characters included; the stored text is cleaned (:func:`clean_text`) before the
+    spans are measured in it. Raises whatever pypdf raises on any page."""
+    stored = StoredText(limit)
+    counts: list[tuple[int, int, int]] = []
+    signs: list[tuple[bool, int, int, int]] = []
+    for page in pages:
+        extracted, found = read_page(page)
+        stored.add(clean_text(extracted))
+        counts.append(text_counts(extracted))
+        signs.append((found.images, found.invisible, found.tiny, found.offpage))
+    text, spans = stored.finish()
+    return text, [
+        PdfPage(
+            number=number,
+            start=start,
+            end=end,
+            cut=cut,
+            chars=chars,
+            letters=letters,
+            garbage=garbage,
+            images=images,
+            invisible=invisible,
+            tiny=tiny,
+            offpage=offpage,
+        )
+        for number, (
+            (start, end, cut),
+            (chars, letters, garbage),
+            (images, invisible, tiny, offpage),
+        ) in enumerate(zip(spans, counts, signs, strict=True), start=1)
     ]
-    joined = "\n\n".join(blocks)
-    if len(joined) > limit:
-        joined = f"{joined[:limit].rstrip()}\n\n{cut_notice(limit)}"
-    return joined
 
 
 def lower_limits(memory_bytes: int, cpu_seconds: int) -> None:
@@ -628,7 +1031,9 @@ def pdf_worker(argv: Sequence[str]) -> int:
 
     Writes JSON lines on stdout: first ``{"pages": n}``, ``{"encrypted": true}`` or
     ``{"invalid": true}``; then, if the PDF has from 1 to the page limit pages,
-    ``{"text": str | null}``."""
+    ``{"text": str | null, "pdf_pages": [PdfPage.to_data(), ...] | null}``: the text
+    (:class:`StoredText`) and the facts of every page (:func:`read_pages`), both
+    ``null`` if pypdf fails on any page."""
     path, max_pages, memory, max_chars = argv[0], int(argv[1]), int(argv[2]), int(argv[3])
     prefer_oom_kill()
     lower_limits(memory, int(PDF_TIMEOUT_SECONDS) + 5)
@@ -656,19 +1061,12 @@ def pdf_worker(argv: Sequence[str]) -> int:
     emit({"pages": pages})
     if not 1 <= pages <= max_pages:
         return 0
-    texts: list[str] = []
     try:
-        total = 0
-        for page in reader.pages:
-            text = page.extract_text() or ""
-            texts.append(text)
-            total += len(text)
-            if total > max_chars:
-                break
+        text, facts = read_pages(reader.pages, max_chars)
     except Exception:
-        emit({"text": None})
+        emit({"text": None, "pdf_pages": None})
         return 0
-    emit({"text": _page_texts(texts, max_chars)})
+    emit({"text": text, "pdf_pages": [page.to_data() for page in facts]})
     return 0
 
 
@@ -680,15 +1078,16 @@ _PACKAGE_ROOT: Final = str(Path(__file__).resolve().parents[1])
 _WORKER_ENV: Final = {"LC_ALL": "C.UTF-8"}
 """The reader's whole environment: nothing of the server's (keys, tokens) reaches it."""
 _MAX_WORKER_LINE: Final = 16 * 1024 * 1024
-"""Longest line read from the reader (the text line: at most 12 bytes per character)."""
+"""Longest line read from the reader: the text line, at most 12 bytes per character of
+the text (about 12 MB) and less than 250 bytes of facts per page."""
 
 
 class PdfReader:
-    """Reads the page count and the text of stored PDFs with pypdf, each in a new
-    process of its own: isolated Python (``-I``: no environment variables, no user
-    site), with an empty environment of the server's and the resource limits of
-    :func:`lower_limits`. At most ``concurrency`` run at once. Cancelling a read kills
-    its process."""
+    """Reads the page count, the text and the facts of each page of stored PDFs with
+    pypdf, each in a new process of its own: isolated Python (``-I``: no environment
+    variables, no user site), with an empty environment of the server's and the resource
+    limits of :func:`lower_limits`. At most ``concurrency`` run at once. Cancelling a
+    read kills its process."""
 
     def __init__(
         self,
@@ -714,11 +1113,12 @@ class PdfReader:
         return (sys.executable, "-I", "-B", "-c", _WORKER_BOOT, _PACKAGE_ROOT, *arguments)
 
     async def read(self, path: Path) -> PdfInfo:
-        """The page count and the text of the PDF at ``path``. Raises
-        :class:`AttachmentError` 422 for an encrypted PDF, one without pages or with more
-        than the page limit, or one whose pages could not be counted (not a PDF, broken,
-        or the reader ran out of time or memory first). A text that could not be
-        extracted in time is ``None``."""
+        """The page count, the text and the facts of each page of the PDF at ``path``.
+        Raises :class:`AttachmentError` 422 for an encrypted PDF, one without pages or
+        with more than the page limit, or one whose pages could not be counted (not a
+        PDF, broken, or the reader ran out of time or memory first). A text that could
+        not be extracted in time is ``None``, and so are facts that do not fit it
+        (:func:`fitting_pages`)."""
         async with self._slots:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._timeout
@@ -756,10 +1156,26 @@ class PdfReader:
         if pages > self._max_pages:
             raise AttachmentError(422, pdf_pages_detail(pages))
         second = await _line(process, deadline)
-        text = second.get("text") if isinstance(second, dict) else None
-        if not isinstance(text, str) or not text.strip():
-            return PdfInfo(pages=pages, text=None)
-        return PdfInfo(pages=pages, text=clean_text(text))
+        read = second if isinstance(second, dict) else {}
+        raw = read.get("text")
+        text = clean_text(raw) if isinstance(raw, str) and raw.strip() else None
+        facts = fitting_pages(read.get("pdf_pages"), pages, text)
+        if text is not None and text != raw:
+            facts = None  # the reader's spans are in another text than this one
+        return PdfInfo(pages=pages, text=text, pdf_pages=facts)
+
+
+def fitting_pages(value: object, pages: int, text: str | None) -> tuple[PdfPage, ...] | None:
+    """The facts the reader wrote for each page (``pdf_facts.pages_from_data``), if they
+    fit the PDF and its text: one per page, and every span within the text (none when
+    there is no text). ``None`` otherwise: the PDF is kept, unanalysed."""
+    found = pages_from_data(value)
+    if found is None or len(found) != pages:
+        return None
+    for page in found:
+        if page.end is not None and (text is None or page.end > len(text)):
+            return None
+    return found
 
 
 class _Timeout:
