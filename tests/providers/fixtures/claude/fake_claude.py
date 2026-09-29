@@ -21,6 +21,17 @@ Scenario keys (all optional):
                    replaying and exit only this many seconds later
   continue_delay   seconds before the CLI's own follow-up message (default ``delay``)
   status           {"json": {...}, "exit_code": 0} for ``auth status --json``
+  startup_lines    true: print the stream's leading start-up events (``active_goal`` and
+                   ``autocompact_state``) as soon as the process starts, before it reads
+                   stdin, and replay the rest after the message (``crash_after`` counts
+                   from there). A list of strings prints those raw lines instead. The
+                   run is then recorded as phase "startup_printed" until its message.
+
+Start-up lines: logged in to the real API, the CLI 2.1.283 printed ``active_goal`` and
+``autocompact_state`` within a second of starting, while it still waited on stdin, and
+``system``/``init`` only after reading the message (then ``system``/``status``
+"requesting", then the API request). With no session, or against a local mock of the
+API, it printed no start-up lines. By default the fake prints none either.
 
 The CLI going on by itself: with no tools, a ``user`` event in the stream is always the
 CLI's own follow-up message after a reply it did not accept (the continuation after
@@ -83,6 +94,8 @@ PAIRS = {
 }
 PREFIXED = ("--system-prompt=", "--model=")
 FORBIDDEN = ("--append-system-prompt", "--bare", "--system-prompt-file")
+STARTUP_TYPES = ("active_goal", "autocompact_state")
+"""Events the real CLI prints before it reads stdin (see "Start-up lines")."""
 
 
 def record(entry: dict[str, Any]) -> None:
@@ -120,6 +133,14 @@ def check_argv(argv: list[str]) -> None:
 def emit(event: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(event) + "\n")
     sys.stdout.flush()
+
+
+def split_startup(events: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+    """The stream's leading start-up events, as lines, and the events after them."""
+    count = 0
+    while count < len(events) and events[count].get("type") in STARTUP_TYPES:
+        count += 1
+    return [json.dumps(event) for event in events[:count]], events[count:]
 
 
 def main() -> None:
@@ -165,6 +186,26 @@ def main() -> None:
         entry["child_pid"] = child.pid
     record(entry)
 
+    events = [
+        json.loads(raw)
+        for raw in (FIXTURES / scenario.get("stream", "stream_success.jsonl"))
+        .read_text()
+        .splitlines()
+        if raw.strip()
+    ]
+    startup: list[str] = []
+    if scenario.get("startup_lines") is True:
+        startup, events = split_startup(events)
+    elif isinstance(scenario.get("startup_lines"), list):
+        startup = [str(raw) for raw in scenario["startup_lines"]]
+    if startup:
+        # Like the real CLI: they leave while it still waits on stdin.
+        for raw in startup:
+            sys.stdout.write(raw + "\n")
+        sys.stdout.flush()
+        entry["startup_printed"] = len(startup)
+        record({**entry, "phase": "startup_printed"})
+
     line = sys.stdin.readline()
     if not line:
         record({**entry, "phase": "no_input"})
@@ -178,13 +219,6 @@ def main() -> None:
     record({**entry, "phase": "input"})
 
     delay = float(scenario.get("delay", 0.005))
-    events = [
-        json.loads(raw)
-        for raw in (FIXTURES / scenario.get("stream", "stream_success.jsonl"))
-        .read_text()
-        .splitlines()
-        if raw.strip()
-    ]
     action = scenario.get("action", "replay")
     if action == "crash":
         for event in events[: int(scenario.get("crash_after", 3))]:

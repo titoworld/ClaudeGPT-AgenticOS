@@ -182,10 +182,13 @@ async def test_no_hsts_without_secure_cookies(tmp_path: Path) -> None:
 
 
 async def test_body_limit(h: Harness) -> None:
-    big = b"x" * (1024 * 1024 + 1)
-    response = await h.client.post("/api/auth/login", content=big, headers=ORIGIN_HEADERS)
-    assert response.status_code == 413
-    assert response.json() == {"detail": "La petició és massa gran (màxim 1 MiB)."}
+    # The login, readable without a session, has a far smaller limit: the answer says
+    # which one applied (N26).
+    for size in (4097, 1024 * 1024 + 1):
+        body = b"x" * size
+        response = await h.client.post("/api/auth/login", content=body, headers=ORIGIN_HEADERS)
+        assert response.status_code == 413
+        assert response.json() == {"detail": "La petició és massa gran (màxim 4 KiB)."}
 
     async def chunks() -> AsyncIterator[bytes]:  # no Content-Length: counted as it arrives
         for _ in range(5):
@@ -194,7 +197,23 @@ async def test_body_limit(h: Harness) -> None:
     await h.login_session()
     response = await h.client.put("/api/settings", content=chunks(), headers=ORIGIN_HEADERS)
     assert response.status_code == 413
-    assert response.json()["detail"].startswith("La petició és massa gran")
+    assert response.json() == {"detail": "La petició és massa gran (màxim 1 MiB)."}
+
+    async def login_chunks() -> AsyncIterator[bytes]:
+        for _ in range(3):
+            yield b"z" * 2048
+
+    response = await h.client.post(
+        "/api/auth/login", content=login_chunks(), headers=ORIGIN_HEADERS
+    )
+    assert response.status_code == 413
+    assert response.json() == {"detail": "La petició és massa gran (màxim 4 KiB)."}
+
+
+def test_the_size_in_the_413_answer() -> None:
+    assert middleware.too_large_detail(1024 * 1024) == "La petició és massa gran (màxim 1 MiB)."
+    assert middleware.too_large_detail(4096) == "La petició és massa gran (màxim 4 KiB)."
+    assert middleware.too_large_detail(1000) == "La petició és massa gran (màxim 1000 bytes)."
 
 
 async def test_a_slow_body_gets_408_and_closes_the_connection(

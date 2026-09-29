@@ -8,16 +8,24 @@
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
   const title = $derived(router.route.name === 'dashboard' ? 'Tauler' : app.convs.currentTitle);
-  const lastMode = $derived(
-    router.route.name === 'chat' && app.convs.currentId != null
-      ? (app.convs.list.find((c) => c.id === app.convs.currentId)?.last_mode ?? null)
-      : null,
-  );
+  const lastMode = $derived.by(() => {
+    const id = app.convs.currentId;
+    if (router.route.name !== 'chat' || id == null) return null;
+    // Opened from a search, it may not be in the pages loaded: its own details say.
+    const current = app.convs.list.find((c) => c.id === id) ?? (app.convs.detail?.id === id ? app.convs.detail : null);
+    return current?.last_mode ?? null;
+  });
   const showMenu = $derived(prefs.narrow || prefs.sidebarCollapsed);
+  let menuButton: HTMLButtonElement | undefined = $state();
 
   function toggleSidebar(): void {
     if (prefs.narrow) app.sidebarOpen = true;
     else prefs.setSidebarCollapsed(false);
+  }
+
+  /** The drawer closed: the focus goes back to the button that opened it. */
+  export function focusMenu(): void {
+    menuButton?.focus();
   }
 </script>
 
@@ -28,6 +36,7 @@
 <header class="topbar">
   {#if showMenu}
     <button
+      bind:this={menuButton}
       type="button"
       class="icon-btn"
       onclick={toggleSidebar}

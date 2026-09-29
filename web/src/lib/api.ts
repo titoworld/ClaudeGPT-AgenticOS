@@ -134,13 +134,16 @@ export const api = {
     request<RuntimeSettings>('GET', '/api/settings', undefined, { ...options, ...GATING }),
   /** `settings.revision` is the revision the edit is based on: 409 (SettingsConflict) if they changed since. */
   saveSettings: (settings: RuntimeSettings) => request<RuntimeSettings>('PUT', '/api/settings', settings),
-  conversations: (limit = 50, before?: number, options?: RequestOptions) =>
-    request<ConversationSummary[]>(
-      'GET',
-      `/api/conversations?limit=${limit}${before === undefined ? '' : `&before=${before}`}`,
-      undefined,
-      options,
-    ),
+  /**
+   * A page of conversations, newest first. `before`: the id of the last one of the
+   * previous page. `q`: only those whose title contains it (ignoring case and accents).
+   */
+  conversations: (limit = 50, before?: number, q?: string, options?: RequestOptions) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (before !== undefined) query.set('before', String(before));
+    if (q) query.set('q', q);
+    return request<ConversationSummary[]>('GET', `/api/conversations?${query}`, undefined, options);
+  },
   conversation: (id: number, options?: RequestOptions) =>
     request<ConversationDetail>('GET', `/api/conversations/${id}`, undefined, options),
   renameConversation: (id: number, title: string) =>

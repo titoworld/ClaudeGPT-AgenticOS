@@ -3,13 +3,25 @@
 // them, both on screen (renderMarkdown, and PlainText.svelte for model text shown
 // outside Markdown) and on the clipboard (copy buttons).
 //
-// - Inside code every bidi control and invisible character is revealed. In prose
-//   they are too, except what legitimate text needs: the directional marks
-//   (LRM/RLM/ALM, which do not reorder like embeddings or overrides) and a joiner
-//   or soft hyphen next to a letter (ZWNJ/ZWJ in Persian or Indic words). A run of
-//   joiners, as used to smuggle data, is revealed from its second character on.
-//   So even where the Markdown scanner below and marked disagree about what is
-//   code, nothing that can hide or reorder text reaches the clipboard unmarked.
+// - Inside code every bidi control, invisible character and variation selector is
+//   revealed. In prose they are too, except what legitimate text needs: the
+//   directional marks (LRM/RLM/ALM, which do not reorder like embeddings or
+//   overrides), a joiner or soft hyphen alone next to a letter (ZWNJ/ZWJ in Persian
+//   or Indic words) and a variation selector alone right after the character it
+//   styles (VS15/VS16 after an emoji, though after a digit, # or * only the VS16 of a
+//   keycap like 1️⃣; an ideographic variation selector after an ideograph). Two or
+//   more joiners, soft hyphens or selectors in a row spell nothing: they are how data
+//   is smuggled (a selector can carry a byte), so every one of them is revealed (N6).
+//   Besides the directional marks and whole emoji sequences, prose only keeps a
+//   hidden character alone next to a visible one. So even where the Markdown scanner
+//   below and marked disagree about what is code, nothing that can reorder text, and
+//   no run of joiners or selectors, reaches the clipboard unmarked.
+// - Known limit (N6): what prose keeps can still carry a little data unseen, with no
+//   mark and no copy notice: one selector after each emoji or ideograph (after an
+//   ideograph, one of 240: about a byte), direction marks in any number, and one
+//   joiner or soft hyphen between two letters. Going further (counting them in the
+//   copy notice, revealing runs of direction marks, keeping only registered
+//   ideographic variants) is the owner's call.
 // - A block with too many of them (or an answer past the overall budget) does not
 //   get one mark each: they are removed and one mark with the count stands in for
 //   them, so a smuggled payload cannot turn into megabytes of spans.
@@ -25,6 +37,10 @@ const BIDI_CONTROLS = String.raw`\u202A-\u202E\u2066-\u2069`;
 // Arabic letter mark, invisible math operators, the Mongolian vowel separator
 // and Unicode tags (used to smuggle hidden instructions to other models).
 const INVISIBLE = String.raw`\u00AD\u061C\u180E\u200B-\u200F\u2060-\u2064\uFEFF\u{E0000}-\u{E007F}`;
+// Variation selectors VS1-VS256: right after a character one picks how it looks (an
+// emoji's text or emoji style, a registered variant of an ideograph). On their own
+// they show nothing, and 256 of them can encode any byte.
+const VARIATION_SELECTORS = String.raw`\uFE00-\uFE0F\u{E0100}-\u{E01EF}`;
 // Legitimate uses, kept as they are: a joiner between two emoji, matched together
 // with the emoji before it (and its optional VS16) instead of a lookbehind, and
 // subdivision flags (black flag, 3-6 lowercase/digit tags, cancel tag).
@@ -33,18 +49,48 @@ const EMOJI_SEQUENCES =
   String.raw`|\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{3,6}\u{E007F}`;
 
 /** Hidden characters, in capture group 1 (emoji sequences match without it). */
-const HIDDEN = new RegExp(`${EMOJI_SEQUENCES}|([${BIDI_CONTROLS}${INVISIBLE}])`, 'gu');
-const MAYBE_HIDDEN = new RegExp(`[${BIDI_CONTROLS}${INVISIBLE}]`, 'u');
+const HIDDEN = new RegExp(`${EMOJI_SEQUENCES}|([${BIDI_CONTROLS}${INVISIBLE}${VARIATION_SELECTORS}])`, 'gu');
+const MAYBE_HIDDEN = new RegExp(`[${BIDI_CONTROLS}${INVISIBLE}${VARIATION_SELECTORS}]`, 'u');
 /** Always kept in prose: directional marks. */
 const DIRECTION_MARKS = new Set(['\u061C', '\u200E', '\u200F']);
-/** Kept in prose next to a letter: joiners and the soft hyphen. */
+/** Kept in prose alone next to a letter: joiners and the soft hyphen. */
 const LETTER_JOINERS = new Set(['\u00AD', '\u200C', '\u200D']);
 const LETTER = /[\p{L}\p{M}\p{N}]/u;
+/** What VS15 (text style) and VS16 (emoji style) apply to. */
+const EMOJI = /\p{Emoji}/u;
+/**
+ * Digits, # and *: \p{Emoji} counts them because of keycaps (1️⃣), but on their own
+ * they are plain text, and a selector after each one would carry data unseen (N6).
+ */
+const KEYCAP_BASE = /[0-9#*]/;
+/** COMBINING ENCLOSING KEYCAP: the VS16 right before it is part of a keycap. */
+const KEYCAP = '\u20E3';
+/** What ideographic variation selectors (VS17-VS256) apply to. */
+const IDEOGRAPH = /\p{Ideographic}/u;
+
+function isSelector(char: string): boolean {
+  const cp = char.codePointAt(0) ?? 0;
+  return (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
+}
+
+/**
+ * Whether `selector`, alone between `base` and `next`, styles the character before
+ * it: VS15/VS16 an emoji (but not a digit, # or *), VS16 a keycap, an IVS an ideograph.
+ */
+function styles(base: string, selector: string, next: string): boolean {
+  // A keycap's VS16 whatever comes before it: where marked takes the * of *️⃣ for
+  // emphasis, the screen sees no base before it, but the source sees the *.
+  if (selector === '\uFE0F' && next === KEYCAP) return true;
+  if (selector === '\uFE0E' || selector === '\uFE0F') return EMOJI.test(base) && !KEYCAP_BASE.test(base);
+  return (selector.codePointAt(0) ?? 0) >= 0xe0100 && IDEOGRAPH.test(base);
+}
 
 function charBefore(text: string, index: number): string {
+  if (index <= 0) return '';
   const low = text.charCodeAt(index - 1);
-  const start = low >= 0xdc00 && low <= 0xdfff && index >= 2 ? index - 2 : index - 1;
-  return start < 0 ? '' : String.fromCodePoint(text.codePointAt(start) ?? 0);
+  const high = index >= 2 ? text.charCodeAt(index - 2) : 0;
+  const pair = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff;
+  return String.fromCodePoint(text.codePointAt(pair ? index - 2 : index - 1) ?? 0);
 }
 
 function charAfter(text: string, index: number): string {
@@ -52,15 +98,23 @@ function charAfter(text: string, index: number): string {
   return cp === undefined ? '' : String.fromCodePoint(cp);
 }
 
-/** The hidden character of a match to reveal, or undefined (emoji, kept mark or joiner). */
+/** The hidden character of a match to reveal, or undefined (emoji, or kept in prose). */
 function hiddenOf(text: string, m: RegExpMatchArray, code: boolean): string | undefined {
   const hidden = m[1];
   if (hidden === undefined || code) return hidden;
   if (DIRECTION_MARKS.has(hidden)) return undefined;
-  if (!LETTER_JOINERS.has(hidden)) return hidden;
   const index = m.index ?? 0;
-  const byLetter = LETTER.test(charBefore(text, index)) || LETTER.test(charAfter(text, index + hidden.length));
-  return byLetter ? undefined : hidden;
+  const before = charBefore(text, index);
+  const after = charAfter(text, index + hidden.length);
+  if (LETTER_JOINERS.has(hidden)) {
+    if (LETTER_JOINERS.has(before) || LETTER_JOINERS.has(after)) return hidden; // a run
+    return LETTER.test(before) || LETTER.test(after) ? undefined : hidden;
+  }
+  if (isSelector(hidden)) {
+    if (isSelector(before) || isSelector(after)) return hidden; // a run
+    return styles(before, hidden, after) ? undefined : hidden;
+  }
+  return hidden;
 }
 
 /** A block with more hidden characters than this shows one mark with their count. */

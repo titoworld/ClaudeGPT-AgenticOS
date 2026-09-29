@@ -3,6 +3,8 @@
 // The scene chunk (~540 kB) is imported only after the first paint, when the
 // main thread is idle. If WebGL2 is missing, the import fails or the user
 // turned effects off, the page keeps the animated CSS gradient instead.
+// The effects setting and the system's reduced-motion setting reach the scene
+// live, before, while and after it loads (SceneBackdrop.svelte).
 
 import { untrack } from 'svelte';
 import type { Agent } from './protocol';
@@ -74,11 +76,31 @@ export class SceneHost {
         return;
       }
       if (quality === 'off') {
-        this.#cancelIdle();
-        if (this.status !== 'loading') this.status = 'off';
+        if (this.#idle) {
+          // The load was only scheduled: nothing loads any more, so turning the
+          // effects on again schedules a new one (audit A19).
+          this.#cancelIdle();
+          this.status = 'off';
+        } else if (this.status !== 'loading') {
+          this.status = 'off';
+        }
+        // Otherwise the scene is being created: it ends 'off' (see #load).
         return;
       }
       if (this.#canvas && this.status !== 'loading') this.#scheduleLoad(this.#generation);
+    });
+  }
+
+  /**
+   * The system's reduced-motion setting, live (audit A20): a scene loaded later starts
+   * with it, one being created gets it as soon as it exists (see #load), and one that
+   * exists changes at once.
+   */
+  setReducedMotion(reduced: boolean): void {
+    untrack(() => {
+      if (reduced === this.#reducedMotion) return;
+      this.#reducedMotion = reduced;
+      this.#ctrl?.setReducedMotion(reduced);
     });
   }
 
@@ -158,14 +180,18 @@ export class SceneHost {
     try {
       const { createScene } = await import('../scene/index');
       if (generation !== this.#generation) return;
-      const ctrl = await createScene(canvas, { reducedMotion: this.#reducedMotion, quality: this.#quality });
+      const created = { reducedMotion: this.#reducedMotion, quality: this.#quality };
+      const ctrl = await createScene(canvas, created);
       if (generation !== this.#generation) {
         ctrl.dispose();
         return;
       }
       this.#ctrl = ctrl;
       this.#applied = {};
-      if (this.#quality !== 'high') ctrl.setQuality(this.#quality);
+      // Either setting may have changed while the scene was being created (its shaders
+      // compile asynchronously): the scene gets the current one (A19, A20).
+      if (this.#quality !== created.quality) ctrl.setQuality(this.#quality);
+      if (this.#reducedMotion !== created.reducedMotion) ctrl.setReducedMotion(this.#reducedMotion);
       ctrl.setPaused(document.hidden);
       this.status = this.#quality === 'off' ? 'off' : 'on';
       this.apply(this.#state);

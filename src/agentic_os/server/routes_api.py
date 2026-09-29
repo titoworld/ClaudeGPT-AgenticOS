@@ -98,8 +98,14 @@ async def list_conversations(
     state: StateDep,
     limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = 50,
     before: Annotated[int | None, Query(ge=1, le=MAX_SQLITE_ID)] = None,
+    q: str | None = None,
 ) -> JSONResponse:
-    conversations = await state.store.list_conversations(limit=limit, before=before)
+    """A page of conversations, newest first; ``q`` searches the titles (docs/PROTOCOL.md,
+    «Llista i cerca de converses»): 422 for a text longer than MAX_SEARCH_LENGTH."""
+    try:
+        conversations = await state.store.list_conversations(limit=limit, before=before, query=q)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     return JSONResponse([c.to_wire() for c in conversations])
 
 

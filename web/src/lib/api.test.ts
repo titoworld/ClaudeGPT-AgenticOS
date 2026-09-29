@@ -116,7 +116,7 @@ describe('the background marker', () => {
     await api.spend({ background: true });
     await api.spend();
     await api.providers({ background: true });
-    await api.conversations(50, undefined, { background: true });
+    await api.conversations(50, undefined, undefined, { background: true });
     await api.conversation(7, { background: true });
     await api.settings({ background: true });
     expect(fetch.mock.calls.map((_, i) => headerOf(fetch, i))).toEqual(['1', null, '1', '1', '1', '1']);
@@ -136,6 +136,23 @@ describe('the background marker', () => {
     vi.stubGlobal('fetch', fetch);
     await api.logout();
     expect(headerOf(fetch)).toBe('1');
+  });
+
+  it('the conversation search goes in `q`, encoded, with the page and the cursor (A12)', async () => {
+    const fetch = recordingFetch();
+    vi.stubGlobal('fetch', fetch);
+    await api.conversations(50, 71, 'Pressupost & 50% zebra', { background: true });
+    await api.conversations(12, undefined, 'àvia');
+    await api.conversations();
+    const urls = fetch.mock.calls.map((c) => new URL(String(c[0]), 'https://aos.test'));
+    expect(urls.map((u) => u.pathname)).toEqual(Array(3).fill('/api/conversations'));
+    expect(urls.map((u) => Object.fromEntries(u.searchParams))).toEqual([
+      { limit: '50', before: '71', q: 'Pressupost & 50% zebra' },
+      { limit: '12', q: 'àvia' },
+      { limit: '50' },
+    ]);
+    expect(headerOf(fetch, 0)).toBe('1');
+    expect(headerOf(fetch, 1)).toBeNull();
   });
 
   it('a 401 to the logout is its caller’s business, not a session that just ended elsewhere', async () => {

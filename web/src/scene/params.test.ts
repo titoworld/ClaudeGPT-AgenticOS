@@ -12,6 +12,7 @@ import {
   moodTargets,
   sanitizeIntensity,
   SCENE_MOODS,
+  sceneMotion,
   SEPARATION_DEFAULT,
   SEPARATION_FAR,
   SEPARATION_NEAR,
@@ -144,6 +145,19 @@ describe('effect envelopes', () => {
     }
     expect(minima).toBeLessThan(3);
     expect(errorFlicker(0.3, 0, false)).toBe(1);
+  });
+});
+
+describe('sceneMotion (A20)', () => {
+  it('slows everything down with reduced motion, without the parallax or the ring', () => {
+    const full = sceneMotion(false);
+    const calm = sceneMotion(true);
+    for (const key of ['timeScale', 'easing', 'separationEasing', 'flow'] as const) {
+      expect(calm[key], key).toBeGreaterThan(0);
+      expect(calm[key], key).toBeLessThan(full[key]);
+    }
+    expect([full.parallax, full.ring]).toEqual([true, true]);
+    expect([calm.parallax, calm.ring]).toEqual([false, false]);
   });
 });
 

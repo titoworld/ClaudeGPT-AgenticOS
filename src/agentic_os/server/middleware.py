@@ -48,8 +48,21 @@ BODY_TIMEOUT_SECONDS: Final = 15.0
 STATE_CHANGING_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 FORBIDDEN_ORIGIN_DETAIL: Final = "Origen no permès."
-TOO_LARGE_DETAIL: Final = "La petició és massa gran (màxim 1 MiB)."
 TOO_SLOW_DETAIL: Final = "La petició ha trigat massa a arribar. Torna-ho a provar."
+
+
+def size_text(size: int) -> str:
+    """A number of bytes as the docs write it: ``1 MiB``, ``4 KiB``, ``1000 bytes``."""
+    for factor, unit in ((1024 * 1024, "MiB"), (1024, "KiB")):
+        if size >= factor and size % factor == 0:
+            return f"{size // factor} {unit}"
+    return f"{size} bytes"
+
+
+def too_large_detail(limit: int) -> str:
+    """The ``detail`` of a 413: it names the limit that applied (the login's is far
+    smaller than the others)."""
+    return f"La petició és massa gran (màxim {size_text(limit)})."
 
 
 def is_api_path(path: str) -> bool:
@@ -180,8 +193,8 @@ class BodyError(HTTPException):
 
 
 class RequestTooLargeError(BodyError):
-    def __init__(self) -> None:
-        super().__init__(status_code=413, detail=TOO_LARGE_DETAIL)
+    def __init__(self, limit: int) -> None:
+        super().__init__(status_code=413, detail=too_large_detail(limit))
 
 
 class RequestTimeoutError(BodyError):
@@ -219,7 +232,7 @@ class BodyLimitMiddleware:
         limit = self._small.get(scope["path"], self._max)
         declared = Headers(raw=scope["headers"]).get("content-length")
         if declared is not None and declared.strip().isdigit() and int(declared) > limit:
-            await self._reject(scope, receive, send, RequestTooLargeError())
+            await self._reject(scope, receive, send, RequestTooLargeError(limit))
             return
 
         received = 0
@@ -243,7 +256,7 @@ class BodyLimitMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
-                    raise RequestTooLargeError()
+                    raise RequestTooLargeError(limit)
             return message
 
         async def tracking_send(message: Message) -> None:

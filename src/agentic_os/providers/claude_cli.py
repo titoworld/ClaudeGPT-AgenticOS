@@ -8,7 +8,14 @@ written as a single stdin line (``client_composed`` so the CLI never expands
 exits after the turn.
 
 ``prewarm`` starts processes ahead of time (they wait on stdin without calling the
-API) to hide the CLI start-up time.
+API) to hide the CLI start-up time. asyncio sets a process's return code a moment after
+it dies, so the pool can hand out a warm process that has just died. One that dies
+before its turn begins never sent a request, and the call goes, once and transparently,
+to a fresh process. The turn begins with ``system``/``init``, which the CLI prints after
+reading the message and before its API request (then ``system``/``status``
+"requesting"); before it, only the start-up events of :data:`STARTUP_EVENTS`, which the
+CLI may print while it still waits on stdin. Any other line ends the chance of a
+replacement.
 
 Output budget: the CLI has no flag for it, only ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, which
 sets ``max_tokens`` (thinking included) of each API request it makes; the provider
@@ -103,6 +110,17 @@ MAX_OUTPUT_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 """Set by the provider from the request's budget (never inherited from the app)."""
 SELF_CONTINUING_STOPS = frozenset({"max_tokens", "refusal"})
 """``stop_reason`` values after which the CLI sends another request on its own."""
+STARTUP_EVENTS = frozenset({"active_goal", "autocompact_state"})
+"""Event types the CLI 2.1.283, logged in to the real API, printed within a second of
+starting, while it still waited on stdin (with no session it printed none): a warm
+process may have them in its pipe already. They come before the turn's
+``system``/``init`` and carry nothing about the turn (they are ignored)."""
+LOGIN_HINT = (
+    "posa el token de «claude setup-token» a CLAUDE_CODE_OAUTH_TOKEN (.env) i fes "
+    "«docker compose up -d», o executa «claude auth login» al servidor"
+)
+"""How to log the CLI in (docs/DESPLEGAMENT.md, step 6): ``setup-token`` only prints the
+token, which the app gets from .env."""
 
 ENV_ALLOW_LIST = (
     "PATH",
@@ -206,6 +224,15 @@ def _timestamp(value: object) -> datetime | None:
         return datetime.fromtimestamp(seconds, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _is_startup_line(raw: bytes) -> bool:
+    """True for an event of :data:`STARTUP_EVENTS`; any other line may be the turn's."""
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(event, dict) and event.get("type") in STARTUP_EVENTS
 
 
 def _signal_group(pid: int, sig: signal.Signals) -> None:
@@ -449,15 +476,30 @@ class ClaudeCliProvider:
         deadline = asyncio.get_running_loop().time() + self._settings.provider_timeout_seconds
         key = self._key(request)
         line = self._user_line(request)
-        worker = self._take_warm(key) or await self._spawn(key)
+        worker = self._take_warm(key)
+        # A warm process that dies before its turn begins is replaced, once.
+        replaceable = worker is not None
+        if worker is None:
+            worker = await self._spawn(key)
         turn = _Turn(model=key.model, started=started)
         finished = False
         try:
             await self._with_deadline(worker.send(line), deadline)
             while turn.result is None and turn.stop is None:
                 raw = await self._with_deadline(worker.readline(), deadline)
+                if not raw and replaceable and not self._closed:
+                    # It died before its turn began: no request left (see the module
+                    # docstring). A fresh process serves the call instead.
+                    logger.info("A warm Claude CLI process had died: starting a fresh one")
+                    dead, worker = worker, await self._spawn(key)
+                    self._background(self._retire(dead))
+                    replaceable = False
+                    await self._with_deadline(worker.send(line), deadline)
+                    continue
                 if not raw:
                     raise await self._crash_error(worker)
+                if replaceable and not _is_startup_line(raw):
+                    replaceable = False  # its turn began: the request may have left
                 text = self._handle_line(raw, turn)
                 if turn.stop is not None:
                     # The CLI sends its own next request ~10 ms after this reply: kill it
@@ -837,9 +879,7 @@ class ClaudeCliProvider:
         error = turn.assistant_error
         if status in (401, 403) or error == "authentication_failed" or "Not logged in" in detail:
             return ProviderError(
-                "La sessió de Claude no és vàlida: executa «claude setup-token» o "
-                f"«claude auth login» al servidor.{suffix}",
-                kind="auth",
+                f"La sessió de Claude no és vàlida: {LOGIN_HINT}.{suffix}", kind="auth"
             )
         if status == 429 or turn.rate_limited or error == "rate_limit":
             when = ""
@@ -909,9 +949,7 @@ class ClaudeCliProvider:
             return False, "No s'ha pogut llegir l'estat de la sessió de la CLI de Claude"
         info = _obj(data)
         if not info.get("loggedIn"):
-            return False, (
-                "Sense sessió: executa «claude setup-token» o «claude auth login» al servidor"
-            )
+            return False, f"Sense sessió: {LOGIN_HINT}"
         method = info.get("authMethod")
         if method == "claude.ai":
             plan = info.get("subscriptionType")

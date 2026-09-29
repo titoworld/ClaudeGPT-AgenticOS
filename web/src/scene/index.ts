@@ -44,6 +44,7 @@ import {
   isTransientMood,
   moodTargets,
   sanitizeIntensity,
+  sceneMotion,
   SEPARATION_DEFAULT,
   wrapAngle,
   type MoodTargets,
@@ -118,7 +119,9 @@ export async function createSceneWith(
   options: SceneOptions,
   dev: DevOverrides = {},
 ): Promise<SceneController> {
-  const reducedMotion = options.reducedMotion === true;
+  // The system's reduced-motion setting; it can change while the scene runs (setReducedMotion).
+  let reducedMotion = options.reducedMotion === true;
+  let motion = sceneMotion(reducedMotion);
   const renderer = new WebGLRenderer({
     canvas,
     antialias: false, // bloom softens edges; MSAA would double the cost on weak GPUs
@@ -303,7 +306,7 @@ export async function createSceneWith(
     ...pointUniforms,
     uStream: u(0),
     uSynth: u(0),
-    uFlow: u(reducedMotion ? 0.06 : 0.36),
+    uFlowPhase: u(0),
     uOrbRadius: u(ORB_RADIUS),
     uA: u(new Vector3(-2, 0, 0)),
     uB: u(new Vector3(2, 0, 0)),
@@ -404,23 +407,22 @@ export async function createSceneWith(
   const watchdog = new FrameWatchdog({ slowFrameMs: software ? 45 : 28 });
   const timer = new Timer();
   timer.connect(document);
-  const timeScale = reducedMotion ? 0.2 : 1;
   const tmp = new Vector3();
 
   // ------------------------------------------------------------ per-frame update
   const update = (dt: number) => {
     clock += dt;
-    sceneTime += dt * timeScale;
+    sceneTime += dt * motion.timeScale;
     shared.uTime.value = sceneTime;
 
     // Continuous parameters ease towards the mood targets.
-    const k = reducedMotion ? 0.8 : 2.2;
+    const k = motion.easing;
     cur.stream = damp(cur.stream, target.stream, target.stream > cur.stream ? k * 0.9 : k * 1.4, dt);
     cur.synth = damp(cur.synth, target.synth, k * 0.55, dt);
     cur.breathe = damp(cur.breathe, target.breathe, k, dt);
     cur.energy = damp(cur.energy, target.energy, k, dt);
     cur.core = damp(cur.core, target.core, k, dt);
-    sep = damp(sep, sepTarget, reducedMotion ? 0.6 : 1.4, dt);
+    sep = damp(sep, sepTarget, motion.separationEasing, dt);
     for (const a of ['claude', 'chatgpt'] as const) {
       act[a] = damp(act[a], actTarget[a], 3, dt);
       pulses[a] *= Math.exp(-dt * 4.5);
@@ -435,7 +437,7 @@ export async function createSceneWith(
     // Orbits: gentle sway at rest; during synthesis the orbs spiral in and revolve.
     const s = cur.synth;
     const sEase = s * s * (3 - 2 * s);
-    orbitPhase += dt * timeScale * sEase * 0.7;
+    orbitPhase += dt * motion.timeScale * sEase * 0.7;
     if (s < 0.05) orbitPhase += wrapAngle(-orbitPhase) * (1 - Math.exp(-dt * 0.9));
     const radius = sep / 2 + (1.3 - sep / 2) * sEase;
     const sway = Math.sin(sceneTime * 0.09) * 0.1;
@@ -454,7 +456,7 @@ export async function createSceneWith(
         radius * Math.sin(angle) * 0.6,
       );
       orb.mesh.scale.setScalar(orbScale);
-      orb.mesh.rotation.y += dt * timeScale * 0.06;
+      orb.mesh.rotation.y += dt * motion.timeScale * 0.06;
       const p = pulses[a];
       const un = orb.uniforms;
       un.uAmp.value = 0.035 + cur.energy * 0.03 + Math.min(p, 1.2) * 0.06 + cur.breathe * 0.012 * (0.5 + 0.5 * breath);
@@ -470,12 +472,14 @@ export async function createSceneWith(
     const coreI = cur.core * (1 + 0.25 * cur.breathe * (0.5 + 0.5 * Math.sin(sceneTime * 1.35 + 1))) + flash * 0.9;
     coreUniforms.uIntensity.value = coreI;
     core.scale.setScalar(CORE_RADIUS * (1 + 0.35 * sEase + 0.25 * flash));
-    core.rotation.y += dt * timeScale * 0.22;
-    core.rotation.x += dt * timeScale * 0.09;
+    core.rotation.y += dt * motion.timeScale * 0.22;
+    core.rotation.x += dt * motion.timeScale * 0.09;
     halos.core.uniforms.uStrength.value = (level === 'high' ? 0.14 : 0.22) * coreI;
     halos.core.uniforms.uSize.value = 0.9 * (1 + 0.5 * sEase + 0.6 * flash);
 
-    // Debate stream.
+    // Debate stream. The flow runs with the scene's clock, so a change of speed
+    // (reduced motion switched on or off) moves no particle.
+    streamUniforms.uFlowPhase.value += dt * motion.timeScale * motion.flow;
     streamUniforms.uStream.value = cur.stream;
     streamUniforms.uSynth.value = sEase;
     streamUniforms.uA.value.copy(orbs.claude.mesh.position);
@@ -485,7 +489,7 @@ export async function createSceneWith(
 
     // Consensus shock ring (skipped with reduced motion: flash only).
     const ringT = (clock - flashAt) / RING_SECONDS;
-    ring.visible = !reducedMotion && ringT >= 0 && ringT < 1;
+    ring.visible = motion.ring && ringT >= 0 && ringT < 1;
     if (ring.visible) {
       const e = 1 - Math.pow(1 - ringT, 3);
       ringUniforms.uRadius.value = 0.35 + e * 3.7;
@@ -600,7 +604,7 @@ export async function createSceneWith(
     pointer.x = (e.clientX / w) * 2 - 1;
     pointer.y = (e.clientY / h) * 2 - 1;
   };
-  if (!reducedMotion) window.addEventListener('pointermove', onPointer, { passive: true });
+  if (motion.parallax) window.addEventListener('pointermove', onPointer, { passive: true });
   const onLost = (e: Event) => {
     e.preventDefault(); // allow the browser to restore the context
     contextLost = true;
@@ -669,6 +673,20 @@ export async function createSceneWith(
     setPaused: safe((value: boolean) => {
       paused = value === true;
       syncLoop();
+    }),
+    setReducedMotion: safe((value: boolean) => {
+      const reduced = value === true;
+      if (reduced === reducedMotion) return;
+      reducedMotion = reduced;
+      motion = sceneMotion(reduced);
+      if (motion.parallax) {
+        window.addEventListener('pointermove', onPointer, { passive: true });
+      } else {
+        window.removeEventListener('pointermove', onPointer);
+        // The camera eases back to the middle and stays there.
+        pointer.x = 0;
+        pointer.y = 0;
+      }
     }),
     dispose: () => {
       if (disposed) return;

@@ -1,6 +1,7 @@
-// Composer options and the saved defaults (audit A11, N11).
+// Composer options and the saved defaults (audit A11, N11), and the length of a
+// question as the server counts it (N19).
 import { describe, expect, it } from 'vitest';
-import { ComposerState, composerDefaults } from './composer.svelte';
+import { charCount, ComposerState, composerDefaults, MAX_MESSAGE_CHARS, MAX_QUESTION_CHARS } from './composer.svelte';
 import type { RuntimeSettings } from './protocol';
 import { DEFAULT_SETTINGS, normalizeSettings } from './settings';
 
@@ -52,5 +53,37 @@ describe('ComposerState', () => {
     c.useCache = true; // the built-in default, picked explicitly
     c.applyDefaults(SOLO);
     expect(c.useCache).toBe(true);
+  });
+});
+
+/** docs/PROTOCOL.md, read from disk: Vite serves nothing from outside web/. */
+async function protocolDoc(): Promise<string> {
+  const module: string = 'node:fs'; // not a literal: the web code has no Node types
+  const fs = (await import(/* @vite-ignore */ module)) as { readFileSync(path: string, encoding: 'utf8'): string };
+  // A path, since the URL class here is jsdom's; and from a variable, since Vite rewrites
+  // `new URL(…, import.meta.url)` into the URL it would serve the file at.
+  const here: string = import.meta.url;
+  return fs.readFileSync(decodeURIComponent(new URL('../../../docs/PROTOCOL.md', here).pathname), 'utf8');
+}
+
+describe('the length of a question (N19)', () => {
+  it('uses the limits the protocol documents, like the server', async () => {
+    // tests/test_docs.py checks that these numbers are the server's constants.
+    const doc = await protocolDoc();
+    const documented = (pattern: RegExp): number => Number(pattern.exec(doc)?.[1]?.replaceAll('.', ''));
+    expect(documented(/La pregunta \(`text`\) pot tenir com a molt ([\d.]+) caràcters/)).toBe(MAX_QUESTION_CHARS);
+    expect(documented(/Cap missatge del client no pot passar de ([\d.]+) caràcters/)).toBe(MAX_MESSAGE_CHARS);
+    expect([MAX_QUESTION_CHARS, MAX_MESSAGE_CHARS]).toEqual([100_000, 524_288]);
+  });
+
+  it('counts characters as the server does: code points', () => {
+    expect(charCount('')).toBe(0);
+    expect(charCount('Què?')).toBe(4);
+    expect(charCount('😀')).toBe(1);
+    expect(charCount('a😀b\u{E0100}')).toBe(4);
+    expect(charCount('👩\u200D💻')).toBe(3);
+    // A lone surrogate reaches the server as \ud800, one character (the server then refuses it).
+    expect(charCount('\uD800')).toBe(1);
+    expect(charCount('\uDC00\uD800x')).toBe(3);
   });
 });

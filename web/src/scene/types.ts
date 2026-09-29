@@ -30,6 +30,12 @@ export interface SceneController {
   setQuality(quality: SceneQuality): void;
   /** Pause rendering (e.g. tab hidden) without disposing. */
   setPaused(paused: boolean): void;
+  /**
+   * Follow the system's reduced-motion setting while running: a slower clock and flow,
+   * gentler easing, no pointer parallax, a consensus without the ring and an error
+   * without flicker (see `sceneMotion` in params.ts).
+   */
+  setReducedMotion(reduced: boolean): void;
   dispose(): void;
 }
 

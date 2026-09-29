@@ -1,7 +1,7 @@
 [project]
 name = "agentic-os"
 version = "0.1.0"
-description = "ClaudeGPT Agentic OS: un sistema operativo agéntico que orquesta agentes de IA (Claude, GPT...)."
+description = "ClaudeGPT OS: consell privat de Claude i ChatGPT, autoallotjat."
 readme = "README.md"
 authors = [{ name = "titoworld" }]
 requires-python = ">=3.12"
@@ -45,6 +45,8 @@ files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Shared test helpers (tests/portability.py) importable from every test module.
+pythonpath = ["tests"]
 addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

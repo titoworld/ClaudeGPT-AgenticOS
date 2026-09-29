@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from portability import alive, reaped, without_platform_variables
 
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
@@ -84,21 +85,6 @@ class FakeCli:
 
     async def wait_count(self, count: int) -> list[dict[str, Any]]:
         return await self.wait(lambda runs: len(runs) == count)
-
-
-def alive(pid: int) -> bool:
-    """True while ``pid`` runs (zombies count as dead)."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except (FileNotFoundError, ProcessLookupError):
-        # ProcessLookupError (ESRCH): it exited between opening and reading the file.
-        return False
-    return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
-
-
-def reaped(pid: int) -> bool:
-    """True when a direct child is gone and was waited for (no zombie left)."""
-    return not Path(f"/proc/{pid}").exists()
 
 
 async def eventually(check: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -297,9 +283,10 @@ async def test_environment_is_allow_listed(
     assert env["PATH"] == os.environ["PATH"]
     # Computed by the provider (the request's budget), never inherited.
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(DEFAULT_MAX_OUTPUT_TOKENS)
-    # LC_CTYPE may be added by the fake's own Python interpreter (PEP 538).
+    # The system may add a few variables itself: LC_CTYPE (the fake's own Python, PEP
+    # 538), and __CF_*/VERSIONER_* on macOS.
     computed = {"DISABLE_AUTOUPDATER", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"}
-    assert set(env) - {"LC_CTYPE"} <= {*ENV_ALLOW_LIST, *computed}
+    assert without_platform_variables(env) <= {*ENV_ALLOW_LIST, *computed}
 
 
 async def test_result_text_is_used_when_no_delta_arrives(
@@ -320,7 +307,8 @@ async def test_auth_error_even_with_subtype_success(
     fake.scenario(stream="stream_auth_error.jsonl")
     error = await expect_error(provider, request())
     assert error.kind == "auth" and not error.retryable
-    assert "claude setup-token" in error.message
+    # The token only works once it is in .env (N25): the hint says so.
+    assert "«claude setup-token» a CLAUDE_CODE_OAUTH_TOKEN (.env)" in error.message
 
 
 async def test_rejected_rate_limit(fake: FakeCli, provider: ClaudeCliProvider) -> None:
@@ -549,6 +537,114 @@ async def test_dead_warm_process_is_not_reused(fake: FakeCli, provider: ClaudeCl
     assert len(fake.runs()) == 2
 
 
+WARM_STARTS = pytest.mark.parametrize(
+    "startup_lines", [False, True], ids=["silent-start", "startup-lines"]
+)
+"""The two ways a real CLI waits on stdin: logged in to the real API, the 2.1.283 had
+printed ``active_goal`` and ``autocompact_state`` within a second; with no session it
+had printed nothing (see the fake's "Start-up lines")."""
+
+
+async def wait_warm(fake: FakeCli, startup_lines: bool) -> dict[str, Any]:
+    """The only warm process, once it waits on stdin (its start-up lines printed)."""
+    phase = "startup_printed" if startup_lines else "started"
+    (warm,) = await fake.wait(lambda runs: [run["phase"] for run in runs] == [phase])
+    return warm
+
+
+@WARM_STARTS
+async def test_a_warm_process_that_died_unseen_is_replaced_by_a_fresh_one(
+    fake: FakeCli, provider: ClaudeCliProvider, startup_lines: bool
+) -> None:
+    """N27: asyncio sets a process's return code a moment after it dies, so the pool can
+    hand out a warm process that has just died. One that dies before its turn began
+    never sent a request: the call goes, once and transparently, to a fresh process. Its
+    start-up lines are already in the pipe and do not count as the turn."""
+    fake.scenario(startup_lines=startup_lines)
+    await provider.prewarm(request())
+    warm = await wait_warm(fake, startup_lines)
+    # No await between the kill and the call: the pool still sees the process alive.
+    os.kill(warm["pid"], signal.SIGKILL)
+    deltas, result = await collect(provider, request())
+
+    assert deltas == ["Hola", "! Soc", " Claude", "."]
+    assert result.text == "Hola! Soc Claude." and result.model == "claude-haiku-4-5-20251001"
+    runs = {run["pid"]: run for run in fake.runs()}
+    assert len(runs) == 2 and "stdin" not in runs.pop(warm["pid"])
+    [fresh] = runs.values()
+    assert fresh["stdin"]["message"]["content"] == render_transcript(request())
+    await eventually(lambda: reaped(warm["pid"]))
+
+
+@WARM_STARTS
+async def test_a_warm_process_that_dies_before_answering_is_replaced_only_once(
+    fake: FakeCli, provider: ClaudeCliProvider, startup_lines: bool
+) -> None:
+    fake.scenario(
+        startup_lines=startup_lines, action="crash", crash_after=0, stderr="boom\n", exit_code=3
+    )
+    await provider.prewarm(request())
+    await wait_warm(fake, startup_lines)
+    error = await expect_error(provider, request())
+    # The fresh process died the same way: its error is the call's, with no third try.
+    assert error.kind == "unavailable" and error.retryable
+    assert "codi 3" in error.message and "boom" in error.message
+    runs = fake.runs()
+    assert len(runs) == 2 and all("stdin" in run for run in runs)
+
+
+@WARM_STARTS
+async def test_a_process_is_not_replaced_once_its_turn_began_or_when_it_was_fresh(
+    fake: FakeCli, provider: ClaudeCliProvider, startup_lines: bool
+) -> None:
+    # A warm process that printed its turn's system/init may have sent its request.
+    # Both scenarios crash right after it: the start-up lines come first in the stream.
+    crash_after = 1 if startup_lines else 3
+    fake.scenario(startup_lines=startup_lines, action="crash", crash_after=crash_after, exit_code=3)
+    await provider.prewarm(request())
+    await wait_warm(fake, startup_lines)
+    error = await expect_error(provider, request())
+    assert "codi 3" in error.message
+    assert len(fake.runs()) == 1
+    # A fresh process that dies at once is a real crash, not a stale warm process.
+    fake.scenario(startup_lines=startup_lines, action="crash", crash_after=0, exit_code=4)
+    error = await expect_error(provider, request())
+    assert "codi 4" in error.message
+    assert len(fake.runs()) == 2
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['{"type": "system", "subtype": "init"}', '{"type": "turn_notice"}', "Loading..."],
+    ids=["init", "unknown-event", "not-json"],
+)
+async def test_only_the_known_startup_lines_keep_a_dead_warm_process_replaceable(
+    fake: FakeCli, provider: ClaudeCliProvider, line: str
+) -> None:
+    """Any other line may belong to a turn whose request has left (a newer CLI may print
+    something new): the call fails rather than risk a second billed request."""
+    fake.scenario(startup_lines=['{"type": "active_goal", "value": null}', line])
+    await provider.prewarm(request())
+    warm = await wait_warm(fake, startup_lines=True)
+    os.kill(warm["pid"], signal.SIGKILL)
+    error = await expect_error(provider, request())
+    assert error.kind == "unavailable" and "codi -9" in error.message
+    assert len(fake.runs()) == 1
+
+
+async def test_a_warm_process_that_printed_its_startup_lines_serves_the_call(
+    fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    fake.scenario(startup_lines=True)
+    await provider.prewarm(request())
+    warm = await wait_warm(fake, startup_lines=True)
+    deltas, result = await collect(provider, request())
+    assert deltas == ["Hola", "! Soc", " Claude", "."] and result.text == "Hola! Soc Claude."
+    (run,) = fake.runs()
+    assert run["pid"] == warm["pid"] and run["startup_printed"] == 2
+    assert run["stdin"]["message"]["content"] == render_transcript(request())
+
+
 async def test_unusable_data_dir(tmp_path: Path, fake: FakeCli) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("")
@@ -579,7 +675,8 @@ async def test_unusable_data_dir(tmp_path: Path, fake: FakeCli) -> None:
         (
             {"loggedIn": False, "authMethod": "none"},
             False,
-            "Sense sessió: executa «claude setup-token» o «claude auth login» al servidor",
+            "Sense sessió: posa el token de «claude setup-token» a CLAUDE_CODE_OAUTH_TOKEN "
+            "(.env) i fes «docker compose up -d», o executa «claude auth login» al servidor",
         ),
     ],
 )

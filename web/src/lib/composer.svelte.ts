@@ -1,11 +1,54 @@
-// The composer's turn options. They start from the saved defaults, and an option
-// the owner changes in this tab is theirs from then on: saved defaults (the first
-// load, a save, settings changed elsewhere) never overwrite it (audit A11, N11).
-// The other options always show their saved default, so new settings only change
-// those whose default changed.
+// The composer's state.
+//
+// - Turn options. They start from the saved defaults, and an option the owner changes
+//   in this tab is theirs from then on: saved defaults (the first load, a save,
+//   settings changed elsewhere) never overwrite it (audit A11, N11). The other options
+//   always show their saved default, so new settings only change those whose default
+//   changed.
+// - The draft. A question is counted as the server counts it, and one the server would
+//   refuse is never sent; one it rejected before storing it comes back (N19).
+// - What Enter does: it sends with a fine pointer (mouse, trackpad) and makes a new line
+//   with a coarse one (phones, tablets), where the button or Ctrl/Cmd+Enter sends (N20).
 
 import type { Agent, RuntimeSettings, TurnMode } from './protocol';
 import { DEFAULT_SETTINGS } from './settings';
+
+/**
+ * The longest question the server takes, in characters (docs/PROTOCOL.md; the engine's
+ * `max_question_chars`). It fails a longer one before the turn starts, storing nothing.
+ */
+export const MAX_QUESTION_CHARS = 100_000;
+
+/**
+ * The longest WebSocket message the server reads, in characters (docs/PROTOCOL.md;
+ * `MAX_MESSAGE_CHARS` of the server's ws.py). It answers a longer one with an `error`
+ * that cannot say which turn it was, so the client never sends one. A question within
+ * its own limit only gets there with many characters that JSON escapes (a control
+ * character takes 6). Within both limits a message stays far below the 1 MiB frame the
+ * server accepts.
+ */
+export const MAX_MESSAGE_CHARS = 512 * 1024;
+
+/** From this share of the limit on, the composer shows how long the question is. */
+export const COUNT_FROM = 0.9;
+
+/**
+ * Characters of `text` as the server counts them: code points (Python's `len`), so an
+ * emoji is one. A lone surrogate is one as well: JSON sends it as `\udXXX`.
+ */
+export function charCount(text: string): number {
+  let count = text.length;
+  for (let i = 0; i < text.length - 1; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit < 0xd800 || unit > 0xdbff) continue;
+    const next = text.charCodeAt(i + 1);
+    if (next >= 0xdc00 && next <= 0xdfff) {
+      count--;
+      i++;
+    }
+  }
+  return count;
+}
 
 /** Composer options that have a saved default. */
 export interface ComposerOptions {
@@ -33,9 +76,28 @@ export function composerDefaults(s: RuntimeSettings): ComposerOptions {
 
 export class ComposerState {
   draft = $state('');
+  /**
+   * The main pointer is coarse: a finger (phones, tablets). There Enter makes a new line,
+   * as the on-screen keyboard's Return key promises, and the button sends (N20).
+   */
+  coarsePointer = $state(false);
   #options: ComposerOptions = $state(composerDefaults(DEFAULT_SETTINGS));
   /** Options the owner changed in this tab (any assignment from outside this class). */
   readonly #touched = new Set<ComposerOption>();
+
+  constructor() {
+    const pointer = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;
+    if (pointer) {
+      this.coarsePointer = pointer.matches;
+      // A tablet can get a trackpad, or lose it.
+      pointer.addEventListener('change', (e) => (this.coarsePointer = e.matches));
+    }
+  }
+
+  /** Puts back a question the server never stored, unless the owner is writing another. */
+  restore(question: string): void {
+    if (question.trim() && !this.draft.trim()) this.draft = question;
+  }
 
   get mode(): TurnMode {
     return this.#options.mode;

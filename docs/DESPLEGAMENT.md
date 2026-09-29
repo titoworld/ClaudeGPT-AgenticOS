@@ -101,7 +101,7 @@ nano .env
 Omple com a mínim:
 
 - `DOMAIN`: el teu domini, sense `https://` (per exemple `ia.example.com`).
-- `ACME_EMAIL`: el teu correu (Let's Encrypt t'avisa si un certificat no es pot renovar).
+- `ACME_EMAIL`: el teu correu, per al compte ACME dels certificats. Let's Encrypt ja no envia avisos de caducitat (des del juny del 2025): Caddy renova sol els certificats i, si una renovació falla, només ho veuràs a `docker compose logs caddy`. Si vols un avís, fes servir un servei extern que vigili el certificat.
 
 La resta ja té valors correctes. Desa amb `Ctrl+O`, `Enter` i surt amb `Ctrl+X`.
 
@@ -199,7 +199,7 @@ Per provar la interfície sense gastar res hi ha el mode `fake` (`AOS_CLAUDE_MOD
 docker compose exec app agentic-os doctor
 ```
 
-Revisa la configuració, la base de dades, el propietari, la interfície, les CLI i l'estat de cada proveïdor (incloent-hi els límits d'ús de la subscripció). Cada línia comença per `[ OK ]`, `[AVÍS]` o `[ERROR]`; al final diu si hi ha algun problema crític.
+Revisa la configuració, la base de dades, el propietari, el tipus de canvi, la interfície, les CLI i l'estat de cada proveïdor, amb els límits d'ús de la subscripció de ChatGPT (els de Claude no hi surten: la CLI de Claude només els informa quan respon). Cada comprovació comença per `[ OK ]`, `[ -- ]` (no cal), `[AVÍS]` o `[ERROR]`; al final diu si hi ha algun problema crític.
 
 ## 10. Primer inici de sessió
 
@@ -357,11 +357,11 @@ docker compose logs --tail 100 caddy
 - Durant una actualització és normal durant uns segons.
 
 **La interfície diu que s'està reconnectant i no connecta (WebSocket)**
-- `AOS_PUBLIC_ORIGIN` ha de coincidir exactament amb l'adreça del navegador: `https://`, sense barra final i amb el mateix nom (amb o sense `www`). Si no coincideix, el servidor rebutja la connexió per seguretat.
+- `AOS_PUBLIC_ORIGIN` ha de coincidir exactament amb l'adreça del navegador: `https://`, sense barra final i amb el mateix nom (amb o sense `www`). Si no coincideix, el servidor rebutja la connexió per seguretat. Corregeix-ho a `.env` i aplica-ho amb `docker compose up -d`. (La interfície també esmenta `AOS_EXTRA_ORIGINS`, altres adreces permeses: aquí no cal, perquè Caddy només serveix `DOMAIN`.)
 - Alguns antivirus o proxies d'empresa bloquegen els WebSockets: prova des d'una altra xarxa.
 
 **No puc iniciar sessió**
-- «Codi incorrecte»: l'hora del mòbil o del servidor no és correcta. Al servidor: `timedatectl` (ha de dir `System clock synchronized: yes`).
+- «La contrasenya o el codi no són correctes» i estàs segur de la contrasenya: l'hora del mòbil o del servidor no és correcta. Al servidor: `timedatectl` (ha de dir `System clock synchronized: yes`). Cada intent fallit compta per al bloqueig.
 - «Massa intents»: el bloqueig creix amb cada error. Un navegador on ja havies entrat (en els últims 12 mesos i sense esborrar-ne les cookies) només es bloqueja pels seus propis errors: encara que algú provi contrasenyes des d'Internet, hi continues podent entrar. Des d'un navegador o dispositiu nou, espera el temps que indica o aixeca tots els bloquejos des del servidor: `docker compose exec app agentic-os reset-throttle`.
 - Si «Massa intents» torna a sortir sense que t'hagis equivocat, algú està provant contrasenyes contra la teva web. La contrasenya i el codi TOTP continuen protegint-te i els navegadors on ja havies entrat no es bloquegen. Un dispositiu nou, en canvi, es tornarà a bloquejar mentre duri l'atac, encara que facis `reset-throttle` (l'atacant ho torna a activar amb pocs intents): per entrar-hi, limita l'accés a les teves IP amb `ALLOWED_IPS` a `.env` (i `docker compose up -d`) o fes servir una VPN. Això també talla l'atac de soca-rel.
 - Contrasenya oblidada o mòbil perdut: `docker compose exec -it app agentic-os init`.
@@ -376,7 +376,7 @@ docker compose logs --tail 100 caddy
 - Els registres de Codex viuen en un espai en memòria de 64 MB (`/run/codex-state`) que l'aplicació buida cada vegada que engega Codex, de manera que mai no li impedeixen tornar a arrencar. Si, després de moltes crides sense reiniciar l'aplicació, ChatGPT comença a fallar i als registres surten errors de SQLite o d'espai ple, `docker compose restart app` el buida del tot.
 
 **Límits d'ús de la subscripció**
-- Les subscripcions tenen finestres d'ús (per exemple, de 5 hores i de 7 dies). El tauler i `agentic-os doctor` mostren el percentatge fet servir i quan es renova.
+- Les subscripcions tenen finestres d'ús (per exemple, de 5 hores i de 7 dies). El tauler mostra el percentatge fet servir i quan es renova: el de ChatGPT sempre, i el de Claude a partir de la primera resposta de Claude des que l'aplicació ha arrencat (la CLI de Claude només l'informa quan respon). `agentic-os doctor` només mostra el de ChatGPT.
 - Quan s'arriba al límit, aquell model falla fins que es renova. Mentrestant, fes servir l'altre model en mode Solo o passa temporalment al mode `api`.
 - El mode Consell fa diverses crides per pregunta: fes-lo servir quan valgui la pena.
 
@@ -388,7 +388,7 @@ docker compose logs --tail 100 caddy
 **Què queda exposat a Internet**
 - Només Caddy (80 i 443) i l'SSH. L'aplicació no té cap port publicat i viu en una xarxa interna.
 - Caddy fa HTTPS amb HSTS, redirigeix HTTP a HTTPS i tanca les connexions que no són per al teu domini. Els registres d'accés no guarden cookies.
-- El cos de les peticions té un màxim d'1 MiB. Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit.
+- El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió). Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit.
 - Docker i ufw: els ports que publica Docker no passen per les regles d'ufw. Aquí només es publiquen el 80 i el 443, que han de ser públics. No afegeixis `ports:` a l'aplicació; per depurar, fes servir `127.0.0.1:PORT:PORT` i un túnel SSH.
 
 **Inici de sessió i sessions**

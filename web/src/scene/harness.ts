@@ -1,7 +1,8 @@
 // Development-only harness for the background scene (scene-harness.html).
 // Not referenced from index.html, so `vite build` never includes it.
 // URL parameters: ?mood=debate&quality=low&agreement=60&active=claude&clean&column&reduced&gpu
-// (`gpu` treats a software rasteriser as a GPU so 'high' can be previewed headless).
+// (`gpu` treats a software rasteriser as a GPU so 'high' can be previewed headless;
+// without `reduced`, the system's reduced-motion setting applies, live as in the app).
 
 import '../styles/tokens.css';
 import './harness.css';
@@ -19,7 +20,8 @@ if (!canvas || !stats || !column) throw new Error('harness markup missing');
 if (params.has('clean')) document.body.classList.add('clean');
 column.hidden = !params.has('column');
 
-const reducedMotion = params.has('reduced') || matchMedia('(prefers-reduced-motion: reduce)').matches;
+const systemMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const reducedMotion = (): boolean => params.has('reduced') || systemMotion.matches;
 const initialQuality = params.get('quality');
 let quality: SceneQuality = isSceneQuality(initialQuality) ? initialQuality : 'high';
 const initialMood = params.get('mood');
@@ -35,7 +37,7 @@ async function create(): Promise<void> {
   scene?.dispose();
   scene = null;
   const { createSceneWith } = await import('./index');
-  const s = await createSceneWith(canvas!, { reducedMotion, quality }, { ignoreSoftwareRenderer: params.has('gpu') });
+  const s = await createSceneWith(canvas!, { reducedMotion: reducedMotion(), quality }, { ignoreSoftwareRenderer: params.has('gpu') });
   s.setActive(active);
   s.setAgreement(agreement);
   s.setMood(mood);
@@ -52,6 +54,8 @@ function syncPressed(): void {
     b.setAttribute('aria-pressed', String(b.dataset.quality === quality));
   }
 }
+
+systemMotion.addEventListener('change', () => scene?.setReducedMotion(reducedMotion()));
 
 document.addEventListener('click', (e) => {
   const el = e.target instanceof HTMLElement ? e.target : null;

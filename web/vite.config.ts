@@ -2,7 +2,8 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite';
 
-// Same policy the backend sends in production (src/agentic_os/security/headers.py).
+// Same policy the backend sends in production (src/agentic_os/server/middleware.py);
+// tests/server/test_server_http.py checks that the two stay identical.
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",

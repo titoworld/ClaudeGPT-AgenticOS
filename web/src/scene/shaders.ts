@@ -261,7 +261,7 @@ export const STREAM_VERT = /* glsl */ `
 uniform float uTime;
 uniform float uStream;
 uniform float uSynth;
-uniform float uFlow;
+uniform float uFlowPhase; // how far the flow has run (it advances with the scene's clock)
 uniform float uOrbRadius;
 uniform float uPointScale;
 uniform float uPixelRatio;
@@ -298,7 +298,7 @@ void main() {
   vec3 axis = dst - src;
   float len = max(length(axis), 1e-3);
   vec3 ax = axis / len;
-  float t = fract(aSeed.x + uTime * uFlow * aSeed.z);
+  float t = fract(aSeed.x + uFlowPhase * aSeed.z);
   // Leave from and arrive at the orb surfaces; into the core during synthesis.
   vec3 p0 = src + ax * uOrbRadius * 0.9;
   vec3 p3 = dst - ax * mix(uOrbRadius * 0.9, 0.18, uSynth);

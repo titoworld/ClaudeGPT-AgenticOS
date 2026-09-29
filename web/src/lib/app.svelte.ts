@@ -3,9 +3,10 @@
 // call its methods; nothing else talks to the network.
 
 import { api, ApiError, setUnauthorizedHandler, type RequestOptions } from './api';
-import { ComposerState } from './composer.svelte';
+import { charCount, ComposerState, MAX_MESSAGE_CHARS, MAX_QUESTION_CHARS } from './composer.svelte';
 import { Conversations, errorMessage } from './conversations.svelte';
 import { inferCostBasis } from './costs';
+import { formatInt } from './format';
 import { clearLogoutPending, isLogoutPending, LOGOUT_PENDING_KEY, markLogoutPending } from './logout-pending';
 import { modelOverridesPayload } from './models';
 import { prefs } from './prefs.svelte';
@@ -49,6 +50,14 @@ const SETTINGS_NOT_LOADED = "La configuració encara no s'ha carregat.";
 
 const SETTINGS_CONFLICT =
   'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.';
+
+const QUESTION_TOO_LONG = `La pregunta és massa llarga (màxim ${formatInt(MAX_QUESTION_CHARS)} caràcters). Escurça-la per enviar-la.`;
+
+const MESSAGE_TOO_LARGE =
+  'La pregunta no es pot enviar: té massa caràcters de control, que ocupen massa. Treu-los i torna-ho a provar.';
+
+const UNREAD_MESSAGE =
+  'El servidor no ha llegit la pregunta perquè el missatge era massa gran. Escurça-la i torna-ho a provar.';
 
 /**
  * Requests the app makes by itself (refreshes after `hello`, after turn events, retries):
@@ -146,6 +155,8 @@ class App {
   #epoch = 0;
   #logoutRequest: Promise<boolean> | null = null;
   #watchingTabs = false;
+  /** Turns asked about after the server did not read a message (too_large, N19). */
+  readonly #unread = new Set<string>();
 
   // ------------------------------------------------------------ auth
 
@@ -601,9 +612,17 @@ class App {
     return this.conn.status === 'open' && !this.runningTurn && this.settingsStatus === 'ready';
   }
 
+  /**
+   * Sends `text` as a question in the open conversation. False when it was not sent (the
+   * composer then keeps it): never a question or a message the server would refuse (N19).
+   */
   send(text: string): boolean {
     const question = text.trim();
     if (!question || this.runningTurn) return false;
+    if (charCount(question) > MAX_QUESTION_CHARS) {
+      toasts.push(QUESTION_TOO_LONG, 'error');
+      return false;
+    }
     if (this.conn.status !== 'open') {
       toasts.push('Sense connexió amb el servidor. Espera que es reconnecti.', 'error');
       return false;
@@ -626,16 +645,6 @@ class App {
     };
     const conversationId = this.convs.currentId;
     const models = modelOverridesPayload(prefs.models, c.mode === 'solo' ? [c.target] : AGENTS);
-    this.turns.add(
-      createLiveTurn({
-        requestId,
-        question,
-        mode: c.mode,
-        target: c.mode === 'solo' ? c.target : null,
-        options,
-        conversationId,
-      }),
-    );
     const msg: ClientMessage = {
       type: 'turn.start',
       request_id: requestId,
@@ -646,6 +655,21 @@ class App {
       options,
       ...(models ? { models } : {}),
     };
+    if (charCount(JSON.stringify(msg)) > MAX_MESSAGE_CHARS) {
+      // The server would not read it, nor could it say which turn went unread.
+      toasts.push(MESSAGE_TOO_LARGE, 'error');
+      return false;
+    }
+    this.turns.add(
+      createLiveTurn({
+        requestId,
+        question,
+        mode: c.mode,
+        target: c.mode === 'solo' ? c.target : null,
+        options,
+        conversationId,
+      }),
+    );
     if (!this.conn.send(msg)) {
       this.turns.remove(requestId);
       toasts.push("No s'ha pogut enviar la pregunta.", 'error');
@@ -687,7 +711,9 @@ class App {
           // A rejected turn.start (busy, invalid model...): never saved, so offer the text back.
           turn.status = 'failed';
           turn.error = { kind: msg.code ?? 'server', message: text };
-          if (turn.turnId == null && !this.composer.draft.trim()) this.composer.draft = turn.question;
+          if (turn.turnId == null) this.composer.restore(turn.question);
+        } else if (msg.code === 'too_large' && !msg.request_id && this.#askAboutUnread()) {
+          // The server's answers say which turn it was (#onUnknown), and that turn says why.
         } else {
           toasts.push(text, 'error');
         }
@@ -703,6 +729,7 @@ class App {
   #onTurnEvent(ev: TurnEvent): void {
     const before = this.turns.get(ev.request_id);
     if (!before) return;
+    this.#unread.delete(ev.request_id); // the server has it: it read the message
     const wasDraft = before.conversationId == null;
     const turn = this.turns.apply(ev);
     if (!turn) return;
@@ -738,6 +765,9 @@ class App {
       case 'turn.failed':
         this.#turnEnded();
         sceneHost.flash('error');
+        // Rejected before it started (too long, the conversation is gone...): the server
+        // stored nothing, so the question goes back to the composer (N19).
+        if (turn.turnId == null) this.composer.restore(turn.question);
         if (turn.conversationId !== this.convs.currentId) {
           toasts.push(`Un torn ha fallat: ${ev.error.message}`, 'error');
         }
@@ -775,14 +805,33 @@ class App {
     }
   }
 
+  /**
+   * The server did not read a message because it was too large (N19). The error cannot say
+   * which one, and only a turn.start can be that long: the app asks about each turn it sent
+   * that has had no answer yet. The server answers turn.unknown for the one it never read,
+   * and nothing for the others, which this connection already follows. False if none.
+   */
+  #askAboutUnread(): boolean {
+    const unanswered = this.turns.unfinished().filter((t) => t.status === 'pending' && t.requestId);
+    for (const t of unanswered) {
+      const requestId = t.requestId!;
+      this.#unread.add(requestId);
+      this.conn.send({ type: 'turn.subscribe', request_id: requestId, after_seq: t.lastSeq });
+    }
+    return unanswered.length > 0;
+  }
+
   async #onUnknown(requestId: string): Promise<void> {
     const turn = this.turns.get(requestId);
+    const unread = this.#unread.delete(requestId);
     if (!turn) return;
     if (turn.turnId == null) {
       // The server never saved it: offer the text back.
       turn.status = 'failed';
-      turn.error = { kind: 'lost', message: "La connexió es va tallar abans d'enviar la pregunta. Torna-ho a provar." };
-      if (!this.composer.draft.trim()) this.composer.draft = turn.question;
+      turn.error = unread
+        ? { kind: 'too_large', message: UNREAD_MESSAGE }
+        : { kind: 'lost', message: "La connexió es va tallar abans d'enviar la pregunta. Torna-ho a provar." };
+      this.composer.restore(turn.question);
       return;
     }
     // The server forgot it (finished long ago or restarted): trust the stored version.

@@ -9,7 +9,9 @@
 //   links restricted to http(s)/mailto and opened in a new tab without referrer.
 // - Hidden characters (Trojan Source, CVE-2021-42574) are made visible after
 //   sanitizing, so the screen shows the same text a copy puts on the clipboard
-//   (see hidden-chars.ts: every one inside code, only bidi controls in prose).
+//   (see hidden-chars.ts: every one inside code; in prose all but the directional
+//   marks, a lone joiner or soft hyphen next to a letter, and a lone selector right
+//   after the character it styles).
 
 import createDOMPurify, { type Config, type DOMPurify } from 'dompurify';
 import { Marked } from 'marked';

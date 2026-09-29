@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from portability import group_alive
 
 from agentic_os.server.middleware import MAX_BODY_BYTES
 
@@ -763,19 +764,6 @@ def wait_until(condition: Callable[[], bool], timeout: float = 30) -> None:
     while not condition():
         assert time.monotonic() < deadline, "timed out"
         time.sleep(0.02)
-
-
-def group_alive(pgid: int) -> bool:
-    """Whether a live (not zombie) process of the process group ``pgid`` is left."""
-    for stat_file in Path("/proc").glob("[0-9]*/stat"):
-        try:
-            fields = stat_file.read_text().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
-            continue
-        # state, ppid, pgrp, ...
-        if int(fields[2]) == pgid and fields[0] not in ("Z", "X"):
-            return True
-    return False
 
 
 class Sandbox:

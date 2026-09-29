@@ -31,12 +31,14 @@ Abans de cada commit han de passar totes aquestes comprovacions: és el mateix q
 - El protocol client-servidor viu a `docs/PROTOCOL.md`, `web/src/lib/protocol.ts` i `src/agentic_os/server/`. Quan canviïs un missatge o una ruta, actualitza els tres alhora.
 - Els contractes interns són `domain.py`, `providers/base.py`, `orchestrator/store.py`, `orchestrator/events.py` i `orchestrator/types.py`. Un canvi aquí afecta proveïdors, motor, emmagatzematge i servidor.
 - La CSP del servidor (`server/middleware.py`) i la de `web/vite.config.ts` han de ser idèntiques (hi ha un test que ho comprova).
+- Els límits que donen els documents (mides, cues, temps...), les variables `AOS_*` que s'esmenten a la documentació i a la interfície i els fitxers que s'hi citen han de coincidir amb el codi: ho comprova `tests/test_docs.py`. Si canvies una constant, canvia també el document.
 
 ## Convencions
 
 - Python >= 3.12, layout `src/`, tipat complet (mypy estricte), asyncio. `CancelledError` sempre es propaga i allibera recursos.
 - Dependències només amb `uv add` / `npm install --save-exact`; mai editis `uv.lock` a mà. Justifica cada dependència nova.
 - **Els tests no criden APIs reals ni fan login** (costen diners i requereixen xarxa). Fes servir `FakeProvider`, les CLI falses de `tests/providers/fixtures/` o transports simulats.
+- Els tests han de funcionar també a macOS: l'estat dels processos es comprova amb `tests/portability.py` (mai llegint `/proc` directament) i les comprovacions de l'entorn d'un procés fill ignoren les variables que hi afegeix el sistema (`without_platform_variables`).
 - Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica i per als components, que es munten a jsdom amb `web/src/lib/test-render.ts` (en mode test, `web/vite.config.ts` resol la condició `browser` de Svelte); revisa visualment els canvis d'interfície.
 
 ## Seguretat (no negociable)

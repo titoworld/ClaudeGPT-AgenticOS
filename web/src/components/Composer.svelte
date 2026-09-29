@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
-  import { AGENT_LABEL } from '../lib/format';
+  import { charCount, COUNT_FROM, MAX_QUESTION_CHARS } from '../lib/composer.svelte';
+  import { AGENT_LABEL, formatInt } from '../lib/format';
   import { placeAbove } from '../lib/popover';
   import { prefs } from '../lib/prefs.svelte';
   import { AGENTS, type TurnMode } from '../lib/protocol';
@@ -24,8 +25,17 @@
   const connected = $derived(app.conn.status === 'open');
   /** A turn only starts with the owner's saved settings loaded (audit A11). */
   const settingsReady = $derived(app.settingsStatus === 'ready');
-  const tokens = $derived(estimateTokens(c.draft.trim()));
-  const canSubmit = $derived(running || (connected && settingsReady && c.draft.trim().length > 0));
+  /** What would be sent: the draft without the space around it. */
+  const question = $derived(c.draft.trim());
+  const tokens = $derived(estimateTokens(question));
+  /** Its length as the server counts it (N19). */
+  const chars = $derived(charCount(question));
+  const tooLong = $derived(chars > MAX_QUESTION_CHARS);
+  const showCount = $derived(chars >= MAX_QUESTION_CHARS * COUNT_FROM);
+  const canSubmit = $derived(running || (connected && settingsReady && question.length > 0 && !tooLong));
+  /** Enter makes a new line with a coarse pointer (phones, tablets): the button sends there (N20). */
+  const enterSends = $derived(!c.coarsePointer);
+  const sendKeys = $derived(enterSends ? 'Enter' : 'Ctrl+Enter');
   const supportsFieldSizing = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
 
   function autosize(): void {
@@ -62,9 +72,18 @@
     if (app.send(c.draft)) c.draft = '';
   }
 
+  /**
+   * Enter sends where it does not have to make new lines (a fine pointer), Ctrl/Cmd+Enter
+   * everywhere (a hardware keyboard on a tablet); Shift+Enter always makes a new line.
+   */
+  function sends(e: KeyboardEvent): boolean {
+    if (e.key !== 'Enter' || e.shiftKey || e.altKey) return false;
+    return e.ctrlKey || e.metaKey || enterSends;
+  }
+
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing) return;
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    if (sends(e)) {
       e.preventDefault();
       if (canSubmit && !running) submit();
     } else if (e.key === 'Escape' && running) {
@@ -95,16 +114,20 @@
     submit();
   }}>
   <label class="sr-only" for="{uid}-input">Pregunta</label>
-  <textarea
-    id="{uid}-input"
-    bind:this={textarea}
-    bind:value={c.draft}
-    onkeydown={onKeydown}
-    rows="1"
-    placeholder="Pregunta el que vulguis…"
-    aria-describedby="{uid}-hint"
-    enterkeyhint="send"
-    spellcheck="true"></textarea>
+  <div class="draft">
+    <textarea
+      id="{uid}-input"
+      bind:this={textarea}
+      bind:value={c.draft}
+      onkeydown={onKeydown}
+      rows="1"
+      placeholder="Pregunta el que vulguis…"
+      aria-describedby={showCount ? `${uid}-hint ${uid}-count` : `${uid}-hint`}
+      enterkeyhint={enterSends ? 'send' : 'enter'}
+      spellcheck="true"></textarea>
+    <!-- Always in the page, so screen readers announce the text when it appears. -->
+    <p class="too-long" role="status">{#if tooLong}<Icon name="alert" size={14} /><span>La pregunta passa del màxim de {formatInt(MAX_QUESTION_CHARS)} caràcters: escurça-la per enviar-la.</span>{/if}</p>
+  </div>
 
   <div class="toolbar">
     <div class="controls">
@@ -154,18 +177,28 @@
     </div>
 
     <div class="actions">
-      <span class="kbd-hint" class:idle={connected && settingsReady && !c.draft.trim()} id="{uid}-hint">
+      {#if showCount}
+        <span class="char-count" class:over={tooLong} id="{uid}-count">
+          {formatInt(chars)} / {formatInt(MAX_QUESTION_CHARS)}<span class="sr-only">{' caràcters'}</span>
+        </span>
+      {/if}
+      <span class="kbd-hint" class:idle={connected && settingsReady && !question} id="{uid}-hint">
         {#if !connected}
           Sense connexió
         {:else if app.settingsStatus === 'loading'}
           Carregant la configuració…
         {:else if !settingsReady}
           Sense configuració
-        {:else if c.draft.trim()}
+        {:else if question}
           ≈ {formatK(tokens)} tokens
-        {:else}
+        {:else if enterSends}
           <kbd>Enter</kbd> per enviar
           <span class="sr-only">. Maj+Enter fa un salt de línia i Esc atura el torn en curs.</span>
+        {:else}
+          <kbd>Ctrl</kbd>+<kbd>Enter</kbd> per enviar
+          <span class="sr-only"
+            >. Enter fa un salt de línia. També pots enviar amb el botó Envia, o amb Cmd+Enter en un teclat
+            d'Apple. Esc atura el torn en curs.</span>
         {/if}
       </span>
       <button
@@ -178,9 +211,11 @@
           ? 'Atura (Esc)'
           : !connected
             ? 'Sense connexió'
-            : settingsReady
-              ? 'Envia (Enter)'
-              : 'Cal la configuració desada per enviar'}>
+            : !settingsReady
+              ? 'Cal la configuració desada per enviar'
+              : tooLong
+                ? 'La pregunta és massa llarga'
+                : `Envia (${sendKeys})`}>
         <Icon name={running ? 'stop' : 'send'} size={18} />
       </button>
     </div>
@@ -254,6 +289,42 @@
 
   textarea::placeholder {
     color: var(--text-muted);
+  }
+
+  .draft {
+    display: grid;
+    min-width: 0;
+  }
+
+  .too-long {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.2rem 0.5rem 0;
+    font-size: var(--text-xs);
+    color: #ffc9ce;
+  }
+
+  /* Empty (the question fits): it takes no room. */
+  .too-long:empty {
+    margin: 0;
+  }
+
+  .too-long > :global(.icon) {
+    flex: none;
+    color: var(--critical);
+  }
+
+  .char-count {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .char-count.over {
+    color: var(--critical);
+    font-weight: 600;
   }
 
   .toolbar {

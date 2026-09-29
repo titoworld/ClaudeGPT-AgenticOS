@@ -45,6 +45,7 @@ from agentic_os.storage.models import (
     parse_ts,
     utc_now,
 )
+from agentic_os.storage.search import FOLD_FUNCTION, LIKE_ESCAPE, search_pattern
 from agentic_os.storage.stats import MonthSpend, Stats, compute_month_spend, compute_stats
 
 logger = logging.getLogger(__name__)
@@ -477,31 +478,39 @@ class SqliteStore:
     # ------------------------------------------------------------------
 
     async def list_conversations(
-        self, limit: int = 50, before: int | None = None
+        self, limit: int = 50, before: int | None = None, query: str | None = None
     ) -> list[ConversationSummary]:
         """Conversations by most recent activity (``updated_at``), newest first.
 
         ``before`` is the id of the last conversation of the previous page: only
         conversations after it in this order are returned (none if it no longer
-        exists). ``limit`` must be 1..:data:`MAX_LIST_LIMIT`."""
+        exists). ``limit`` must be 1..:data:`MAX_LIST_LIMIT`. ``query`` keeps only
+        the titles that contain it, without telling case or accents apart
+        (:mod:`agentic_os.storage.search`); a blank one is no search. Raises
+        :class:`ValueError` (Catalan) for a ``limit`` out of range or a ``query``
+        longer than :data:`~agentic_os.storage.search.MAX_SEARCH_LENGTH`."""
         if not 1 <= limit <= MAX_LIST_LIMIT:
             raise ValueError(f"«limit» ha de ser un enter entre 1 i {MAX_LIST_LIMIT}.")
+        pattern = search_pattern(query)
+        conditions: list[str] = []
+        params: list[object] = []
         async with self._db.transaction(write=False) as tx:
-            if before is None:
-                rows = await tx.fetchall(
-                    f"{_SUMMARY_SELECT} ORDER BY c.updated_at DESC, c.id DESC LIMIT ?", (limit,)
-                )
-            else:
+            if before is not None:
                 cursor = await tx.fetchone(
                     "SELECT updated_at FROM conversations WHERE id = ?", (before,)
                 )
                 if cursor is None:
                     return []
-                rows = await tx.fetchall(
-                    f"{_SUMMARY_SELECT} WHERE (c.updated_at, c.id) < (?, ?) "
-                    "ORDER BY c.updated_at DESC, c.id DESC LIMIT ?",
-                    (cursor["updated_at"], before, limit),
-                )
+                conditions.append("(c.updated_at, c.id) < (?, ?)")
+                params += [cursor["updated_at"], before]
+            if pattern is not None:
+                conditions.append(f"{FOLD_FUNCTION}(c.title) LIKE ? ESCAPE '{LIKE_ESCAPE}'")
+                params.append(pattern)
+            where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            rows = await tx.fetchall(
+                f"{_SUMMARY_SELECT} {where}ORDER BY c.updated_at DESC, c.id DESC LIMIT ?",
+                (*params, limit),
+            )
         return [_row_to_summary(row) for row in rows]
 
     async def get_conversation(self, conversation_id: int) -> ConversationDetail | None:

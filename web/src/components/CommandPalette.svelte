@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { lightDismiss, syncDialog } from '../lib/dialog';
-  import type { TurnMode } from '../lib/protocol';
+  import { CONVERSATION_QUERY_MAX_LENGTH, type ConversationSummary, type TurnMode } from '../lib/protocol';
   import { router } from '../lib/router.svelte';
   import { fuzzyFilter, MODE_LABEL } from '../lib/text';
   import Icon, { type IconName } from './Icon.svelte';
@@ -14,13 +14,23 @@
     icon: IconName;
     keywords?: string;
     hint?: string;
+    /** Runs without closing the palette (e.g. «Mostra'n més converses»). */
+    keepOpen?: boolean;
     run: () => void;
   }
+
+  /** Conversations per page of a search. */
+  const SEARCH_PAGE = 12;
+  /** Most recent conversations listed when nothing is typed. */
+  const RECENT = 6;
 
   const uid = $props.id();
   let dialog: HTMLDialogElement | undefined = $state();
   let input: HTMLInputElement | undefined = $state();
-  let query = $state('');
+  // The server searches every conversation, not only the pages loaded (A12).
+  const search = app.convs.search(SEARCH_PAGE);
+  onDestroy(() => search.dispose());
+  const query = $derived(search.query);
   let activeIndex = $state(0);
 
   function setMode(mode: TurnMode): void {
@@ -60,29 +70,56 @@
     { id: 'logout', label: 'Tanca la sessió', group: 'Accions', icon: 'logout', keywords: 'sortir', run: () => void app.logout() },
   ];
 
+  const conversationCommand = (c: ConversationSummary): Command => ({
+    id: `conv-${c.id}`,
+    label: c.title || 'Sense títol',
+    group: 'Converses',
+    icon: c.last_mode ? `mode-${c.last_mode}` : 'mode-solo',
+    run: () => app.openConversation(c.id),
+  });
+
   const results: Command[] = $derived.by(() => {
     const cmds = fuzzyFilter(actions, query, (c) => `${c.label} ${c.keywords ?? ''}`);
-    const convs = fuzzyFilter(app.convs.list, query, (c) => c.title)
-      .slice(0, query ? 12 : 6)
-      .map(
-        (c): Command => ({
-          id: `conv-${c.id}`,
-          label: c.title || 'Sense títol',
-          group: 'Converses',
-          icon: c.last_mode ? `mode-${c.last_mode}` : 'mode-solo',
-          run: () => app.openConversation(c.id),
-        }),
-      );
+    if (!search.term) return [...cmds, ...app.convs.list.slice(0, RECENT).map(conversationCommand)];
+    // Until the server answers, the known conversations that contain the text.
+    const found = search.answered ? search.items : search.shown.slice(0, SEARCH_PAGE);
+    const convs = found.map(conversationCommand);
+    if (search.answered && search.hasMore) {
+      convs.push({
+        id: 'more',
+        label: search.loading ? 'Carregant més converses…' : "Mostra'n més converses",
+        group: 'Converses',
+        icon: 'chevron-down',
+        keepOpen: true,
+        run: () => void search.loadMore(),
+      });
+    } else if (search.error && !search.answered) {
+      convs.push({
+        id: 'retry',
+        label: 'Torna a cercar',
+        group: 'Converses',
+        icon: 'refresh',
+        keepOpen: true,
+        run: () => search.retry(),
+      });
+    }
     return [...cmds, ...convs];
   });
 
+  /** How the conversation search goes: nothing claims there is no match before the server has said so. */
+  const note = $derived(search.pending ? 'Cercant converses…' : search.error);
+  const hasConversations = $derived(results.some((c) => c.group === 'Converses'));
+
   $effect(() => syncDialog(dialog, app.paletteOpen));
 
+  // Every opening starts afresh, and a closed palette searches nothing.
   $effect(() => {
-    if (!app.paletteOpen) return;
-    query = '';
-    activeIndex = 0;
-    void tick().then(() => input?.focus());
+    const open = app.paletteOpen;
+    untrack(() => {
+      search.query = '';
+      activeIndex = 0;
+    });
+    if (open) void tick().then(() => input?.focus());
   });
 
   $effect(() => {
@@ -90,8 +127,19 @@
     activeIndex = 0;
   });
 
+  // The results can shrink under the active option (an answer of the server arrives).
+  $effect(() => {
+    const n = results.length;
+    if (untrack(() => activeIndex) >= n) activeIndex = Math.max(0, n - 1);
+  });
+
   function run(cmd: Command | undefined): void {
     if (!cmd) return;
+    if (cmd.keepOpen) {
+      cmd.run();
+      input?.focus();
+      return;
+    }
     app.paletteOpen = false;
     cmd.run();
   }
@@ -136,7 +184,8 @@
       <Icon name="search" size={18} />
       <input
         bind:this={input}
-        bind:value={query}
+        value={search.query}
+        oninput={(e) => (search.query = e.currentTarget.value)}
         onkeydown={onKeydown}
         type="text"
         role="combobox"
@@ -144,16 +193,20 @@
         aria-controls="{uid}-list"
         aria-activedescendant={results.length ? `${uid}-opt-${activeIndex}` : undefined}
         aria-autocomplete="list"
+        maxlength={CONVERSATION_QUERY_MAX_LENGTH}
         placeholder="Escriu una ordre o cerca una conversa…"
         autocomplete="off"
         spellcheck="false" />
       <kbd>Esc</kbd>
     </div>
 
-    <ul id="{uid}-list" role="listbox" aria-label="Resultats">
+    <ul id="{uid}-list" role="listbox" aria-label="Resultats" aria-busy={search.pending || search.loading}>
       {#each results as cmd, i (cmd.id)}
         {#if i === 0 || results[i - 1]?.group !== cmd.group}
           <li class="group" role="presentation">{cmd.group}</li>
+          {#if cmd.group === 'Converses' && note}
+            <li class="none" role="presentation">{note}</li>
+          {/if}
         {/if}
         <li
           id="{uid}-opt-{i}"
@@ -173,9 +226,13 @@
           <span class="label">{cmd.label}</span>
           {#if i === activeIndex}<span class="enter" aria-hidden="true">↵</span>{/if}
         </li>
-      {:else}
-        <li class="none" role="presentation">Cap resultat per a «{query}».</li>
       {/each}
+      {#if note && !hasConversations}
+        <li class="group" role="presentation">Converses</li>
+        <li class="none" role="presentation">{note}</li>
+      {:else if !results.length}
+        <li class="none" role="presentation">Cap resultat per a «{query}».</li>
+      {/if}
     </ul>
   </div>
 </dialog>

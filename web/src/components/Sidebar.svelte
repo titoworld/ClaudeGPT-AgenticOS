@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { prefs } from '../lib/prefs.svelte';
+  import { CONVERSATION_QUERY_MAX_LENGTH } from '../lib/protocol';
   import { router } from '../lib/router.svelte';
-  import { fuzzyFilter, groupConversations } from '../lib/text';
+  import { groupConversations } from '../lib/text';
   import { isTerminal } from '../lib/turns.svelte';
   import BrandMark from './BrandMark.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -11,11 +13,34 @@
   import ProviderBadge from './ProviderBadge.svelte';
 
   const convs = app.convs;
-  let query = $state('');
+  // The server searches every conversation, not only the pages loaded (A12).
+  const search = convs.search();
+  onDestroy(() => search.dispose());
   let pendingDelete: { id: number; title: string } | null = $state(null);
 
-  const filtered = $derived(fuzzyFilter(convs.list, query, (c) => c.title));
-  const groups = $derived(groupConversations(filtered));
+  const searching = $derived(search.term !== '');
+  const shown = $derived(searching ? search.shown : convs.list);
+  const groups = $derived(groupConversations(shown));
+  /** Why nothing is listed. A search says there is no match only once the server has said so. */
+  const emptyText = $derived.by(() => {
+    if (searching) {
+      if (search.answered) return `Cap conversa coincideix amb «${search.term}».`;
+      return search.error ?? 'Cercant…';
+    }
+    if (convs.listError) return convs.listError;
+    if (convs.listLoading) return 'Carregant…';
+    return 'Encara no hi ha converses.';
+  });
+  /** What the search found, for screen readers (a live region). */
+  const searchStatus = $derived.by(() => {
+    if (!searching) return '';
+    if (search.error) return search.error;
+    if (!search.answered) return 'Cercant…';
+    const n = search.items.length;
+    if (n === 0) return `Cap conversa coincideix amb «${search.term}».`;
+    const found = n === 1 ? '1 conversa trobada' : `${n} converses trobades`;
+    return search.hasMore ? `${found}, i n'hi ha més.` : `${found}.`;
+  });
   const runningIds = $derived(
     new Set(
       Object.values(app.turns.turns)
@@ -51,10 +76,12 @@
       class="search-input"
       placeholder="Cerca converses"
       aria-label="Cerca converses"
-      bind:value={query} />
+      maxlength={CONVERSATION_QUERY_MAX_LENGTH}
+      value={search.query}
+      oninput={(e) => (search.query = e.currentTarget.value)} />
   </div>
 
-  <nav class="list" aria-label="Converses">
+  <nav class="list" aria-label="Converses" aria-busy={searching ? search.pending || search.loading : convs.listLoading}>
     {#each groups as group (group.label)}
       <section>
         <h2>{group.label}</h2>
@@ -70,24 +97,24 @@
         </ul>
       </section>
     {:else}
-      <p class="none">
-        {#if convs.listError}
-          {convs.listError}
-        {:else if query}
-          Cap conversa coincideix amb «{query}».
-        {:else if convs.listLoading}
-          Carregant…
-        {:else}
-          Encara no hi ha converses.
-        {/if}
-      </p>
+      <p class="none">{emptyText}</p>
     {/each}
-    {#if convs.hasMore && !query}
-      <button type="button" class="btn ghost more" onclick={() => void convs.loadMore()} disabled={convs.listLoading}>
+    {#if searching && search.error && shown.length}
+      <p class="none">{search.error}</p>
+    {/if}
+    {#if searching && search.error && !search.answered}
+      <button type="button" class="btn ghost more" onclick={() => search.retry()}>Torna-ho a provar</button>
+    {:else if searching ? search.answered && search.hasMore : convs.hasMore}
+      <button
+        type="button"
+        class="btn ghost more"
+        onclick={() => void (searching ? search.loadMore() : convs.loadMore())}
+        disabled={searching ? search.loading : convs.listLoading}>
         Mostra'n més
       </button>
     {/if}
   </nav>
+  <p class="sr-only" role="status">{searchStatus}</p>
 
   {#if app.providers.length}
     <section class="providers" aria-label="Proveïdors">

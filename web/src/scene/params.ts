@@ -45,6 +45,43 @@ export function isTransientMood(mood: SceneMood): boolean {
   return mood === 'consensus' || mood === 'error';
 }
 
+/** How much the scene moves: all of it, or calmly with reduced motion (WCAG 2.3.3). */
+export interface SceneMotion {
+  /** Speed of the scene's clock: orbits, rotation, noise and the ambient field. */
+  timeScale: number;
+  /** How fast the mood parameters ease towards their targets (per second). */
+  easing: number;
+  /** How fast the orbs move closer or apart when the agreement changes (per second). */
+  separationEasing: number;
+  /** Speed of the particles flowing between the orbs (per second of the scene's clock). */
+  flow: number;
+  /** The camera follows the pointer a little. */
+  parallax: boolean;
+  /** A consensus sends out the expanding ring; otherwise it only flashes. */
+  ring: boolean;
+}
+
+const FULL_MOTION: Readonly<SceneMotion> = {
+  timeScale: 1,
+  easing: 2.2,
+  separationEasing: 1.4,
+  flow: 0.36,
+  parallax: true,
+  ring: true,
+};
+const REDUCED_MOTION: Readonly<SceneMotion> = {
+  timeScale: 0.2,
+  easing: 0.8,
+  separationEasing: 0.6,
+  flow: 0.06,
+  parallax: false,
+  ring: false,
+};
+
+export function sceneMotion(reducedMotion: boolean): Readonly<SceneMotion> {
+  return reducedMotion ? REDUCED_MOTION : FULL_MOTION;
+}
+
 /** Distance between the two orb centres (world units). */
 export const SEPARATION_DEFAULT = 3.9;
 export const SEPARATION_FAR = 4.5; // agreement 0

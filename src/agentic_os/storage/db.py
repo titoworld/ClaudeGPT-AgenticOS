@@ -1,5 +1,9 @@
 """SQLite access layer: one aiosqlite connection plus forward-only schema migrations.
 
+The connection also has the SQL functions the queries use: ``aos_fold`` (the
+case- and accent-insensitive form of a text that conversation searches compare, see
+:mod:`agentic_os.storage.search`).
+
 Every operation runs inside :meth:`Database.transaction`, which holds an
 ``asyncio.Lock`` for its whole duration. aiosqlite executes statements in FIFO
 order on its worker thread, so when a task is cancelled mid-transaction the
@@ -24,6 +28,8 @@ from pathlib import Path
 from typing import Final
 
 import aiosqlite
+
+from agentic_os.storage.search import FOLD_FUNCTION, sql_fold
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +266,7 @@ class Database:
             await conn.execute_fetchall(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             await conn.execute_fetchall("PRAGMA foreign_keys = ON")
             await conn.execute_fetchall("PRAGMA synchronous = NORMAL")
+            await conn.create_function(FOLD_FUNCTION, 1, sql_fold, deterministic=True)
             db = cls(conn)
             await db._migrate()
         except BaseException:

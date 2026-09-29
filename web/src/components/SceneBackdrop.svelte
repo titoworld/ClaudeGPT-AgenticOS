@@ -13,6 +13,11 @@
     sceneHost.setQuality(prefs.effects);
   });
 
+  // The system setting can change with the page open (audit A20).
+  $effect(() => {
+    sceneHost.setReducedMotion(prefs.reducedMotion);
+  });
+
   $effect(() => {
     sceneHost.apply(deriveSceneState(app.focusTurn));
   });

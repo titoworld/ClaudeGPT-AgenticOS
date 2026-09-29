@@ -12,8 +12,8 @@ Caddy (TLS automàtic, capçaleres de seguretat, compressió)
    │  xarxa interna de Docker
    ▼
 Aplicació Python (FastAPI + uvicorn/uvloop)
-   ├── server/       API REST, WebSocket, sessió, fitxers estàtics del frontend
-   ├── security/     contrasenya argon2id, TOTP, sessions, límits d'intents, capçaleres
+   ├── server/       API REST, WebSocket, sessió, capçaleres de seguretat (CSP), fitxers estàtics del frontend
+   ├── security/     contrasenya argon2id, TOTP, sessions, dispositius coneguts, límits d'intents
    ├── orchestrator/ motor de torns: solo · duel · debat, compactació, memòria cau, comptabilitat
    ├── providers/    Claude i ChatGPT, cadascun en mode cli · api · fake
    ├── storage/      SQLite (WAL): converses, missatges, ús, estalvis, memòria cau, sessions
@@ -56,7 +56,7 @@ Tots els recomptes de tokens fan servir els **tokens processats** d'una crida: e
 | Prompt de sistema propi | Les CLI s'executen amb un prompt de sistema curt en lloc del d'agent de programació: la de Claude sense cap eina i la de Codex sense les que es poden desactivar ([Seguretat](#seguretat-un-sol-usuari)) | – |
 | Context mínim als debats | Les revisions només veuen la pregunta i les dues últimes respostes, no tota la transcripció | – |
 | Historial canònic | A l'historial de la conversa només hi van la pregunta i la resposta final (la síntesi), no les rondes intermèdies | – |
-| Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | tokens de l'historial original − tokens del context compactat |
+| Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | (tokens de l'historial original − tokens del context compactat) × crides facturades del torn que porten el context (les respostes i la síntesi) |
 | Parada per consens | S'ometen les rondes que queden | tokens processats mitjans d'una ronda × rondes omeses |
 | `UNCHANGED` | Un agent d'acord no reescriu la resposta (com a molt hi afegeix una nota curta) | longitud de la resposta no reescrita |
 | Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau | tokens processats del torn original, amb els intents declinats abans d'un fallback; el valor, cada crida a les tarifes actuals del seu model |
@@ -113,7 +113,7 @@ Cada proveïdor ho aplica així:
 
 ## Seguretat (un sol usuari)
 
-- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. El cos de les peticions té un màxim d'1 MiB: Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 s (Caddy talla als 30 s), així que una pujada lenta no ocupa cap connexió gaire estona; els WebSockets no passen per aquest límit.
+- Només Caddy és accessible des de fora (80/443); l'aplicació escolta a la xarxa interna. El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió, l'única ruta que es llegeix sense sessió): Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 s (Caddy talla als 30 s), així que una pujada lenta no ocupa cap connexió gaire estona; els WebSockets no passen per aquest límit.
 - Inici de sessió amb contrasenya (argon2id) **i** codi TOTP; bloqueig exponencial després d'intents fallits. Un navegador on ja s'ha entrat (cookie de dispositiu conegut) només es bloqueja pels seus propis errors; `agentic-os reset-throttle` aixeca tots els bloquejos. L'inici de sessió acaba en una sola transacció d'escriptura, condicionada al propietari amb què s'han comprovat les credencials: si `agentic-os init` el canvia mentrestant, l'intent falla, no en queda cap sessió ni dispositiu i la contrasenya antiga no pot substituir mai la nova.
 - Sessions al servidor (només se'n desa el hash), cookie `__Host-` HttpOnly, Secure, SameSite=Strict, caducitat per inactivitat i absoluta. Només les accions del propietari compten com a activitat: les peticions que el client fa pel seu compte (amb `X-AOS-Background: 1`), les reconnexions del WebSocket, els *pings* i les resubscripcions comproven la sessió sense allargar-la, de manera que una pestanya oberta sense ús no la manté viva. Com que la cookie és HttpOnly, només el servidor pot tancar la sessió: el client només dona el logout per fet quan el servidor el confirma. Fins aleshores, la pàgina queda bloquejada localment, sense cap dada de la sessió en memòria, i en tornar-la a carregar es torna a provar el logout abans de res més.
 - L'entrada es valida a les fronteres: els identificadors han de cabre a SQLite i el text ha de ser UTF-8 vàlid. Si no, la resposta és un `422` (o un error `invalid` al WebSocket) en català, mai un error intern ni un missatge intern de Python.

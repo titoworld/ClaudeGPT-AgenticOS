@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from portability import exited, without_platform_variables
 
 import agentic_os.providers.codex_appserver as codex_appserver
 from agentic_os.config import Settings
@@ -132,16 +133,6 @@ async def wait_until(condition: Callable[[], object], timeout: float = 5.0) -> N
         if time.monotonic() > deadline:
             raise AssertionError("condition not met in time")
         await asyncio.sleep(0.02)
-
-
-def process_gone(pid: int) -> bool:
-    """True if the process no longer exists or is a zombie waiting to be reaped."""
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, ProcessLookupError, IndexError):
-        # ProcessLookupError (ESRCH): it exited between opening and reading the file.
-        return True
-    return state in ("Z", "X")
 
 
 # -- generation ---------------------------------------------------------------------------
@@ -451,7 +442,7 @@ async def test_sub_agents_are_interrupted_and_not_counted(
     # gives the memory of a sub-agent's thread back.
     await wait_until(lambda: provider._conn is None)
     await wait_until(lambda: not provider._background)
-    assert process_gone(first.pid)
+    assert exited(first.pid)
     assert "ChatGPT started sub-agents" in caplog.text
     assert not provider._stray_turns
     assert not provider._threads
@@ -480,7 +471,7 @@ async def test_a_sub_agent_loop_stops_the_call(
     # right after the limit, not after the twelve runs the fake would otherwise start.
     await wait_until(lambda: provider._conn is None)
     await wait_until(lambda: not provider._background)
-    assert all(process_gone(pid) for pid in fake.pids())
+    assert all(exited(pid) for pid in fake.pids())
     [root] = fake.params("turn/start")
     root_interrupts = [
         p for p in fake.params("turn/interrupt") if p["threadId"] == root["threadId"]
@@ -576,8 +567,9 @@ async def test_the_process_gets_only_the_allow_listed_environment(
 
     env = json.loads((fake.home / "env.json").read_text(encoding="utf-8"))
     assert not set(secrets) & set(env)
-    # Python may add LC_CTYPE itself (PEP 538 locale coercion).
-    assert set(env) - {"LC_CTYPE"} <= set(ENV_ALLOWLIST)
+    # The system may add a few variables itself: LC_CTYPE (Python's locale coercion, PEP
+    # 538), and __CF_*/VERSIONER_* on macOS.
+    assert without_platform_variables(env) <= set(ENV_ALLOWLIST)
     assert env["CODEX_HOME"] == str(fake.home)
     assert env["LANG"] == "ca_ES.UTF-8"
     assert "PATH" in env
@@ -687,7 +679,6 @@ def test_codex_environment_filters_the_source() -> None:
     assert codex_environment(source) == {"PATH": "/bin", "HOME": "/home/x"}
 
 
-@pytest.mark.skipif(not Path("/proc").is_dir(), reason="needs /proc")
 async def test_aclose_kills_the_whole_process_group(fake: FakeCodex) -> None:
     fake.options(spawn_child=True)
     codex = CodexAppServerProvider(fake.settings())
@@ -700,8 +691,8 @@ async def test_aclose_kills_the_whole_process_group(fake: FakeCodex) -> None:
 
     await codex.aclose()
 
-    assert process_gone(server_pid)
-    await wait_until(lambda: process_gone(child_pid))
+    assert exited(server_pid)
+    await wait_until(lambda: exited(child_pid))
     with pytest.raises(ProviderError):
         await collect(codex, make_request())
 
@@ -820,7 +811,7 @@ async def test_a_process_that_stops_reading_a_long_input_is_replaced(
         [wedged] = fake.pids()
         await wait_until(lambda: not codex._background and codex._releasing == 0, CLEANUP + 5)
         assert codex._conn is None and not codex._threads
-        assert process_gone(wedged)
+        assert exited(wedged)
         assert not request_tasks()
         assert fake.entries("wedged")
         assert not fake.received("turn/start")  # it never read a byte of it
@@ -846,7 +837,7 @@ async def test_a_process_that_stops_answering_before_a_call_is_replaced(
         [wedged] = fake.pids()
         await wait_until(lambda: not codex._background and codex._releasing == 0)
         assert codex._conn is None
-        assert process_gone(wedged)
+        assert exited(wedged)
         assert not fake.received("thread/start")
 
         _, result = await collect(codex, make_request("[echo] de nou"))
@@ -883,7 +874,7 @@ async def test_a_busy_process_is_not_replaced_under_a_running_call(
         [busy] = fake.pids()
         await wait_until(lambda: not codex._background and codex._releasing == 0, CLEANUP + 5)
         assert codex._conn is None  # replaced once idle
-        assert process_gone(busy)
+        assert exited(busy)
 
         _, result = await collect(codex, make_request("[echo] de nou"))
         assert result.text.strip() == "de nou"
@@ -943,7 +934,7 @@ async def test_the_release_of_a_call_is_bounded(
         assert time.monotonic() - started < 0.5 + 0.5 + 0.5
         assert codex._conn is None and not codex._threads
         await wait_until(lambda: not codex._background)
-        assert process_gone(pid)
+        assert exited(pid)
     finally:
         resume.set()
         await codex.aclose()
@@ -1224,7 +1215,7 @@ async def test_failed_initialize(fake: FakeCodex) -> None:
     finally:
         await codex.aclose()
     for pid in fake.pids():
-        assert process_gone(pid)
+        assert exited(pid)
 
 
 # -- mapping helpers --------------------------------------------------------------------------

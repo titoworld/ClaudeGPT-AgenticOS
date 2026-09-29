@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
   import CommandPalette from '../components/CommandPalette.svelte';
   import SettingsDrawer from '../components/SettingsDrawer.svelte';
   import Sidebar from '../components/Sidebar.svelte';
@@ -20,18 +21,68 @@
 
   const collapsed = $derived(!prefs.narrow && prefs.sidebarCollapsed);
   const drawerOpen = $derived(prefs.narrow && app.sidebarOpen);
+
+  let side: HTMLDivElement | undefined = $state();
+  let topBar: ReturnType<typeof TopBar> | undefined = $state();
+
+  // On phones the drawer is modal (N21): while it is open the rest of the page is inert
+  // (keyboard and screen readers stay in the menu), the focus goes into it, Escape
+  // closes it, and closing it gives the focus back to the menu button.
+  let wasOpen = false;
+  /** `app.focusComposerTick` when the drawer opened: a request made meanwhile could not be met. */
+  let composerTick = 0;
+  $effect(() => {
+    const open = drawerOpen;
+    untrack(() => {
+      if (open === wasOpen) return;
+      wasOpen = open;
+      if (open) {
+        composerTick = app.focusComposerTick;
+        void tick().then(() => side?.querySelector<HTMLElement>('button, [href], input')?.focus());
+      } else if (prefs.narrow) {
+        void drawerClosed(app.focusComposerTick !== composerTick);
+      }
+    });
+  });
+
+  async function drawerClosed(composerAsked: boolean): Promise<void> {
+    // E.g. «Nova conversa» asked for the composer while the page behind was inert.
+    if (composerAsked) app.focusComposer();
+    await tick();
+    const active = document.activeElement;
+    // Something outside the drawer has the focus already (the composer): leave it there.
+    if (active && active !== document.body && !side?.contains(active)) return;
+    topBar?.focusMenu();
+  }
+
+  function onKeydown(e: KeyboardEvent): void {
+    if (!drawerOpen || e.key !== 'Escape' || e.defaultPrevented) return;
+    // A dialog over the drawer (the palette, a confirmation) closes on its own.
+    if (e.target instanceof Element && e.target.closest('dialog')) return;
+    e.preventDefault();
+    app.sidebarOpen = false;
+  }
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <div class="shell" class:collapsed class:narrow={prefs.narrow} class:drawer-open={drawerOpen}>
-  <div class="side" inert={collapsed || (prefs.narrow && !app.sidebarOpen)}>
+  <div
+    bind:this={side}
+    class="side"
+    inert={collapsed || (prefs.narrow && !app.sidebarOpen)}
+    role={drawerOpen ? 'dialog' : undefined}
+    aria-modal={drawerOpen ? 'true' : undefined}
+    aria-label={drawerOpen ? 'Menú' : undefined}>
     <Sidebar />
   </div>
   {#if drawerOpen}
-    <button type="button" class="backdrop" aria-label="Tanca el menú" onclick={() => (app.sidebarOpen = false)}></button>
+    <!-- Pointer only: Escape and the drawer's own button close it from the keyboard. -->
+    <button type="button" class="backdrop" tabindex="-1" aria-label="Tanca el menú" onclick={() => (app.sidebarOpen = false)}></button>
   {/if}
 
-  <main class="main">
-    <TopBar />
+  <main class="main" inert={drawerOpen}>
+    <TopBar bind:this={topBar} />
     <div class="view">
       {#if router.route.name === 'dashboard'}
         {#await getDashboard()}

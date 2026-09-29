@@ -152,6 +152,14 @@ export interface ConversationSummary {
   message_count: number;
 }
 
+/**
+ * GET /api/conversations?q=…: the titles that contain the text, ignoring case and
+ * accents (literally: `%` and `_` are plain characters), paged with `limit` and
+ * `before` like the whole list. The text is trimmed: a blank one is no search, and
+ * one longer than this many characters gets 422.
+ */
+export const CONVERSATION_QUERY_MAX_LENGTH = 200;
+
 export interface Message {
   id: number;
   turn_id: number;

@@ -22,6 +22,7 @@ from agentic_os.storage.models import (
     parse_ts,
     utc_now,
 )
+from agentic_os.storage.search import MAX_SEARCH_LENGTH
 from agentic_os.storage.stats import MonthSpend, Stats
 from agentic_os.storage.store import (
     DEFAULT_TITLE,
@@ -34,6 +35,7 @@ from agentic_os.storage.store import (
 __all__ = [
     "DEFAULT_TITLE",
     "MAX_LIST_LIMIT",
+    "MAX_SEARCH_LENGTH",
     "SCHEMA_VERSION",
     "ConversationDetail",
     "ConversationNotFoundError",

@@ -71,7 +71,11 @@
     <div class="fatal-card glass">
       <h2 id="fatal-title"><Icon name="alert" size={20} />Connexió rebutjada</h2>
       <p id="fatal-text">{app.fatal}</p>
-      <p class="hint">Revisa <code>AOS_ALLOWED_ORIGINS</code> al servidor i torna a carregar la pàgina.</p>
+      <p class="hint">
+        Al servidor, <code>AOS_PUBLIC_ORIGIN</code> ha de ser exactament l'adreça d'aquesta pàgina,
+        <code>{location.origin}</code> (o aquesta adreça ha de ser a <code>AOS_EXTRA_ORIGINS</code>). Corregeix-ho,
+        reinicia l'aplicació i torna a carregar la pàgina.
+      </p>
       <button type="button" class="btn primary" onclick={() => location.reload()}>Torna a carregar</button>
     </div>
   </div>
