@@ -335,8 +335,26 @@ OLD_VOLUMES = ("claudegpt_app_data", "claudegpt_app_home")
 AGE_KEY = "age1" + ("qpzry9x8gf2tvdw0s3jn54khce6mua7l" * 2)[:58]
 CURRENT_USER = pwd.getpwuid(os.getuid()).pw_name
 
+# How a stand-in blocks a call until the test interrupts it: it creates the marker $1
+# that the test waits for, and sleeps 60 s. A signal the call does not ignore ends it
+# as it ends a program that does not handle it, even one sent the moment the marker
+# appears: with `touch; exec sleep 60`, bash could take that signal between the two
+# and lose it in the exec, and the call then blocked for the whole 60 s.
+BLOCK = r"""block() {
+  exec "${PYTHON:-python3}" -c '
+import signal, sys, time
+for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+    if signal.getsignal(sig) is not signal.SIG_IGN:
+        signal.signal(sig, signal.SIG_DFL)
+open(sys.argv[1], "w").close()
+time.sleep(60)
+' "$1"
+}
+"""
+
 # Stand-in for the Docker CLI with just the calls of the scripts and of the guide.
-DOCKER_STUB = r"""#!/usr/bin/env bash
+DOCKER_STUB = (
+    r"""#!/usr/bin/env bash
 # It never talks to a daemon:
 # - named volumes are directories under $SANDBOX/volumes (created on first use,
 #   as Docker does, and then without labels), and their labels are files under
@@ -351,17 +369,16 @@ DOCKER_STUB = r"""#!/usr/bin/env bash
 # blocks until the test interrupts it. $PRUNE lists volumes that a
 # `docker volume prune` in another terminal deletes while the app is stopping.
 set -u
-S=${SANDBOX:?}
+"""
+    + BLOCK
+    + r"""S=${SANDBOX:?}
 CALL="docker $*"
 printf '%s\n' "$CALL" >> "$LOG"
 log() { printf '%s\n' "$*" >> "$LOG"; }
 unsupported() { echo "docker stub: unsupported: $CALL" >&2; exit 99; }
 failing() { [[ " ${FAIL:-} " == *" $1 "* ]]; }
 hang() {
-  if [[ " ${HANG:-} " == *" $1 "* ]] && [ ! -e "$S/hung.$1" ]; then
-    touch "$S/hung.$1"
-    exec sleep 60
-  fi
+  if [[ " ${HANG:-} " == *" $1 "* ]] && [ ! -e "$S/hung.$1" ]; then block "$S/hung.$1"; fi
 }
 volume_dir() { printf '%s/volumes/%s' "$S" "$1"; }
 labels_file() { printf '%s/volume-labels/%s' "$S" "$1"; }
@@ -629,6 +646,7 @@ case ${1:-} in
   *) unsupported ;;
 esac
 """
+)
 
 AGE_STUB = r"""#!/usr/bin/env bash
 # Stand-in for age: checks the shape of the recipient, as age does, and "encrypts"
@@ -697,16 +715,18 @@ exec df "$@"
 """
 
 # The real NAME, except that its first call on .env.next blocks when $HANG names it.
-BLOCKING_STUB = r"""#!/usr/bin/env bash
-for arg; do
+BLOCKING_STUB = (
+    "#!/usr/bin/env bash\n"
+    + BLOCK
+    + r"""for arg; do
   if [[ $arg == *.env.next && " ${HANG:-} " == *" NAME "* && ! -e $SANDBOX/hung.NAME ]]; then
-    touch "$SANDBOX/hung.NAME"
-    exec sleep 60
+    block "$SANDBOX/hung.NAME"
   fi
 done
 export PATH=$REAL_PATH
 exec NAME "$@"
 """
+)
 
 STUBS = {
     "docker": DOCKER_STUB,
@@ -737,17 +757,19 @@ exec rm "$@"
 
 # The real sync, except that it blocks once on the journal's directory just after
 # the journal has been told R5 (the restore has worked).
-R5_SYNC_STUB = r"""#!/usr/bin/env bash
-for arg; do
+R5_SYNC_STUB = (
+    "#!/usr/bin/env bash\n"
+    + BLOCK
+    + r"""for arg; do
   if [ "$arg" = "$(dirname -- "$RESTORE_STATE")" ] && [ ! -e "$SANDBOX/hung.r5" ] &&
     grep -qx step=R5 "$RESTORE_STATE" 2> /dev/null; then
-    touch "$SANDBOX/hung.r5"
-    exec sleep 60
+    block "$SANDBOX/hung.r5"
   fi
 done
 export PATH=$REAL_PATH
 exec sync "$@"
 """
+)
 
 # Stand-ins for the owner's computer: scp "downloads" from $SERVER, the stand-in of
 # /var/backups/claudegpt on the VPS; ssh only records the remote command.
