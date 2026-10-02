@@ -8,12 +8,12 @@ for what it missed (``turn.subscribe``). Only ``turn.cancel`` (or shutdown) stop
 turn; a subscriber going away does not. Deleting a conversation cancels its turns
 and forgets them, so their content can no longer be replayed. A cancelled turn ends
 with ``turn.cancelled`` carrying what it spent, as the engine reported it (its
-outcome, docs/adr/0007-resultat-del-torn.md). A turn is cancelled only once: a
+outcome, docs/adr/0007-turn-outcome.md). A turn is cancelled only once: a
 repeated ``turn.cancel`` or a shutdown while it stops leaves the engine to finish
 stopping it, so ``turn.cancelled`` always follows its stored outcome.
 
 A refine turn can also be asked to stop after the round in course (``turn.stop``,
-docs/adr/0010-mode-perfecciona.md): that is no cancellation, only a signal the engine
+docs/adr/0010-refine-mode.md): that is no cancellation, only a signal the engine
 reads between its calls; it then ends the turn as completed, with its last version.
 """
 

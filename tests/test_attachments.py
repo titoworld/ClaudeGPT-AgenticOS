@@ -1,5 +1,5 @@
 """Attachments: limits, the type from the content, image dimensions from the headers, safe
-display names, the token estimate and the PDF reader's subprocess (docs/adr/0009-adjunts.md)."""
+display names, the token estimate and the PDF reader's subprocess (docs/adr/0009-attachments.md)."""
 
 from __future__ import annotations
 

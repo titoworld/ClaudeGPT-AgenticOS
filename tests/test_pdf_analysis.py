@@ -1,4 +1,4 @@
-"""What the PDF reader finds on each page (docs/adr/0009-adjunts.md, P7b), end to end
+"""What the PDF reader finds on each page (docs/adr/0009-attachments.md, P7b), end to end
 through the reader's own process (:class:`PdfReader`) on PDFs drawn in the tests: where
 each page's text is in the stored text (built page by page, as it always was), its
 letters and broken characters, whether it draws an image, and the text it shows

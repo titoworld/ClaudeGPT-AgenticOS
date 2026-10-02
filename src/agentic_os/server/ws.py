@@ -20,7 +20,7 @@ actions (:data:`ACTIVITY_MESSAGES`) refresh the idle timeout; the handshake, pin
 resubscriptions and the periodic check are read-only, so a tab left open (and
 reconnecting) never keeps an idle session alive.
 
-A refine turn (docs/adr/0010-mode-perfecciona.md) has its budget in euros; the engine
+A refine turn (docs/adr/0010-refine-mode.md) has its budget in euros; the engine
 counts in dollars, so ``turn.start`` converts it at the rate the app shows euros with,
 and ``turn.stop`` asks the turn to end after the round in course.
 """

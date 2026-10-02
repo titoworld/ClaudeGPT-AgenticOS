@@ -1,7 +1,7 @@
 """SQLite implementation of the orchestrator :class:`~agentic_os.orchestrator.store.Store`
 plus the persistence needed by the web layer and the security primitives.
 
-Attachments (docs/adr/0009-adjunts.md): the rows live in the database and the files next
+Attachments (docs/adr/0009-attachments.md): the rows live in the database and the files next
 to it (:mod:`agentic_os.storage.files`). Every change to the files (placing an upload,
 a thumbnail, deleting and sweeping) holds one lock, and the database transactions are
 taken inside it, so a sweep never removes the file of a row being added. A PDF's row has
@@ -698,7 +698,7 @@ class SqliteStore:
         return deleted > 0
 
     # ------------------------------------------------------------------
-    # Attachments (docs/adr/0009-adjunts.md)
+    # Attachments (docs/adr/0009-attachments.md)
     # ------------------------------------------------------------------
 
     def content_path(self, sha256: str) -> Path:

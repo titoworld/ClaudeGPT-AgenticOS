@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Backup of ClaudeGPT OS: the two data volumes and .env, encrypted with age
-# (docs/DESPLEGAMENT.md, section «Còpies de seguretat»). As root, on the server:
+# (docs/DEPLOYMENT.md, section «Còpies de seguretat»). As root, on the server:
 #
 #   cd /opt/claudegpt
 #   bash deploy/backup.sh age1...          # your age public key
@@ -50,7 +50,7 @@ usage() {
     bash deploy/backup.sh --sense-xifrar      (desaconsellat: còpia sense xifrar)
 
 Desa una còpia de les dades i del fitxer .env a /var/backups/claudegpt.
-Guia: docs/DESPLEGAMENT.md, apartat «Còpies de seguretat».
+Guia: docs/DEPLOYMENT.md, apartat «Còpies de seguretat».
 EOF
 }
 
@@ -268,4 +268,4 @@ chown -- "${SUDO_USER:-root}" "$BACKUP_DIR" "$archive" "$env_copy" ||
 say "Còpia feta: $stamp$suffix"
 say "  $archive"
 say "  $env_copy"
-say "Descarrega-la al teu ordinador i esborra-la del servidor (docs/DESPLEGAMENT.md)."
+say "Descarrega-la al teu ordinador i esborra-la del servidor (docs/DEPLOYMENT.md)."

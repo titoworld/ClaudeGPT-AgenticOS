@@ -1,5 +1,5 @@
 """``/api/attachments`` and the ``attachments`` of ``turn.start`` (docs/PROTOCOL.md
-«Adjunts», docs/adr/0009-adjunts.md): the type from the content, the limits (413, 415,
+«Adjunts», docs/adr/0009-attachments.md): the type from the content, the limits (413, 415,
 422), the session and Origin checks, what each file is served as, thumbnails, deletion
 and the maintenance that removes what was never sent."""
 
@@ -623,7 +623,11 @@ def test_a_turn_with_a_missing_attachment_fails(
         ws.send_json({"type": "turn.start", "request_id": "r", "text": "Hola", "attachments": [42]})
         failed = ws.receive_json()
         assert failed["type"] == "turn.failed"
-        assert failed["error"] == {"kind": "invalid", "message": "L'adjunt 42 no existeix."}
+        assert failed["error"] == {
+            "kind": "invalid",
+            "message": "L'adjunt 42 no existeix.",
+            "attachment_id": 42,
+        }
         ws.send_json({"type": "turn.start", "request_id": "s", "text": "Hola", "attachments": [0]})
         error = ws.receive_json()
         assert error == {

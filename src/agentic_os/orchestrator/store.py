@@ -52,7 +52,7 @@ class NewMessage:
     """Free-form metadata: usage, model, latency_ms, agreement, critique, cached... A
     question starts with ``outcome: None`` (see :meth:`Store.set_turn_outcome`)."""
     attachments: tuple[int, ...] = ()
-    """Ids of a question's attachments, in order (docs/adr/0009-adjunts.md): linked in
+    """Ids of a question's attachments, in order (docs/adr/0009-attachments.md): linked in
     the same transaction that stores the question, so a question never exists without
     the attachments its ``meta.attachments`` describes. Only a question takes any."""
 
@@ -104,7 +104,7 @@ class SavingRecord:
     kind: SavingKind
     tokens_saved: int
     """Estimated processed tokens avoided (input, cache reads and writes, output: see
-    ``Usage.processed_tokens``). Rows stored before docs/adr/0008-recompte-de-tokens.md
+    ``Usage.processed_tokens``). Rows stored before docs/adr/0008-token-accounting.md
     counted only input + output for the cache and early-stop savings."""
     detail: str = ""
     cost_usd: float | None = None
@@ -175,7 +175,7 @@ class Store(Protocol):
         ...
 
     async def get_pdf_check(self, sha256: str) -> PdfCheck | None:
-        """Claude's stored check of a PDF's text (docs/adr/0009-adjunts.md), by the PDF's
+        """Claude's stored check of a PDF's text (docs/adr/0009-attachments.md), by the PDF's
         content: the one of the current ``pdf_facts.CHECK_VERSION``, or None when there is
         none or it is not valid (the PDF is then checked again)."""
         ...

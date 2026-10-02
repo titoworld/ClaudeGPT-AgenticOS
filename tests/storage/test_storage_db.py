@@ -165,7 +165,7 @@ async def test_version_2_savings_get_their_value_from_the_turns_meta(tmp_path: P
 async def test_version_5_conversations_keep_their_last_mode_in_a_column_that_takes_refine(
     tmp_path: Path,
 ) -> None:
-    """Migration 6 (docs/adr/0010-mode-perfecciona.md): the ``CHECK`` of ``last_mode``
+    """Migration 6 (docs/adr/0010-refine-mode.md): the ``CHECK`` of ``last_mode``
     refuses the refine mode and cannot be altered in place (rebuilding the table would
     cascade through its messages), so the last mode moves to ``last_turn_mode``, with
     the values it had; ``last_mode`` stays, unused."""

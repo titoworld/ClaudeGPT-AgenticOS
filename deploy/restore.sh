@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Restores a backup made by deploy/backup.sh without ever modifying the current
-# volumes (docs/DESPLEGAMENT.md, section «Còpies de seguretat»). As root, on the
+# volumes (docs/DEPLOYMENT.md, section «Còpies de seguretat»). As root, on the
 # server, with the backup decrypted on your computer and uploaded:
 #
 #   cd /opt/claudegpt
@@ -105,7 +105,7 @@ usage() {
 
 Restaura una còpia de deploy/backup.sh (ja desxifrada) en volums nous, sense
 tocar les dades actuals; les esborra --finalitza, quan ho confirmes.
-Guia: docs/DESPLEGAMENT.md, apartat «Còpies de seguretat».
+Guia: docs/DEPLOYMENT.md, apartat «Còpies de seguretat».
 EOF
 }
 usage_error() {

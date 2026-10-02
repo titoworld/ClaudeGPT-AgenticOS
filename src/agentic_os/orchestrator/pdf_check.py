@@ -1,5 +1,5 @@
 """Claude's check of the text that ChatGPT with the subscription reads of a PDF
-(docs/adr/0009-adjunts.md).
+(docs/adr/0009-attachments.md).
 
 ChatGPT through Codex (mode "cli") cannot open a PDF: it reads the text the server
 extracted, page by page (``prompt_format.pdf_view``). That text can miss a scanned page,

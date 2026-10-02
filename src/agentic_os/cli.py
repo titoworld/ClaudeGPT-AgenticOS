@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from pydantic_core import ErrorDetails
 from pydantic_settings import SettingsError
 
-from agentic_os import __version__
+from agentic_os import __version__, i18n
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
 from agentic_os.fx import FxRate, manual_rate
@@ -124,6 +124,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # The command line speaks the system's language (the server, each client's).
+    token = i18n.set_lang(i18n.from_environ(os.environ))
+    try:
+        return _main(argv)
+    finally:
+        i18n.reset_lang(token)
+
+
+def _main(argv: Sequence[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
@@ -144,6 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     if args.command == "serve":
+        i18n.set_lang(None)
         return serve(settings, host=args.host, port=args.port, dev=args.dev)
     if args.command == "doctor":
         return asyncio.run(run_doctor(settings))
@@ -266,7 +276,7 @@ def _with_store(settings: Settings, command: Callable[[SqliteStore], Awaitable[i
 class AccessLogWithoutQuery(logging.Filter):
     """Keeps only the path of the requests in uvicorn's access log: the query string can
     name an uploaded file (``PUT /api/attachments?name=...``) or carry a search, and
-    neither belongs in the logs (docs/adr/0009-adjunts.md)."""
+    neither belongs in the logs (docs/adr/0009-attachments.md)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         # uvicorn logs '%s - "%s %s HTTP/%s" %d' with (client, method, path?query,

@@ -11,7 +11,7 @@ forge an owner's message such as ``<message from="User">``, not even with the ta
 split by invisible characters (a U+200B zero-width space inside ``claude_answer``) or
 written in full-width letters.
 
-Attachments (docs/adr/0009-adjunts.md) travel before the text, each in a block of its
+Attachments (docs/adr/0009-attachments.md) travel before the text, each in a block of its
 own: the file itself (an image, a PDF document) or, for a text file and for a PDF sent
 as its extracted text, a text block (:func:`attachment_text`). A file's text is untrusted
 like the rest: it goes through ``neutralize_tags``, between an opening line that ends
@@ -74,7 +74,7 @@ are part of the prompts the turn cache serves: changing them means a new
 
 REFINE_TAGS: frozenset[str] = frozenset(
     {
-        # the refine turns' prompts and replies (docs/adr/0010-mode-perfecciona.md)
+        # the refine turns' prompts and replies (docs/adr/0010-refine-mode.md)
         "brief",
         "current_version",
         "changelog_so_far",

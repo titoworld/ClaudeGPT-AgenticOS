@@ -3,6 +3,7 @@
   import BrandMark from '../components/BrandMark.svelte';
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
+  import LanguagePicker from '../components/LanguagePicker.svelte';
   import { ApiError, app } from '../lib/app.svelte';
 
   const SETUP_COMMAND = 'docker compose exec -it app agentic-os init';
@@ -95,6 +96,9 @@
 </script>
 
 <main class="login">
+  <div class="language">
+    <LanguagePicker compact />
+  </div>
   <div class="card glass">
     <div class="head">
       <div class="mark"><BrandMark size={56} /></div>
@@ -206,6 +210,13 @@
 </main>
 
 <style>
+  .language {
+    position: absolute;
+    top: max(0.9rem, env(safe-area-inset-top));
+    right: max(0.9rem, env(safe-area-inset-right));
+    z-index: 2;
+  }
+
   .login {
     position: relative;
     z-index: 1;

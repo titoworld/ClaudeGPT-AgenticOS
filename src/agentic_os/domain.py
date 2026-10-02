@@ -21,7 +21,7 @@ critique each other for up to N rounds (early stop on consensus) and one of them
 synthesizes the final answer. refine («Perfecciona»): both answer, one of them merges
 the answers into a document, and round after round both review it and the editor writes
 its next version, until the owner stops it, nobody finds anything left to change or a
-limit is reached (docs/adr/0010-mode-perfecciona.md)."""
+limit is reached (docs/adr/0010-refine-mode.md)."""
 
 MessageKind = Literal["question", "answer", "revision", "synthesis"]
 """question: the user's message. answer: first answer of an agent in a turn.
@@ -30,7 +30,7 @@ synthesis: final answer of a debate."""
 
 Purpose = Literal["answer", "revision", "synthesis", "summary", "check"]
 """Why a model is called: a message of the turn (answer, revision, synthesis), the
-compaction summary, or Claude's check of a PDF's text for ChatGPT (docs/adr/0009-adjunts.md)."""
+compaction summary, or Claude's check of a PDF's text for ChatGPT (docs/adr/0009-attachments.md)."""
 
 SavingKind = Literal["cache", "compaction", "early_stop", "unchanged"]
 
@@ -58,7 +58,7 @@ class Usage:
     def processed_tokens(self) -> int:
         """Every token the call processed and was billed for: input, cache reads, cache
         writes and output. Reasoning is part of the output, so it is never added again
-        (docs/adr/0008-recompte-de-tokens.md)."""
+        (docs/adr/0008-token-accounting.md)."""
         return (
             self.input_tokens
             + self.cache_read_tokens

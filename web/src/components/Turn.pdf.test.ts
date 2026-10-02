@@ -1,5 +1,5 @@
 // Claude's check of the PDFs for ChatGPT with the subscription, as the owner sees it
-// (docs/PROTOCOL.md «Adjunts», docs/adr/0009-adjunts.md): Codex cannot open a PDF, so it
+// (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md): Codex cannot open a PDF, so it
 // reads the text the server extracted, and Claude checks that text while it answers. The
 // turn shows each PDF's check live, from the `pdf.check` events, and ChatGPT's messages
 // carry a badge that says how it read them, live (stream.completed) and after a reload

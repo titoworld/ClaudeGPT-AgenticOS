@@ -4,7 +4,7 @@
 export type Agent = 'claude' | 'chatgpt';
 export const AGENTS: readonly Agent[] = ['claude', 'chatgpt'];
 /**
- * refine («Perfecciona», docs/adr/0010-mode-perfecciona.md): both answer, the editor
+ * refine («Perfecciona», docs/adr/0010-refine-mode.md): both answer, the editor
  * merges the answers into one document, and round after round both review it and the
  * editor writes its next version, until the owner stops it or a limit does.
  */
@@ -275,7 +275,7 @@ export interface Attachment {
 }
 
 /**
- * Where Claude's check of a PDF for ChatGPT with the subscription is (docs/adr/0009-adjunts.md):
+ * Where Claude's check of a PDF for ChatGPT with the subscription is (docs/adr/0009-attachments.md):
  * running, done with at least one page checked, or done with none (it failed, took too
  * long, the PDF was not analysed or there is no Claude).
  */
@@ -444,7 +444,10 @@ export interface AuthState {
 
 export interface ErrorInfo {
   kind: string;
+  /** For people, in the language of the client that started the turn (docs/adr/0011-internationalization.md). */
   message: string;
+  /** The attachment that no longer exists, when that is the error. */
+  attachment_id?: number;
 }
 
 export interface Consensus {

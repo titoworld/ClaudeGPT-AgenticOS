@@ -12,12 +12,12 @@ also ask for truncated replies or refusals per call purpose.
 Attachments are recorded (``attachments``, one tuple per call) and never read; answers
 and syntheses name them, and their estimated tokens count in the input usage.
 
-Claude's check of a PDF for ChatGPT (purpose "check", docs/adr/0009-adjunts.md) replies
+Claude's check of a PDF for ChatGPT (purpose "check", docs/adr/0009-attachments.md) replies
 with the test's ``check_replies`` in turn, or says every page is right (``{"end": true}``).
 A fake can report another ``mode``, so that a test has a ChatGPT that cannot open PDFs
 (mode "cli", like Codex) without any process.
 
-A refine turn (docs/adr/0010-mode-perfecciona.md; its prompts carry the owner's
+A refine turn (docs/adr/0010-refine-mode.md; its prompts carry the owner's
 ``<brief>``) runs its whole loop: the answers are the canned ones, the merge writes a
 first version, every edit applies the changes the reviews proposed (one more line each
 time, so no version repeats the previous one) and a shortening keeps the whole lines that

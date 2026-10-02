@@ -1,0 +1,8 @@
+// Texts of Composer, ModelMenu, ModelPicker, lib/composer.svelte.ts, lib/models.ts. English is the source: Spanish and Catalan have the same keys and
+// parameters (TypeScript checks it).
+
+export const en = {};
+
+export const es: typeof en = {};
+
+export const ca: typeof en = {};

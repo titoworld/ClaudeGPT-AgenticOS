@@ -192,7 +192,7 @@ pom.xml's <version>, a React <Review> component)."""
 
 
 def test_only_the_refine_prompts_escape_the_refine_tags() -> None:
-    """The refine turns' tags (docs/adr/0010-mode-perfecciona.md) are common words in code
+    """The refine turns' tags (docs/adr/0010-refine-mode.md) are common words in code
     and documents: only the texts a refine prompt embeds have them escaped. Everywhere else
     (the solo, duel and debate prompts, a file's text, the history) a ``<version>`` stays as
     it was written, as it did before refine turns existed."""
@@ -261,7 +261,7 @@ def test_neutralize_tags_keeps_invisible_characters_elsewhere() -> None:
     assert neutralize_tags(text) == text
 
 
-# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) --------------------------------------------------
 
 
 @pytest.mark.parametrize(

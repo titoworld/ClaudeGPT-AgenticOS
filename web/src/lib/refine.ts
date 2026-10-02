@@ -1,4 +1,4 @@
-// What the view of a refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) shows:
+// What the view of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md) shows:
 // the versions of its living document, the block of each round, what the turn is doing
 // now and why it stopped. Pure functions of a TurnView, live or stored, so a reloaded turn
 // shows what the live one did (its rounds are rebuilt from the messages: turns.svelte.ts).

@@ -4,6 +4,7 @@
 
 import { api, ApiError, setUnauthorizedHandler, type RequestOptions } from './api';
 import { forgetLines } from './attachment-lines';
+import { i18n, type Locale } from './i18n/index.svelte';
 import { missingAttachment } from './attachments';
 import { charCount, ComposerState, MAX_MESSAGE_CHARS, MAX_QUESTION_CHARS } from './composer.svelte';
 import { Conversations, errorMessage } from './conversations.svelte';
@@ -537,6 +538,22 @@ class App {
     return catalog || provider;
   }
 
+  /**
+   * The owner picks the interface's language. The server writes its texts in the language
+   * of each request and of the socket: the socket reconnects in the new one (running turns
+   * resume on it), and the texts it already sent (the agents' status, the models) come
+   * again.
+   */
+  setLocale(locale: Locale): void {
+    if (locale === i18n.locale) return;
+    i18n.set(locale);
+    if (this.auth !== 'ready') return;
+    this.conn.disconnect();
+    this.conn.connect();
+    void this.refreshProviders(BACKGROUND);
+    if (this.catalog) void this.reloadModels();
+  }
+
   async refreshProviders(options: RequestOptions = {}): Promise<void> {
     const epoch = this.#epoch;
     try {
@@ -850,7 +867,7 @@ class App {
         // one the server no longer has says so on its card.
         if (turn.turnId == null) {
           this.composer.restore(turn.question, turn.attachments);
-          const gone = missingAttachment(ev.error.message);
+          const gone = missingAttachment(ev.error);
           if (gone !== null) this.composer.attachments.markGone(gone);
         }
         if (turn.conversationId !== this.convs.currentId) {

@@ -1,5 +1,5 @@
 # ClaudeGPT OS on a VPS: Caddy (HTTPS edge) in front of the app.
-# Step by step (in Catalan): docs/DESPLEGAMENT.md
+# Step by step (in Catalan): docs/DEPLOYMENT.md
 #
 #   cp .env.example .env && nano .env
 #   docker compose up -d --build

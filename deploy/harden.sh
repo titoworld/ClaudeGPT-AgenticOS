@@ -14,7 +14,7 @@
 #   6. Docker Engine + Compose plugin from Docker's official apt repository,
 #      with log rotation and settings that keep real client IPs. Automatic
 #      updates do not cover it (a new Docker release is best installed while
-#      you watch): docs/DESPLEGAMENT.md, "Actualitzar", upgrades it monthly.
+#      you watch): docs/DEPLOYMENT.md, "Actualitzar", upgrades it monthly.
 #
 # Environment options:
 #   WITH_FAIL2BAN=1   also install fail2ban with an sshd jail
@@ -290,7 +290,7 @@ EOF
   systemctl enable --now docker >/dev/null
   info "No afegeixo cap usuari al grup docker: equival a ser root. Fes servir sudo."
   info "Docker no s'actualitza sol: un cop al mes, apt-get update && apt-get upgrade"
-  info "(docs/DESPLEGAMENT.md, apartat «Actualitzar»)."
+  info "(docs/DEPLOYMENT.md, apartat «Actualitzar»)."
 }
 
 main() {
@@ -303,7 +303,7 @@ main() {
   docker_engine
   say "Fet"
   info "Comprova-ho: ufw status verbose · docker compose version"
-  info "Següent pas: docs/DESPLEGAMENT.md, apartat «3. Configurar»."
+  info "Següent pas: docs/DEPLOYMENT.md, apartat «3. Configurar»."
 }
 
 main "$@"

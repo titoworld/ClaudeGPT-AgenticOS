@@ -31,7 +31,7 @@ from agentic_os.providers.base import MODEL_ID_PATTERN, AttachmentKind, Attachme
 
 TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate", "refine")
 DEFAULT_MODE_REFINE: Final = "El mode per defecte no pot ser «refine»."
-"""A refine turn runs until the owner stops it (docs/adr/0010-mode-perfecciona.md), so it
+"""A refine turn runs until the owner stops it (docs/adr/0010-refine-mode.md), so it
 is only ever chosen on purpose: never the mode a turn gets without asking."""
 
 ROUNDS_RANGE: Final = (0, 4)
@@ -362,7 +362,7 @@ class RuntimeSettings:
     debate: DebateOptions = field(default_factory=DebateOptions)
     refine: RefineOptions = field(default_factory=RefineOptions)
     """The options of a refine turn that does not give its own
-    (docs/adr/0010-mode-perfecciona.md)."""
+    (docs/adr/0010-refine-mode.md)."""
     use_cache: bool = True
     compaction_threshold_tokens: int = 6000
     models: Mapping[AgentName, str | None] = field(default_factory=_no_models)
@@ -379,7 +379,7 @@ class RuntimeSettings:
     pdf_in_revisions: AttachmentMode = "text"
     """How the debate revisions get the attached PDFs: ``"text"`` their extracted text
     (far fewer tokens), ``"full"`` the document itself. The answers and the synthesis
-    always get the whole document (docs/adr/0009-adjunts.md)."""
+    always get the whole document (docs/adr/0009-attachments.md)."""
     revision: int = 0
     """How many times the settings have been saved: 0 until the first save, and 1 for
     settings saved before revisions existed. The store sets it; in a ``PUT

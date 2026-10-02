@@ -1,5 +1,6 @@
 // Small UI helpers: conversation grouping, fuzzy matching, compact numbers.
 
+import { i18n, textRecord } from './i18n/index.svelte';
 import type { ConversationSummary, ProviderMode, TurnMode } from './protocol';
 
 export type DateGroup = 'Avui' | 'Ahir' | 'Últims 7 dies' | 'Anteriors';
@@ -74,31 +75,27 @@ export function fuzzyFilter<T>(items: readonly T[], query: string, key: (item: T
     .map((x) => x.item);
 }
 
-const oneDecimal = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 1 });
-const integer = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 0 });
-
-/** 950 -> "950", 3200 -> "3,2k", 1250000 -> "1,3M". */
+/** 950 -> "950", 3200 -> "3,2k", 1250000 -> "1,3M" (with the decimal mark of the language in force). */
 export function formatK(n: number): string {
   const abs = Math.abs(n);
-  if (abs < 1000) return integer.format(n);
-  if (abs < 1_000_000) return `${oneDecimal.format(n / 1000)}k`;
-  return `${oneDecimal.format(n / 1_000_000)}M`;
+  const format = (value: number, digits: number) => new Intl.NumberFormat(i18n.tag, { maximumFractionDigits: digits }).format(value);
+  if (abs < 1000) return format(n, 0);
+  if (abs < 1_000_000) return `${format(n / 1000, 1)}k`;
+  return `${format(n / 1_000_000, 1)}M`;
 }
 
 /** Rough prompt size estimate used across the app: characters / 4. */
 export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
 
-export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Consell', refine: 'Perfecciona' };
+const MODES: readonly TurnMode[] = ['solo', 'duel', 'debate', 'refine'];
+
+/** Each mode's name, in the language in force. */
+export const MODE_LABEL: Record<TurnMode, string> = textRecord(MODES, (mode) => i18n.m.common.modes[mode].label);
 
 /** What each mode does, in a sentence (the composer's tooltips, the empty state). */
-export const MODE_DESCRIPTION: Record<TurnMode, string> = {
-  solo: 'Respon una sola IA. El més ràpid i econòmic.',
-  duel: 'Claude i ChatGPT responen alhora, costat a costat.',
-  debate: 'Responen, es critiquen per rondes i sintetitzen la millor resposta. Si arriben a un consens, paren abans.',
-  refine: "Les dues IA milloren un sol document ronda rere ronda fins que l'aturis.",
-};
+export const MODE_DESCRIPTION: Record<TurnMode, string> = textRecord(MODES, (mode) => i18n.m.common.modes[mode].description);
 
-export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = { cli: 'Subscripció', api: 'API', fake: 'Demo' };
+export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = textRecord(['cli', 'api', 'fake'], (mode) => i18n.m.common.providerModes[mode]);
 
 /** Fallback texts for WebSocket `error` codes (the server message wins when present). */
 export const WS_ERROR_TEXT: Record<string, string> = {

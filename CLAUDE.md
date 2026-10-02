@@ -11,7 +11,7 @@ Instruccions per a les sessions de Claude Code en aquest repositori.
 
 ## Què és
 
-ClaudeGPT OS: un consell privat de Claude i ChatGPT per a un sol propietari, autoallotjat en un VPS. Llegeix [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md), [docs/PROTOCOL.md](docs/PROTOCOL.md) i [docs/adr/](docs/adr/) abans de fer canvis d'estructura. Les decisions noves d'arquitectura es proposen al propietari i es registren com a ADR.
+ClaudeGPT OS: un consell privat de Claude i ChatGPT per a un sol propietari, autoallotjat en un VPS. Llegeix [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROTOCOL.md](docs/PROTOCOL.md) i [docs/adr/](docs/adr/) abans de fer canvis d'estructura. Les decisions noves d'arquitectura es proposen al propietari i es registren com a ADR.
 
 ## Comandes
 

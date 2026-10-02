@@ -1,4 +1,4 @@
-"""The refine mode on the server (docs/adr/0010-mode-perfecciona.md): ``turn.start`` with
+"""The refine mode on the server (docs/adr/0010-refine-mode.md): ``turn.start`` with
 mode ``refine`` and its options, its budget in dollars for the engine, ``turn.stop``
 through the WebSocket and the runtime settings of the mode.
 

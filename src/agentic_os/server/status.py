@@ -34,7 +34,7 @@ def status_to_wire(status: ProviderStatus) -> Wire:
         "mode": status.mode,
         "available": status.available,
         "model": status.model,
-        "detail": status.detail,
+        "detail": str(status.detail),
         "limits": [
             {
                 "window": limit.window,

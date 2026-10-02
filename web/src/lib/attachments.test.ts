@@ -125,9 +125,12 @@ describe('the type of a file comes from its content, as the server decides it', 
   });
 
   it('knows which attachment a turn failed for because the server no longer has it', () => {
-    expect(missingAttachment("L'adjunt 12 no existeix.")).toBe(12);
-    expect(missingAttachment("L'adjunt no existeix.")).toBeNull();
-    expect(missingAttachment('La conversa no existeix.')).toBeNull();
+    // The server names it, whatever the language of its message.
+    expect(missingAttachment({ kind: 'invalid', message: 'Attachment 12 does not exist.', attachment_id: 12 })).toBe(12);
+    // Errors stored before it did: their Catalan message.
+    expect(missingAttachment({ kind: 'invalid', message: "L'adjunt 12 no existeix." })).toBe(12);
+    expect(missingAttachment({ kind: 'invalid', message: "L'adjunt no existeix." })).toBeNull();
+    expect(missingAttachment({ kind: 'not_found', message: 'La conversa no existeix.' })).toBeNull();
     expect(GONE_MESSAGE).toBe("Aquest adjunt ja no és al servidor: treu-lo i torna'l a adjuntar.");
   });
 

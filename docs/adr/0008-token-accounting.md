@@ -55,7 +55,7 @@ La validació de l'auditoria del 28 de setembre de 2026 (punts 7 i 8) va mostrar
   - Només compten els intents facturats: amb sortida, o declinats abans de la sortida en una categoria que Anthropic factura igualment.
   - El model de cada intent és el de la seva entrada. Si no hi és, el `from` del seu bloc; si tampoc, el model al qual havia passat l'intent anterior; i si no, el model que es va demanar.
 - El motor registra cada intent declinat com una crida facturada sense missatge: una fila d'ús amb el seu model i el seu cost, `ok = False` i l'error «<model> ha declinat la petició i l'ha passada a un altre model.».
-  - Compta al total del torn (`outcome.usage`, [ADR 0007](0007-resultat-del-torn.md)) i a `unstored_usage`.
+  - Compta al total del torn (`outcome.usage`, [ADR 0007](0007-turn-outcome.md)) i a `unstored_usage`.
   - Si portava el context compactat, compta també per a l'estalvi de la compactació.
   - Els resums de compactació fan el mateix.
 - El missatge servit conserva l'ús del seu intent (`meta.usage` i `stream.completed.usage`) i guarda els intents declinats a `meta.declined`, `[{model, usage}]`.

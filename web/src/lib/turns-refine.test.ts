@@ -1,4 +1,4 @@
-// A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) in the turn model: what
+// A refine turn («Perfecciona», docs/adr/0010-refine-mode.md) in the turn model: what
 // its events build live (the rounds, what each call is, the stop the owner asked for, why
 // it ended), and the same view rebuilt from its stored messages after a reload.
 import { describe, expect, it } from 'vitest';

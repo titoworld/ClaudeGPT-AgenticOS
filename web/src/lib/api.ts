@@ -1,4 +1,5 @@
 // Typed REST client (docs/PROTOCOL.md). Same-origin, cookie session.
+import { i18n } from './i18n/index.svelte';
 import {
   BACKGROUND_HEADER,
   type Attachment,
@@ -93,7 +94,8 @@ async function send<T>(
   background: boolean,
   signal: AbortSignal | null,
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  // The server answers in the interface's language (its errors, its texts).
+  const headers: Record<string, string> = { 'Accept-Language': i18n.locale };
   // A file goes as it is: the server takes its type from the content, never from this.
   if (body !== undefined) headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json';
   if (background) headers[BACKGROUND_HEADER] = '1';
@@ -136,7 +138,8 @@ function failure(res: Response, path: string, payload: unknown): ApiError {
 async function attachmentText(id: number, options: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<string> {
   const { maxBytes, signal } = options;
   const path = `/api/attachments/${id}/content`;
-  const headers: Record<string, string> = maxBytes === undefined ? {} : { Range: `bytes=0-${maxBytes - 1}` };
+  const headers: Record<string, string> = { 'Accept-Language': i18n.locale };
+  if (maxBytes !== undefined) headers.Range = `bytes=0-${maxBytes - 1}`;
   const res = await fetch(path, { credentials: 'same-origin', headers, signal: signal ?? null });
   if (!res.ok) {
     let payload: unknown = null;

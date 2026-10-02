@@ -125,7 +125,7 @@ LOGIN_HINT = (
     "posa el token de «claude setup-token» a CLAUDE_CODE_OAUTH_TOKEN (.env) i fes "
     "«docker compose up -d», o executa «claude auth login» al servidor"
 )
-"""How to log the CLI in (docs/DESPLEGAMENT.md, step 6): ``setup-token`` only prints the
+"""How to log the CLI in (docs/DEPLOYMENT.md, step 6): ``setup-token`` only prints the
 token, which the app gets from .env."""
 
 ENV_ALLOW_LIST = (

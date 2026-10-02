@@ -75,8 +75,8 @@ def field_default(name: str) -> int:
 
 
 PROTOCOL = "docs/PROTOCOL.md"
-ARQUITECTURA = "docs/ARQUITECTURA.md"
-DESPLEGAMENT = "docs/DESPLEGAMENT.md"
+ARQUITECTURA = "docs/ARCHITECTURE.md"
+DESPLEGAMENT = "docs/DEPLOYMENT.md"
 LOGIN_BODY = middleware.SMALL_BODY_PATHS["/api/auth/login"]
 BODY_SECONDS = int(middleware.BODY_TIMEOUT_SECONDS)
 assert BODY_SECONDS == middleware.BODY_TIMEOUT_SECONDS  # the docs give whole seconds
@@ -239,9 +239,9 @@ def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
         assert f"`{middleware.too_large_detail(limit)}`" in protocol
 
 
-# -- the refine mode (docs/adr/0010-mode-perfecciona.md) ---------------------------------
+# -- the refine mode (docs/adr/0010-refine-mode.md) ---------------------------------
 
-ADR_REFINE = "docs/adr/0010-mode-perfecciona.md"
+ADR_REFINE = "docs/adr/0010-refine-mode.md"
 REFINE = RefineOptions()
 NUMBER_WORDS = {"dos": 2, "dues": 2, "tres": 3, "quatre": 4, "cinc": 5}
 
@@ -457,7 +457,7 @@ def test_the_readme_deploy_summary_puts_the_claude_token_in_env() -> None:
     lines = block.splitlines()
     token = next(i for i, line in enumerate(lines) if "claude setup-token" in line)
     # The token is only printed: it works once it is CLAUDE_CODE_OAUTH_TOKEN in .env
-    # and the app is recreated with it (docs/DESPLEGAMENT.md, step 6).
+    # and the app is recreated with it (docs/DEPLOYMENT.md, step 6).
     assert "CLAUDE_CODE_OAUTH_TOKEN" in lines[token] and ".env" in lines[token]
     doctor = next(i for i, line in enumerate(lines) if "agentic-os doctor" in line)
     assert any(line.startswith("docker compose up -d") for line in lines[token + 1 : doctor])

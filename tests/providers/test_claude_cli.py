@@ -243,13 +243,13 @@ async def test_list_models_offers_the_aliases_and_what_they_resolved_to(
         ("haiku", "Claude Haiku", False),
         ("fable", "Claude Fable", False),
     ]
-    assert all(m.description.startswith("Sempre la versió més nova.") for m in models)
-    assert not any("Ara:" in m.description for m in models)
+    assert all(str(m.description).startswith("Sempre la versió més nova.") for m in models)
+    assert not any("Ara:" in str(m.description) for m in models)
 
     # The recorded system/init resolves "haiku" to a concrete model.
     await collect(provider, request(fast=True))
     haiku = next(m for m in await provider.list_models() if m.id == "haiku")
-    assert haiku.description.endswith("Ara: claude-haiku-4-5-20251001")
+    assert str(haiku.description).endswith("Ara: claude-haiku-4-5-20251001")
 
 
 async def test_list_models_with_a_configured_full_id(tmp_path: Path, fake: FakeCli) -> None:
@@ -885,7 +885,7 @@ async def test_a_refusal_through_the_engine_is_never_stored_nor_cached(
     ]
 
 
-# -- attachments (docs/adr/0009-adjunts.md) ------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) ------------------------------------------------
 
 
 def base64_of(attachment: Attachment) -> str:

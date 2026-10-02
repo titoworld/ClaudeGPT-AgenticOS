@@ -1,4 +1,4 @@
-"""Attachments through the engine (docs/adr/0009-adjunts.md): loading and links, the
+"""Attachments through the engine (docs/adr/0009-attachments.md): loading and links, the
 question's snapshot, what every phase gets, the history references, the turn cache,
 the prompts and the fake provider."""
 
@@ -215,7 +215,13 @@ async def test_a_missing_attachment_fails_the_turn_before_anything_is_stored(
 ) -> None:
     events = await collect(engine.run(turn(attachments=(stored["foto.png"], 99))))
     assert len(events) == 1 and isinstance(events[0], TurnFailed)
-    assert events[0].error == ErrorInfo("invalid", "L'adjunt 99 no existeix.")
+    assert events[0].error == ErrorInfo("invalid", "L'adjunt 99 no existeix.", attachment_id=99)
+    # The client knows which attachment it is without reading the message.
+    assert events[0].to_wire()["error"] == {
+        "kind": "invalid",
+        "message": "L'adjunt 99 no existeix.",
+        "attachment_id": 99,
+    }
     assert not store.conversations and not store.messages and not store.attachment_links
     assert not any(fake.requests for fake in fakes.values())
 
@@ -284,7 +290,8 @@ async def test_an_attachment_gone_before_the_question_is_stored_fails_the_turn_u
     events = await collect(engine.run(turn(attachments=ids, conversation_id=conversation_id)))
     assert [type(e) for e in events] == [TurnFailed]
     failed = cast(TurnFailed, events[0])
-    assert failed.error == ErrorInfo("invalid", f"L'adjunt {stored['foto.png']} no existeix.")
+    gone = stored["foto.png"]
+    assert failed.error == ErrorInfo("invalid", f"L'adjunt {gone} no existeix.", attachment_id=gone)
     # Nothing of the turn is left: no question, no link, not even the conversation it
     # had just created (its id was never announced).
     assert racing.messages == before and not racing.attachment_links

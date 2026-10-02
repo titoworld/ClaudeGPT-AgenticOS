@@ -4,7 +4,7 @@ deploy/, .gitignore, docs/), and the behaviour of the backup and restore scripts
 They read the files as text or YAML, so they need neither Docker nor Caddy; the
 deploy job of the CI checks the same files with the real tools (compose config,
 caddy validate, shellcheck, image build). deploy/backup.sh, deploy/restore.sh and
-the backup commands of docs/DESPLEGAMENT.md run with bash against stand-ins for
+the backup commands of docs/DEPLOYMENT.md run with bash against stand-ins for
 docker, age, scp and ssh (STUBS): no Docker, no root, and nothing outside a
 temporary directory."""
 
@@ -192,7 +192,7 @@ def test_the_docs_give_caddys_timeouts() -> None:
         for limits in caddy_blocks(caddyfile, rf"request_body {matcher}")
     }
     assert len(timeouts) == 2
-    for document in ("docs/ARQUITECTURA.md", "docs/DESPLEGAMENT.md"):
+    for document in ("docs/ARCHITECTURE.md", "docs/DEPLOYMENT.md"):
         said = {int(n) for n in re.findall(r"Caddy talla als (\d+)", read(document))}
         assert said == timeouts, document
 
@@ -224,16 +224,16 @@ def test_caddy_streams_request_bodies_instead_of_buffering_them() -> None:
     ("document", "stale"),
     [
         # Codex still offers ChatGPT a code tool and sub-agent tools (ADR 0002, Nota).
-        ("docs/ARQUITECTURA.md", "sense eines"),
+        ("docs/ARCHITECTURE.md", "sense eines"),
         # agents.max_threads caps sub-agents running at once, not per call.
-        ("docs/ARQUITECTURA.md", "un per crida"),
-        ("docs/DESPLEGAMENT.md", "un per crida"),
-        ("docs/adr/0002-subscripcions-via-cli-oficials.md", "un subagent per crida"),
+        ("docs/ARCHITECTURE.md", "un per crida"),
+        ("docs/DEPLOYMENT.md", "un per crida"),
+        ("docs/adr/0002-subscriptions-via-official-clis.md", "un subagent per crida"),
         # Caddy streams request bodies (test_caddy_streams_request_bodies_...).
-        ("docs/ARQUITECTURA.md", "llegeix sencer"),
-        ("docs/DESPLEGAMENT.md", "llegeix sencer"),
+        ("docs/ARCHITECTURE.md", "llegeix sencer"),
+        ("docs/DEPLOYMENT.md", "llegeix sencer"),
         # The Codex logs are deleted before every start: a full tmpfs cannot stop it.
-        ("docs/DESPLEGAMENT.md", "failed to initialize sqlite state runtime"),
+        ("docs/DEPLOYMENT.md", "failed to initialize sqlite state runtime"),
     ],
 )
 def test_docs_drop_stale_claims(document: str, stale: str) -> None:
@@ -241,7 +241,7 @@ def test_docs_drop_stale_claims(document: str, stale: str) -> None:
 
 
 def test_login_troubleshooting_covers_new_devices_during_an_attack() -> None:
-    text = section(read("docs/DESPLEGAMENT.md"), "Resolució de problemes")
+    text = section(read("docs/DEPLOYMENT.md"), "Resolució de problemes")
     login = text[text.index("**No puc iniciar sessió**") :].split("\n\n")[0]
     assert "agentic-os reset-throttle" in login
     advice = next(
@@ -255,7 +255,7 @@ def heading_anchor(heading: str) -> str:
     return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
 
 
-@pytest.mark.parametrize("document", ["docs/DESPLEGAMENT.md", "docs/ARQUITECTURA.md"])
+@pytest.mark.parametrize("document", ["docs/DEPLOYMENT.md", "docs/ARCHITECTURE.md"])
 def test_links_to_sections_resolve(document: str) -> None:
     text = read(document)
     anchors = {heading_anchor(h) for h in re.findall(r"^#+ (.+)$", text, re.M)}
@@ -264,7 +264,7 @@ def test_links_to_sections_resolve(document: str) -> None:
 
 
 def test_harden_script_points_to_existing_sections() -> None:
-    headings = set(re.findall(r"^## (.+)$", read("docs/DESPLEGAMENT.md"), re.M))
+    headings = set(re.findall(r"^## (.+)$", read("docs/DEPLOYMENT.md"), re.M))
     named = re.findall(r"apartat «([^»]+)»", read("deploy/harden.sh"))
     assert named
     for name in named:
@@ -279,7 +279,7 @@ def test_ssh_hardening_keeps_the_default_max_auth_tries() -> None:
 
 def test_update_steps_refresh_base_images_and_the_host() -> None:
     assert services()["app"]["build"]["pull"] is True
-    update = section(read("docs/DESPLEGAMENT.md"), "Actualitzar")
+    update = section(read("docs/DEPLOYMENT.md"), "Actualitzar")
     assert "docker compose build --pull" in update
     assert "apt-get upgrade" in update  # Docker Engine, containerd and runc
 
@@ -289,13 +289,13 @@ def test_update_steps_apply_a_new_caddyfile() -> None:
     # a new inode that the running container never sees, and `docker compose up -d`
     # keeps a container whose service definition did not change.
     assert "./deploy/Caddyfile:/etc/caddy/Caddyfile:ro" in services()["caddy"]["volumes"]
-    [steps] = bash_blocks(section(read("docs/DESPLEGAMENT.md"), "Actualitzar"))[:1]
+    [steps] = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Actualitzar"))[:1]
     commands = steps.splitlines()
     assert commands.index("docker compose restart caddy") > commands.index("git pull")
 
 
 def test_backups_are_written_outside_the_repository() -> None:
-    backups = section(read("docs/DESPLEGAMENT.md"), "Còpies de seguretat")
+    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
     assert "/var/backups/claudegpt" in backups
     # Neither inside the clone (/opt/claudegpt) nor relative to it.
     assert not re.search(r"\$PWD/backups|/opt/claudegpt/backups|(?<![\w/])backups/", backups)
@@ -318,7 +318,7 @@ def test_leftover_backups_in_the_clone_are_ignored_by_git(path: str) -> None:
 
 # --------------------------------------------------------- backups and restores
 #
-# The «Còpies de seguretat» section of docs/DESPLEGAMENT.md runs deploy/backup.sh
+# The «Còpies de seguretat» section of docs/DEPLOYMENT.md runs deploy/backup.sh
 # and deploy/restore.sh (audit items 2 and 16, and N8, N9 and N23). Where they can,
 # the tests run the guide's own commands, so they also cover what the owner
 # pastes; the rest call the scripts directly.
@@ -1044,7 +1044,7 @@ def sandbox(tmp_path: Path) -> Sandbox:
 
 def guide_block(marker: str) -> str:
     """The bash block of «Còpies de seguretat» that contains ``marker``."""
-    backups = section(read("docs/DESPLEGAMENT.md"), "Còpies de seguretat")
+    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
     [block] = [block for block in bash_blocks(backups) if marker in block]
     return block
 
@@ -1080,7 +1080,7 @@ def guide_restore(sandbox: Sandbox) -> tuple[str, Path, Path]:
 
 
 def test_backup_steps_run_the_scripts_and_leave_the_owners_shell_alone() -> None:
-    blocks = bash_blocks(section(read("docs/DESPLEGAMENT.md"), "Còpies de seguretat"))
+    blocks = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat"))
     assert any("bash deploy/backup.sh" in block for block in blocks)
     assert any("bash deploy/restore.sh" in block for block in blocks)
     for block in blocks:
@@ -1091,7 +1091,7 @@ def test_backup_steps_run_the_scripts_and_leave_the_owners_shell_alone() -> None
 
 
 def test_the_guide_explains_every_restore_step_and_command() -> None:
-    backups = section(read("docs/DESPLEGAMENT.md"), "Còpies de seguretat")
+    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
     restore = read("deploy/restore.sh")
     for step in ("R0", "R1", "R2", "R3", "R4", "R5"):
         assert step in backups and step in restore, step

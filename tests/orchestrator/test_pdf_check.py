@@ -1,5 +1,5 @@
 """Claude's check of the PDF text that ChatGPT with the subscription reads
-(orchestrator/pdf_check.py, docs/adr/0009-adjunts.md): its prompt and output budget, its
+(orchestrator/pdf_check.py, docs/adr/0009-attachments.md): its prompt and output budget, its
 calls, when it stops and when it is stored and reused; and the pieces around it: the
 store's checks, the fake's check replies, the prompts' notes and the events' wire."""
 

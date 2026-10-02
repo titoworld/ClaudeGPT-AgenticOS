@@ -1,4 +1,4 @@
-// Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-adjunts.md).
+// Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md).
 //
 // - What the server would accept, checked in the browser with the server's own rules
 //   and Catalan messages (src/agentic_os/attachments.py): the type comes from the
@@ -21,6 +21,7 @@ import {
   TEXT_EXTENSIONS,
   type Attachment,
   type AttachmentKind,
+  type ErrorInfo,
   type PdfNotes,
 } from './protocol';
 
@@ -61,12 +62,13 @@ export const CONNECTION_FAILED_MESSAGE = "No s'ha pogut pujar el fitxer: la conn
 export const GONE_MESSAGE = "Aquest adjunt ja no és al servidor: treu-lo i torna'l a adjuntar.";
 
 /**
- * The attachment a turn failed for because the server does not have it (anymore): an
- * upload never sent is deleted after a day. docs/PROTOCOL.md gives the message of that
- * `turn.failed`: «L'adjunt 12 no existeix.».
+ * The attachment a turn's error says no longer exists (`attachment_id`), else null. The
+ * server deletes an attachment no message uses after a while (docs/PROTOCOL.md). Errors
+ * stored before the server gave the id only say it in Catalan: «L'adjunt 12 no existeix.».
  */
-export function missingAttachment(message: string): number | null {
-  const found = /^L'adjunt (\d+) no existeix\.$/.exec(message.trim());
+export function missingAttachment(error: ErrorInfo): number | null {
+  if (typeof error.attachment_id === 'number' && Number.isInteger(error.attachment_id)) return error.attachment_id;
+  const found = /^L'adjunt (\d+) no existeix\.$/.exec(error.message.trim());
   return found ? Number(found[1]) : null;
 }
 

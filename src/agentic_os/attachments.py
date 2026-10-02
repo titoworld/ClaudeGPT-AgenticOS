@@ -1,4 +1,4 @@
-"""Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-adjunts.md).
+"""Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md).
 
 - The limits, in one place: the server, the store and the engine use these constants.
 - What a file is comes from its content, never from its name or its ``Content-Type``:
@@ -791,7 +791,8 @@ def has_images(resources: object, depth: int = 0, seen: set[int] | None = None) 
     forms' (:data:`MAX_FORM_DEPTH` levels down): a page that draws a scan or a picture.
     It counts the images a page could draw, which is enough to tell a scan with its
     recognized text in an invisible layer from a page that hides text; an image that the
-    page lists and never draws counts too (a limit of the analysis, docs/adr/0009-adjunts.md)."""
+    page lists and never draws counts too (a limit of the analysis,
+    docs/adr/0009-attachments.md)."""
     seen = set() if seen is None else seen
     xobjects = _entry(_resolved(resources), "/XObject")
     if not isinstance(xobjects, dict) or id(xobjects) in seen:

@@ -1,4 +1,4 @@
-"""The shared contract of the refine mode (docs/adr/0010-mode-perfecciona.md): its options,
+"""The shared contract of the refine mode (docs/adr/0010-refine-mode.md): its options,
 how words are counted and the wire of its events."""
 
 from __future__ import annotations

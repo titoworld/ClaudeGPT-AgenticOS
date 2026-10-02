@@ -1,4 +1,4 @@
-// The preview of an attachment, in the app (docs/adr/0009-adjunts.md): an image in a
+// The preview of an attachment, in the app (docs/adr/0009-attachments.md): an image in a
 // lightbox, a PDF page by page with PDF.js, a text file as plain text; each with a
 // download button. PDF.js is a double here (lib/pdf.test.ts covers it).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';

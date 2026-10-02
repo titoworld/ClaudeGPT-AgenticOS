@@ -1,4 +1,4 @@
-// The view of a refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md): the living
+// The view of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md): the living
 // document with its versions and their diff, each round's summary and reviews, the stop
 // buttons and what they say, why it stopped, the same view after a reload, and the
 // layout that stacks on a phone.

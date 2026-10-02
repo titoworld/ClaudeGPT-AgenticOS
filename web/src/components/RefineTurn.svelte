@@ -1,5 +1,5 @@
 <script lang="ts">
-  // A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md): both agents answer the
+  // A refine turn («Perfecciona», docs/adr/0010-refine-mode.md): both agents answer the
   // brief, the editor merges the answers into a document, and round after round both review
   // it and the editor writes its next version. The view: the first answers (folded once
   // there is a document), the living document with its versions, every round, and, while

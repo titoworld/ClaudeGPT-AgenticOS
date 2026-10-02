@@ -1186,7 +1186,7 @@ async def test_list_models_live_and_cached(tmp_path: Path) -> None:
             ("claude-opus-5", "Claude Opus 5", True, 1_000_000),
             ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", False, 200_000),
         ]
-        assert models[2].description.startswith("El més ràpid")
+        assert str(models[2].description).startswith("El més ràpid")
         assert api.requests[0].url.path == "/v1/models"
         assert await provider.list_models() == models  # cached: no second request
         assert len(api.requests) == 1
@@ -1292,7 +1292,7 @@ async def test_list_models_without_api_key(tmp_path: Path) -> None:
     await provider.aclose()
 
 
-# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) --------------------------------------------------
 
 
 def base64_of(attachment: Attachment) -> str:

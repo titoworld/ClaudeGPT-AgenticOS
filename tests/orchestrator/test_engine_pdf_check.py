@@ -1,5 +1,5 @@
 """Claude's check of the PDFs that ChatGPT with the subscription reads, through the engine
-(docs/adr/0009-adjunts.md): when it runs and who waits for it, what ChatGPT gets, the
+(docs/adr/0009-attachments.md): when it runs and who waits for it, what ChatGPT gets, the
 turn's events, what the check costs, the messages' meta and the prompts that say so."""
 
 from __future__ import annotations

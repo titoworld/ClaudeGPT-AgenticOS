@@ -754,7 +754,7 @@ async def test_list_models_falls_back_without_raising(tmp_path: Path) -> None:
     assert len(await no_key.list_models()) == 3 and not no_key.models_live
 
 
-# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) --------------------------------------------------
 
 
 def base64_of(attachment: Attachment) -> str:

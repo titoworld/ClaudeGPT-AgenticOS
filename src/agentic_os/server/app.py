@@ -30,6 +30,7 @@ from agentic_os.server.fx_rates import FxFetcher, FxRefresher
 from agentic_os.server.middleware import (
     BodyLimitMiddleware,
     CloseUnreadBodyMiddleware,
+    LanguageMiddleware,
     OriginCheckMiddleware,
     SecurityHeadersMiddleware,
 )
@@ -195,6 +196,7 @@ def create_app(
     app.add_middleware(OriginCheckMiddleware, allowed_origins=settings.allowed_origins)
     app.add_middleware(CloseUnreadBodyMiddleware)
     app.add_middleware(SecurityHeadersMiddleware, hsts=settings.secure_cookies)
+    app.add_middleware(LanguageMiddleware)
 
     app.include_router(routes_api.public_router)
     app.include_router(routes_auth.router)

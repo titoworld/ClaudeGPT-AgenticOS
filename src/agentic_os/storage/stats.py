@@ -11,7 +11,7 @@ Definitions:
   An agent's ``cost_usd`` is ``None`` when none of its calls reported a cost.
 - ``daily``: every kind of processed token (input, cache reads, cache writes and
   output; reasoning is part of the output), so the dashboard can add them up as
-  ``Usage.processed_tokens`` does (docs/adr/0008-recompte-de-tokens.md).
+  ``Usage.processed_tokens`` does (docs/adr/0008-token-accounting.md).
 - ``latency``: nearest-rank percentiles over successful calls.
 - ``costs``: per agent, ``api_usd`` sums the cost of api-mode calls (real spend) and
   ``equivalent_usd`` the cost of the other calls (subscription usage valued at API

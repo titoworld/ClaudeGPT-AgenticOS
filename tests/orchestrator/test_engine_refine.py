@@ -1,4 +1,4 @@
-"""Refine turns («Perfecciona», docs/adr/0010-mode-perfecciona.md) end to end, with fake
+"""Refine turns («Perfecciona», docs/adr/0010-refine-mode.md) end to end, with fake
 providers and the in-memory store: both agents answer, the editor merges the answers into
 version 1, and round after round both review the current version and the editor writes the
 next one, until the owner stops the turn, nobody finds anything left to change, both score

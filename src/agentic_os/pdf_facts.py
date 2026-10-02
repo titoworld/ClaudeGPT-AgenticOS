@@ -1,4 +1,4 @@
-"""Facts about a PDF's pages, and Claude's check of their text (docs/adr/0009-adjunts.md).
+"""Facts about a PDF's pages, and Claude's check of their text (docs/adr/0009-attachments.md).
 
 - :class:`PdfPage`: what the server's PDF reader finds on each page when the file is
   uploaded, in every mode: where the page's text is in the stored text, and the signs of

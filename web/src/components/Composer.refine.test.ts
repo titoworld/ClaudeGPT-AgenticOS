@@ -1,4 +1,4 @@
-// The composer's «Perfecciona» mode (docs/adr/0010-mode-perfecciona.md): a fourth mode
+// The composer's «Perfecciona» mode (docs/adr/0010-refine-mode.md): a fourth mode
 // with its options (rounds, budget in euros, word limit, editor, stopping by itself),
 // which start from the saved defaults and stay as the owner changes them, like the other
 // options; the turn carries them. The mode is never chosen by itself.

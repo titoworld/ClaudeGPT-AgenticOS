@@ -1,4 +1,4 @@
-// What the refine view («Perfecciona», docs/adr/0010-mode-perfecciona.md) shows of a turn:
+// What the refine view («Perfecciona», docs/adr/0010-refine-mode.md) shows of a turn:
 // the versions of the living document, each round's block, the live status and why it
 // stopped, the same live and after a reload.
 import { describe, expect, it } from 'vitest';

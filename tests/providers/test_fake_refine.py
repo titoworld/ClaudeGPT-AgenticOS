@@ -1,4 +1,4 @@
-"""The fake provider in a refine turn (docs/adr/0010-mode-perfecciona.md): deterministic
+"""The fake provider in a refine turn (docs/adr/0010-refine-mode.md): deterministic
 answers, a merge into a first version, reviews that propose one change for two rounds and
 then nothing (or the test's own replies), edits that apply the proposed changes and a
 shortening that fits the word budget, so that the engine's tests and the demo run the

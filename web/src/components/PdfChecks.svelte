@@ -1,6 +1,6 @@
 <script lang="ts">
   // Claude's check of each PDF of the question for ChatGPT with the subscription, live
-  // (docs/adr/0009-adjunts.md): ChatGPT cannot open a PDF, so it reads the text the server
+  // (docs/adr/0009-attachments.md): ChatGPT cannot open a PDF, so it reads the text the server
   // extracted, and Claude checks that text against the document while it answers. Each
   // PDF says that it is being checked, then what ChatGPT reads through Claude and what the
   // check cost (tokens and euros, like the rest of the turn's usage), why nobody could

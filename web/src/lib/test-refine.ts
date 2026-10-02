@@ -1,4 +1,4 @@
-// Fixtures of a refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) for unit
+// Fixtures of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md) for unit
 // tests: what the client sees live and what the server stores of the same turn, with the
 // wire of docs/PROTOCOL.md. Never imported by application code.
 import type {

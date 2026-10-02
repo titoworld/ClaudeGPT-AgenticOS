@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n/index.svelte';
+  import LanguagePicker from './LanguagePicker.svelte';
   import { untrack } from 'svelte';
   import { app, SettingsConflictError } from '../lib/app.svelte';
   import { errorMessage } from '../lib/conversations.svelte';
@@ -542,6 +544,11 @@
             </p>
           </section>
         {/if}
+
+        <section class="local">
+          <h3>{i18n.m.common.language}</h3>
+          <LanguagePicker />
+        </section>
 
         <section class="local">
           <h3>Efectes visuals</h3>

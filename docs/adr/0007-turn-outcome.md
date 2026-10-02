@@ -20,7 +20,7 @@ La validació de l'auditoria del 28 de setembre de 2026 (punts 9 i 14, i problem
   - `status`: `completed`, `failed` o `cancelled`.
   - `error` (`{kind, message}`): només si és `failed`, el mateix que porta `turn.failed`.
   - `failures`: les fallades de crida del torn (les de `stream.failed`), en l'ordre en què van passar, amb `{agent, kind, message, round}`. Pot ser buida.
-  - `usage`: el total del torn. Inclou totes les crides facturades: els resums de compactació, les crides fallides, els intents declinats abans d'un fallback ([ADR 0008](0008-recompte-de-tokens.md)) i les crides que no han desat cap missatge. És el mateix valor que porta l'esdeveniment final.
+  - `usage`: el total del torn. Inclou totes les crides facturades: els resums de compactació, les crides fallides, els intents declinats abans d'un fallback ([ADR 0008](0008-token-accounting.md)) i les crides que no han desat cap missatge. És el mateix valor que porta l'esdeveniment final.
   - `savings`: el mateix de `turn.completed`. Un torn fallit o cancel·lat no registra estalvis, com fins ara, i hi porta zeros. L'excepció és un torn que es cancel·la quan ja estava desant els estalvis, just abans d'acabar, amb tots els missatges desats: les files d'estalvi s'escriuen senceres (en una tasca pròpia, com el resultat), i el resultat les porta i s'escriu després. Així coincideix amb el que compta el tauler.
   - `consensus`: el d'un debat completat; `null` en els altres casos.
   - `final_message_ids`: els missatges finals desats. En un duel cancel·lat, la resposta que ja s'havia desat.

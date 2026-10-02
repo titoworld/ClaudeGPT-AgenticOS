@@ -1,14 +1,14 @@
 """Turn engine: runs solo, duel, debate and refine turns and streams their events.
 
-See docs/ARQUITECTURA.md (modes, token savings) and docs/PROTOCOL.md (event order).
+See docs/ARCHITECTURE.md (modes, token savings) and docs/PROTOCOL.md (event order).
 The turn itself runs in its own task and hands events to :meth:`Engine.run`
 through a queue, so concurrent model calls interleave naturally and closing or
 cancelling the iterator cancels every task of the turn before returning.
 
 How every turn ends (completed, failed or cancelled) is decided once and stored on its
-question before the terminal event (docs/adr/0007-resultat-del-torn.md).
+question before the terminal event (docs/adr/0007-turn-outcome.md).
 
-Attachments (docs/adr/0009-adjunts.md): a turn loads the ones its request names before
+Attachments (docs/adr/0009-attachments.md): a turn loads the ones its request names before
 anything else (a missing one fails the turn), stores its question linked to them in one
 transaction, before ``turn.started`` (one deleted meanwhile fails the turn just the same),
 and keeps their metadata there (``meta.attachments``). Answers and the synthesis get
@@ -23,7 +23,7 @@ Claude answers, and every call of ChatGPT waits for that same check before it st
 how it read each PDF (``meta.pdf_reading``), and so do the revisions and the synthesis
 (``prompts.pdf_reading_note``). A replay from the turn cache checks nothing.
 
-A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) improves one document
+A refine turn («Perfecciona», docs/adr/0010-refine-mode.md) improves one document
 until the owner stops it (see :meth:`Engine._refine`): both agents answer (round 0), the
 editor merges the answers into version 1 (round 1), and from round 2 on both review the
 current version and the editor writes the next one, which the engine checks without any
@@ -390,7 +390,7 @@ class _ReviewReader:
 class _VersionReader:
     """Streams and reads a merge, an edit or its shortening, and decides whether the
     version it writes is accepted, before its message is stored with the verdict. The
-    guards are the engine's, without any model (docs/adr/0010-mode-perfecciona.md): a
+    guards are the engine's, without any model (docs/adr/0010-refine-mode.md): a
     complete version section, then within the word budget and (an edit) not the same as
     the current version (after stripping). The merge's budget is the owner's limit, or
     the one its version 1 sets (which it always fits)."""
@@ -1038,7 +1038,11 @@ class Engine:
 
     @staticmethod
     def _missing_attachment(error: AttachmentNotFoundError) -> ErrorInfo:
-        return ErrorInfo("invalid", f"L'adjunt {error.attachment_id} no existeix.")
+        return ErrorInfo(
+            "invalid",
+            f"L'adjunt {error.attachment_id} no existeix.",
+            attachment_id=error.attachment_id,
+        )
 
     async def _discard_conversation(self, conversation_id: int) -> None:
         """Delete the conversation a turn created and could not store its question in.
@@ -1245,7 +1249,7 @@ class Engine:
         cached: bool = False,
         stop_reason: RefineStopReason | None = None,
     ) -> TurnOutcome:
-        """How the turn ended (docs/adr/0007-resultat-del-torn.md), decided once: a later
+        """How the turn ended (docs/adr/0007-turn-outcome.md), decided once: a later
         call (a cancellation while the outcome is being written) gets the same outcome.
         It is reported to ``on_outcome`` and written on the question, if it exists, in a
         task of its own that the caller waits for through ``asyncio.shield``: cancelling
@@ -1560,7 +1564,7 @@ class Engine:
     # -- refine («Perfecciona») ----------------------------------------------------------
 
     async def _refine(self, turn: _Turn) -> RefineStopReason | None:
-        """Refine turn (docs/adr/0010-mode-perfecciona.md): why it ended, once its last
+        """Refine turn (docs/adr/0010-refine-mode.md): why it ended, once its last
         version is stored as the final message; None if it failed (no answer came back).
 
         Round 0: both agents answer the brief, and one whose answer fails takes no
@@ -2827,7 +2831,7 @@ class Engine:
     ) -> list[tuple[str, Usage]]:
         """Record the billed attempts other models declined before ``source`` (a result or
         a provider error) was served or refused: each is a billed call of its own model,
-        priced at its rates, that stored no message (docs/adr/0008-recompte-de-tokens.md).
+        priced at its rates, that stored no message (docs/adr/0008-token-accounting.md).
         Returns them priced, in order."""
         declined = declined_attempts(source, turn.prices)
         for model, usage in declined:

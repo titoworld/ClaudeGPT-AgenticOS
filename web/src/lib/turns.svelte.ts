@@ -6,6 +6,7 @@
 // proxy, `stream.text += delta` only re-renders the text that changed, instead
 // of rebuilding the whole conversation on every token.
 
+import { i18n } from './i18n/index.svelte';
 import { AGENT_LABEL } from './format';
 import { AGENTS } from './protocol';
 import type {
@@ -38,7 +39,7 @@ export type TurnStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 export type CostBasis = 'api' | 'equivalent';
 
 /**
- * What a call of a refine turn is (docs/adr/0010-mode-perfecciona.md): a first answer, a
+ * What a call of a refine turn is (docs/adr/0010-refine-mode.md): a first answer, a
  * review of the current version, a version of the editor (the merge of round 1, a later
  * edit or its shortening) or the final version (the current one, stored without a call).
  */
@@ -133,7 +134,7 @@ export type PdfCheckStatus = PdfCheckState | 'interrupted';
 
 /**
  * Claude's check of a PDF of the question for ChatGPT with the subscription, as the turn's
- * `pdf.check` events tell it (docs/adr/0009-adjunts.md). Pages as in PdfReading.
+ * `pdf.check` events tell it (docs/adr/0009-attachments.md). Pages as in PdfReading.
  */
 export interface PdfCheckView {
   attachmentId: number;
@@ -548,14 +549,15 @@ export function synthesisNote(turn: TurnView, shown: StreamView | null = shownSy
     shown.degraded ||
     failed.includes(shown.agent) ||
     turn.streams.some((s) => s.kind === 'answer' && s.status === 'failed');
-  if (degraded) return `No s'ha pogut fer la síntesi: es mostra l'última resposta de ${who}.`;
+  const texts = i18n.m.turn.synthesis;
+  if (degraded) return texts.degraded(who);
   const chosen = turn.options?.debate.synthesizer;
   const missing = failed.find((agent) => agent !== shown.agent) ?? (chosen !== shown.agent ? chosen : undefined);
   if (!missing) return null;
-  const lead = `${AGENT_LABEL[missing]} no ha pogut fer la síntesi`;
-  if (shown.status === 'done') return `${lead}; l'ha feta ${who}.`;
-  if (shown.status === 'streaming') return `${lead}; ara la fa ${who}.`;
-  return `${lead}; ho ha intentat ${who}.`;
+  const lead = texts.failed(AGENT_LABEL[missing]);
+  if (shown.status === 'done') return texts.doneBy(lead, who);
+  if (shown.status === 'streaming') return texts.writingBy(lead, who);
+  return texts.triedBy(lead, who);
 }
 
 /**
@@ -848,7 +850,7 @@ function inferMode(streams: StreamView[]): TurnMode {
  * (a debate: no synthesis).
  */
 export const INCOMPLETE_KIND = 'incomplete';
-const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: 'Aquest torn no es va completar.' });
+const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: i18n.m.turn.incomplete });
 
 /**
  * Whether stored messages hold a finished turn, for turns stored without an outcome:

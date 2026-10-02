@@ -1211,7 +1211,7 @@ async def test_failed_initialize(fake: FakeCodex) -> None:
     try:
         status = await codex.status()
         assert not status.available
-        assert status.detail.startswith("No s'ha pogut iniciar Codex.")
+        assert str(status.detail).startswith("No s'ha pogut iniciar Codex.")
         assert codex._conn is None
     finally:
         await codex.aclose()
@@ -1276,7 +1276,7 @@ def test_fake_server_is_executable() -> None:
     assert os.access(FAKE_SERVER, os.X_OK)
 
 
-# -- attachments (docs/adr/0009-adjunts.md) --------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) --------------------------------------------------
 
 
 async def test_attachments_are_input_items_before_the_transcript(

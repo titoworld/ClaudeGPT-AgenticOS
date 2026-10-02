@@ -15,7 +15,7 @@ stripping), so the live view matches the stored message; to keep that promise it
 back only the text it cannot place yet.
 
 A tag written as content is text, not structure (an answer that explains XML, a
-critique that quotes a tag; docs/adr/0005-integritat-de-les-respostes.md):
+critique that quotes a tag; docs/adr/0005-answer-integrity.md):
 
 - a tag inside fenced code (```` ``` ```` or ``~~~`` fences, at any indentation) or inside
   an inline code span (a backtick run closed by a run of the same length on the same

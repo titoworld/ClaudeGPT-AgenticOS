@@ -8,16 +8,17 @@ Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el su
 
 | Núm. | Decisió                                                                                   | Estat    |
 | ---- | ----------------------------------------------------------------------------------------- | -------- |
-| 0001 | [Python amb uv com a base del projecte](0001-python-con-uv.md) (en castellà)              | Acceptat |
-| 0002 | [Subscripcions via les CLI oficials, amb claus d'API com a alternativa](0002-subscripcions-via-cli-oficials.md) | Acceptat |
-| 0003 | [Mode Consell i estratègia d'estalvi de tokens](0003-consell-i-estalvi-de-tokens.md)      | Acceptat |
-| 0004 | [Interfície web i desplegament](0004-web-i-desplegament.md)                               | Acceptat |
-| 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-integritat-de-les-respostes.md) | Proposat |
-| 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
-| 0007 | [Resultat del torn desat a la pregunta](0007-resultat-del-torn.md)                        | Proposat |
-| 0008 | [Recompte de tokens i intents declinats](0008-recompte-de-tokens.md)                      | Proposat |
-| 0009 | [Adjunts: imatges, PDF i fitxers de text al xat](0009-adjunts.md)                         | Proposat |
-| 0010 | [Mode «Perfecciona»: un document que les dues IA milloren fins que l'aturis](0010-mode-perfecciona.md) | Proposat |
+| 0001 | [Python amb uv com a base del projecte](0001-python-with-uv.md) (en castellà)              | Acceptat |
+| 0002 | [Subscripcions via les CLI oficials, amb claus d'API com a alternativa](0002-subscriptions-via-official-clis.md) | Acceptat |
+| 0003 | [Mode Consell i estratègia d'estalvi de tokens](0003-council-and-token-savings.md)      | Acceptat |
+| 0004 | [Interfície web i desplegament](0004-web-and-deployment.md)                               | Acceptat |
+| 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-answer-integrity.md) | Proposat |
+| 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-settings-revisions.md) | Proposat |
+| 0007 | [Resultat del torn desat a la pregunta](0007-turn-outcome.md)                        | Proposat |
+| 0008 | [Recompte de tokens i intents declinats](0008-token-accounting.md)                      | Proposat |
+| 0009 | [Adjunts: imatges, PDF i fitxers de text al xat](0009-attachments.md)                         | Proposat |
+| 0010 | [Mode «Perfecciona»: un document que les dues IA milloren fins que l'aturis](0010-refine-mode.md) | Proposat |
+| 0011 | [Internationalization: the repository in English, the interface in English, Spanish and Catalan](0011-internationalization.md) | Proposat |
 
 ## Plantilla
 

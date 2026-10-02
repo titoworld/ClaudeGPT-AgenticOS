@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The living document of a refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md):
+  // The living document of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md):
   // the version shown (the current one unless the owner picks another), rendered through the
   // sanitized Markdown renderer, or its diff against the version that was current when it
   // was written; its words against the limit, whether it was cut off, and, once the turn

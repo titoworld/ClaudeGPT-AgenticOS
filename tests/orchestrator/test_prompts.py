@@ -74,7 +74,7 @@ def test_plain_text_is_embedded_verbatim() -> None:
 def test_the_council_prompts_keep_the_refine_tags_as_written() -> None:
     """Only a refine turn's prompts use ``<version>``, ``<review>``, ``<score>``... as
     delimiters: the solo, duel and debate prompts embed a pom.xml or a React component as
-    it was written (docs/adr/0010-mode-perfecciona.md)."""
+    it was written (docs/adr/0010-refine-mode.md)."""
     code = (
         "```xml\n<version>1.2.0</version>\n```\n```jsx\n<Review score={5}><Score /></Review>\n```\n"
         "<brief> <changes> <changelog> <draft>"

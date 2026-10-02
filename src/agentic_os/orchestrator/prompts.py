@@ -13,7 +13,7 @@ in ``RESERVED_TAGS`` (a test checks it).
 An answer that was cut off (a truncated reply) can still feed the revisions and the
 synthesis, but it is marked as incomplete after its text (:data:`INCOMPLETE_NOTE`).
 
-Attachments (docs/adr/0009-adjunts.md): the providers send the files before the prompt
+Attachments (docs/adr/0009-attachments.md): the providers send the files before the prompt
 text, and every prompt lists them right before the question, in the same order, each by
 its label (name, kind, pages, and whether the call only gets a PDF's text), and says how
 a file's text is enclosed (:data:`TEXT_FILES_NOTE`). The system prompt, the same with or
@@ -25,7 +25,7 @@ which the server's analysis or Claude's check found. When ChatGPT cannot open PD
 described them (:func:`pdf_reading_note`): an agreement on those pages is one reading,
 not two.
 
-A refine turn (docs/adr/0010-mode-perfecciona.md) has prompts of its own: the first
+A refine turn (docs/adr/0010-refine-mode.md) has prompts of its own: the first
 answers, the merge of both into version 1, the reviews of each version, the edit that
 writes the next one and its shortening when it passes the word budget. Every one of them
 works against over-sizing the document: the owner's brief is the scope (no nice-to-have

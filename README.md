@@ -79,7 +79,7 @@ Les captures són de la interfície real amb converses d'exemple: les genera l'a
 
 ## Desplegar al teu VPS
 
-Segueix la guia pas a pas: **[docs/DESPLEGAMENT.md](docs/DESPLEGAMENT.md)**. En resum:
+Segueix la guia pas a pas: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**. En resum:
 
 ```bash
 git clone https://github.com/titoworld/ClaudeGPT-AgenticOS.git /opt/claudegpt && cd /opt/claudegpt
@@ -95,7 +95,7 @@ docker compose exec app agentic-os doctor                # comprovació final
 
 `claude setup-token` només mostra el token: l'aplicació el llegeix de `.env` (`CLAUDE_CODE_OAUTH_TOKEN=`), i per això cal tornar a crear el contenidor.
 
-> **Termes d'ús.** El Help Center d'Anthropic (juny 2026) inclou l'ús de `claude -p` en projectes propis com a ús del teu pla. OpenAI recomana claus d'API per a l'automatització, de manera que fer servir la subscripció de ChatGPT a través de Codex és sota la teva responsabilitat. Fes-ne un ús personal, interactiu i moderat. Detalls a l'[ADR 0002](docs/adr/0002-subscripcions-via-cli-oficials.md).
+> **Termes d'ús.** El Help Center d'Anthropic (juny 2026) inclou l'ús de `claude -p` en projectes propis com a ús del teu pla. OpenAI recomana claus d'API per a l'automatització, de manera que fer servir la subscripció de ChatGPT a través de Codex és sota la teva responsabilitat. Fes-ne un ús personal, interactiu i moderat. Detalls a l'[ADR 0002](docs/adr/0002-subscriptions-via-official-clis.md).
 
 ## Provar-ho en local (sense cap cost)
 
@@ -151,4 +151,4 @@ La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les d
 └── CLAUDE.md           instruccions per a les sessions de Claude Code
 ```
 
-Més informació: [arquitectura](docs/ARQUITECTURA.md) · [protocol client-servidor](docs/PROTOCOL.md) · [decisions](docs/adr/README.md) · [full de ruta](docs/ROADMAP.md).
+Més informació: [arquitectura](docs/ARCHITECTURE.md) · [protocol client-servidor](docs/PROTOCOL.md) · [decisions](docs/adr/README.md) · [full de ruta](docs/ROADMAP.md).

@@ -16,7 +16,7 @@ Section = Literal["text", "critique", "answer"]
 """text: plain answer/synthesis stream. critique/answer: parts of a debate revision."""
 
 PdfCheckState = Literal["checking", "checked", "unchecked"]
-"""Where Claude's check of a PDF for ChatGPT is (docs/adr/0009-adjunts.md): running, done
+"""Where Claude's check of a PDF for ChatGPT is (docs/adr/0009-attachments.md): running, done
 with at least one page checked, or done with none (it failed, took too long, the PDF was
 not analysed or there is no Claude)."""
 
@@ -27,9 +27,16 @@ Wire = dict[str, object]
 class ErrorInfo:
     kind: str
     message: str
+    """For people, in the turn's language (docs/adr/0011-internationalization.md)."""
+    attachment_id: int | None = None
+    """The attachment that no longer exists, when that is the error: the client acts on
+    it without reading the message, whatever its language."""
 
     def to_wire(self) -> Wire:
-        return {"kind": self.kind, "message": self.message}
+        wire: Wire = {"kind": self.kind, "message": self.message}
+        if self.attachment_id is not None:
+            wire["attachment_id"] = self.attachment_id
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +63,7 @@ class PhaseChanged:
     request_id: str
     phase: Literal["answer", "revision", "synthesis", "compaction", "review", "edit"]
     """``review`` and ``edit``: a refine round, where both agents review the current
-    version and then the editor writes the next one (docs/adr/0010-mode-perfecciona.md)."""
+    version and then the editor writes the next one (docs/adr/0010-refine-mode.md)."""
     round: int
 
     def to_wire(self) -> Wire:
@@ -110,7 +117,7 @@ class StreamDelta:
 class PdfReading:
     """How ChatGPT, when it cannot open PDFs (Codex), read one PDF of the question: as
     the text the server extracted, with the pages Claude's check read for it
-    (docs/adr/0009-adjunts.md). ChatGPT's messages keep it (``meta.pdf_reading``)."""
+    (docs/adr/0009-attachments.md). ChatGPT's messages keep it (``meta.pdf_reading``)."""
 
     attachment_id: int
     name: str
@@ -303,7 +310,7 @@ class RefineChange:
 
 @dataclass(frozen=True, slots=True)
 class RefineRound:
-    """The end of a refine round (docs/adr/0010-mode-perfecciona.md): round 1 merges the
+    """The end of a refine round (docs/adr/0010-refine-mode.md): round 1 merges the
     answers into version 1; each later round reviews the current version and may write
     the next one."""
 
@@ -449,7 +456,7 @@ class TurnFailure:
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
-    """How a turn ended (docs/adr/0007-resultat-del-torn.md): what its terminal event
+    """How a turn ended (docs/adr/0007-turn-outcome.md): what its terminal event
     said, written once on its question (``meta.outcome``) so that a reloaded turn shows
     what the live one did."""
 

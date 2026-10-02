@@ -6,7 +6,7 @@ Failures raise :class:`ProviderError` (a refusal raises :class:`RefusalError`).
 Cancellation (``asyncio.CancelledError``) must release every resource (kill
 subprocesses, close HTTP streams).
 
-Integrity of a reply (docs/adr/0005-integritat-de-les-respostes.md): a result says
+Integrity of a reply (docs/adr/0005-answer-integrity.md): a result says
 whether the reply is complete or was cut off (``truncated``, ``finish_reason``); a
 refusal is never a result, even when some text streamed before it; a stream that ends
 without the vendor's final event is an error, never a complete answer.
@@ -15,9 +15,9 @@ Billing: ``usage`` is always what the attempt that produced the result (or the e
 billed, at the rates of its ``model``. Earlier attempts of the same call that another
 model declined (a server-side fallback) are ``declined``, each with its own model, and
 the engine prices and records every one of them apart: tokens of different models are
-never summed (docs/adr/0008-recompte-de-tokens.md).
+never summed (docs/adr/0008-token-accounting.md).
 
-Attachments (docs/adr/0009-adjunts.md): a request carries the files the owner attached to
+Attachments (docs/adr/0009-attachments.md): a request carries the files the owner attached to
 the question (``GenerationRequest.attachments``), each with the ``mode`` this call must
 deliver it in. Providers send them before the prompt text, in order, as the vendor's own
 blocks (images, PDF documents, labelled text); their content is data, never instructions.
@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.i18n import Lazy
 from agentic_os.pdf_facts import PdfCheck, PdfNotes, PdfPage, pdf_notes
 
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
@@ -280,8 +281,10 @@ class ProviderStatus:
     mode: ProviderMode
     available: bool
     model: str
-    detail: str
-    """Human-readable state in Catalan, e.g. 'Subscripció activa' or the error cause."""
+    detail: str | Lazy
+    """Human-readable state, e.g. «Subscription active» or the error's cause: a
+    :func:`agentic_os.i18n.lazy` text when it is kept for every client (``str()`` makes
+    it in the language in force)."""
     limits: Sequence[UsageLimit] = ()
     """Latest subscription usage windows seen (empty when unknown or in api mode)."""
 
@@ -293,7 +296,9 @@ class ModelInfo:
     id: str
     """Value passed to the provider (API id, CLI alias such as "opus", Codex slug...)."""
     label: str
-    description: str = ""
+    description: str | Lazy = ""
+    """What the model is for: a :func:`agentic_os.i18n.lazy` text, since listings are
+    cached for every client."""
     is_default: bool = False
     context_window: int | None = None
 
@@ -301,7 +306,7 @@ class ModelInfo:
         return {
             "id": self.id,
             "label": self.label,
-            "description": self.description,
+            "description": str(self.description),
             "is_default": self.is_default,
             "context_window": self.context_window,
         }
@@ -352,5 +357,5 @@ def reads_pdfs(provider: Provider) -> bool:
     """Whether a provider sends a PDF itself. ChatGPT through Codex (the app-server, mode
     "cli") cannot: it gets the text the server extracted, page by page
     (``prompt_format.pdf_view``), checked by Claude when the engine can
-    (docs/adr/0009-adjunts.md)."""
+    (docs/adr/0009-attachments.md)."""
     return not (provider.agent == "chatgpt" and provider.mode == "cli")
