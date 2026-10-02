@@ -1,8 +1,13 @@
 # ClaudeGPT OS
 
+[![CI](https://github.com/titoworld/ClaudeGPT-AgenticOS/actions/workflows/ci.yml/badge.svg)](https://github.com/titoworld/ClaudeGPT-AgenticOS/actions/workflows/ci.yml)
+![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
+![Svelte 5](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white)
+![Docker i Caddy](https://img.shields.io/badge/autoallotjat-Docker%20%2B%20Caddy-2496ED?logo=docker&logoColor=white)
+
 El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiquen i sintetitzen una resposta millor, gastant els mínims tokens. Tot corre al teu VPS, només hi entres tu i pots fer servir les teves subscripcions (Claude Pro/Max i ChatGPT Plus/Pro) en lloc de claus d'API.
 
-![Vista del Consell](docs/img/consell.webp)
+![El Consell: Claude i ChatGPT responen la mateixa pregunta l'un al costat de l'altre](docs/img/consell.webp)
 
 ## Què fa
 
@@ -34,6 +39,43 @@ El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiq
   - contenidors sense root;
   - HTTPS automàtic amb Caddy.
 - **Connexió resistent.** Els torns continuen al servidor encara que es talli la connexió, i el navegador els recupera en reconnectar.
+
+## Com es veu
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/debat.webp"><img src="docs/img/debat.webp" alt="Una ronda de revisió del Consell, amb la crítica i el grau d'acord de cada IA, i la síntesi final amb el consens"></a>
+      <p><b>Consell.</b> Cada IA critica la resposta de l'altra i diu fins a quin punt hi està d'acord. Quan totes dues arriben al llindar, les rondes s'aturen i una escriu la síntesi.</p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/perfecciona.webp"><img src="docs/img/perfecciona.webp" alt="El mode Perfecciona: la versió 3 d'un document, els canvis aplicats, les diferències amb la versió 2 i els botons per aturar-lo"></a>
+      <p><b>Perfecciona.</b> Un sol document que les dues IA milloren ronda rere ronda. Cada versió diu quins canvis aplica, es compara amb l'anterior i no pot passar del límit de paraules. L'atures quan vulguis.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/adjunts.webp"><img src="docs/img/adjunts.webp" alt="Un pressupost en PDF adjunt a la pregunta, el contrast de Claude per a ChatGPT i les dues respostes"></a>
+      <p><b>Adjunts.</b> Imatges, PDF i text, amb miniatura i tokens estimats. ChatGPT amb la subscripció llegeix el text del PDF, i Claude li contrasta les pàgines que no en tenen (aquí, el plànol).</p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/tauler.webp"><img src="docs/img/tauler.webp" alt="El tauler: tokens estalviats per tècnica, tokens processats, torns, consens, latència i valor de les subscripcions en euros"></a>
+      <p><b>Tauler.</b> Els tokens que estalvia cada tècnica, la latència, els consensos i, en euros amb el canvi del BCE, el valor de les subscripcions a preus d'API.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/inici.webp"><img src="docs/img/inici.webp" alt="La pantalla d'una conversa nova amb els quatre modes i l'escena 3D de fons"></a>
+      <p><b>Quatre modes.</b> Solo, Duel, Consell i Perfecciona, amb una escena 3D de fons que reacciona al que fan les dues IA.</p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/mobil.webp"><img src="docs/img/mobil.webp" alt="Tres pantalles del mòbil: un debat, les rondes de Perfecciona amb els botons d'aturar-lo i el menú amb l'ús de les subscripcions"></a>
+      <p><b>Al mòbil.</b> La mateixa aplicació adaptada a la pantalla petita, amb el menú que mostra l'ús de cada subscripció.</p>
+    </td>
+  </tr>
+</table>
+
+Les captures són de la interfície real amb converses d'exemple: les genera l'aparador de `web/src/showcase/`, sense backend ni cap crida als models.
 
 ## Desplegar al teu VPS
 
@@ -79,12 +121,13 @@ Amb `AOS_CLAUDE_MODE=cli` fa servir la CLI `claude` que tinguis instal·lada i a
 | Tipus (estricte) | `uv run mypy` |
 | Frontend: comprovació, tests, build | `cd web && npm run check && npm test && npm run build` |
 | Frontend amb recàrrega | `cd web && npm run dev`, amb el backend a `uv run agentic-os serve --dev` i `AOS_EXTRA_ORIGINS='["http://localhost:5173"]'` |
+| Aparador amb converses d'exemple, sense backend | `cd web && npm run dev` i obre `http://localhost:5173/src/showcase/index.html?shot=consell` |
 
 Els tests del frontend (vitest) cobreixen la lògica i també els components, que es munten a jsdom amb `web/src/lib/test-render.ts`.
 
-Els tests del backend també funcionen a macOS: l'estat dels processos es comprova amb `tests/portability.py`. A més, `tests/test_docs.py` comprova que els límits, les variables `AOS_*` i els fitxers que citen els documents coincideixen amb el codi.
+Els tests del backend també funcionen a macOS (els dels scripts de desplegament només corren a Linux): l'estat dels processos es comprova amb `tests/portability.py`, mai llegint `/proc`. A més, `tests/test_docs.py` comprova que la documentació diu el que fa el codi: els límits, les variables `AOS_*` i els fitxers que cita.
 
-Els tests del backend no depenen de `/proc`, així que també es poden executar a macOS (els dels scripts de desplegament només corren a Linux). `tests/test_docs.py` comprova que la documentació diu el que fa el codi: els límits, les variables `AOS_*` i els fitxers que cita.
+L'aparador (`web/src/showcase/`) munta tota l'aplicació contra un servidor simulat amb converses d'exemple: un Consell, un Duel amb un PDF i un torn de Perfecciona en curs. `?shot=` tria la vista (`inici`, `consell`, `adjunts`, `perfecciona`, `tauler` o `configuracio`). Serveix per revisar la interfície sense backend i per refer les captures d'aquest README.
 
 La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les del frontend i la construcció de la imatge Docker a cada pull request.
 
@@ -101,7 +144,7 @@ La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les d
 │   ├── attachments.py  adjunts: límits, tipus pel contingut, text dels PDF
 │   ├── pricing.py      preus per model i cost estimat
 │   └── fx.py           canvi USD→EUR del BCE
-├── web/                Svelte 5 + three.js (interfície i tauler)
+├── web/                Svelte 5 + three.js (interfície, tauler i l'aparador de les captures)
 ├── deploy/             Caddyfile, preparació del VPS i scripts de còpia i restauració
 ├── docs/               arquitectura, protocol, desplegament i decisions (ADR)
 ├── Dockerfile, docker-compose.yml

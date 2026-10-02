@@ -39,7 +39,7 @@ Abans de cada commit han de passar totes aquestes comprovacions: és el mateix q
 - Dependències només amb `uv add` / `npm install --save-exact`; mai editis `uv.lock` a mà. Justifica cada dependència nova.
 - **Els tests no criden APIs reals ni fan login** (costen diners i requereixen xarxa). Fes servir `FakeProvider`, les CLI falses de `tests/providers/fixtures/` o transports simulats.
 - Els tests han de funcionar també a macOS: l'estat dels processos es comprova amb `tests/portability.py` (mai llegint `/proc` directament) i les comprovacions de l'entorn d'un procés fill ignoren les variables que hi afegeix el sistema (`without_platform_variables`).
-- Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica i per als components, que es munten a jsdom amb `web/src/lib/test-render.ts` (en mode test, `web/vite.config.ts` resol la condició `browser` de Svelte); revisa visualment els canvis d'interfície.
+- Tot canvi de comportament porta el seu test. Frontend: vitest per a la lògica i per als components, que es munten a jsdom amb `web/src/lib/test-render.ts` (en mode test, `web/vite.config.ts` resol la condició `browser` de Svelte); revisa visualment els canvis d'interfície. L'aparador de `web/src/showcase/` munta tota l'aplicació amb converses d'exemple, sense backend; si un canvi de la interfície es veu a les captures del README, refés-les amb l'aparador.
 
 ## Seguretat (no negociable)
 
