@@ -71,11 +71,13 @@ class TurnRunner(Protocol):
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
         on_outcome: Callable[[TurnOutcome], None] | None = None,
+        stop: asyncio.Event | None = None,
     ) -> AsyncIterator[ServerEvent]:
         """The turn's events; ``on_outcome`` gets how it ended as soon as that is
         decided, a cancelled turn included (it has no event of its own). Cancelling the
         consumer once stops the turn: its ``CancelledError`` comes after ``on_outcome``
-        (the manager never cancels a turn twice)."""
+        (the manager never cancels a turn twice). ``stop``, once set, asks a refine turn
+        to end after the round in course (``turn.stop``)."""
         ...
 
 
@@ -118,6 +120,8 @@ class _Turn:
     """Its conversation was deleted: unknown to ``subscribe`` and dropped as soon as
     it ends (see :meth:`TurnManager.forget_conversation`)."""
     expiry: asyncio.TimerHandle | None = None
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set by ``turn.stop``: a refine turn ends after the round in course."""
 
     @property
     def request_id(self) -> str:
@@ -317,6 +321,7 @@ class TurnManager:
             compaction_threshold_tokens=turn.compaction_threshold_tokens,
             price_overrides=turn.price_overrides,
             on_outcome=on_outcome,
+            stop=turn.stop_event,
         )
         # Cancelling this task cancels the engine at its current await; the engine
         # then stops every model call of the turn before the error propagates.

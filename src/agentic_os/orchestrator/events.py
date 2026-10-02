@@ -6,11 +6,11 @@ sends ``to_wire()`` as JSON.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from agentic_os.domain import AgentName, MessageKind, TurnMode, Usage
+from agentic_os.domain import AGENTS, AgentName, MessageKind, RefineStopReason, TurnMode, Usage
 
 Section = Literal["text", "critique", "answer"]
 """text: plain answer/synthesis stream. critique/answer: parts of a debate revision."""
@@ -54,7 +54,9 @@ class TurnStarted:
 @dataclass(frozen=True, slots=True)
 class PhaseChanged:
     request_id: str
-    phase: Literal["answer", "revision", "synthesis", "compaction"]
+    phase: Literal["answer", "revision", "synthesis", "compaction", "review", "edit"]
+    """``review`` and ``edit``: a refine round, where both agents review the current
+    version and then the editor writes the next one (docs/adr/0010-mode-perfecciona.md)."""
     round: int
 
     def to_wire(self) -> Wire:
@@ -196,6 +198,9 @@ class StreamCompleted:
     pdf_reading: tuple[PdfReading, ...] = ()
     """ChatGPT's messages when it cannot open PDFs: how it read each PDF of the question,
     as the message's ``meta.pdf_reading``. On the wire only when there is any."""
+    refine: Mapping[str, object] | None = None
+    """Refine turns: the message's ``meta.refine`` (a review, or a version with whether it
+    was accepted). On the wire only when set."""
 
     def to_wire(self) -> Wire:
         wire: Wire = {
@@ -218,6 +223,8 @@ class StreamCompleted:
             wire["unchanged_note"] = self.unchanged_note
         if self.pdf_reading:
             wire["pdf_reading"] = [reading.to_wire() for reading in self.pdf_reading]
+        if self.refine is not None:
+            wire["refine"] = dict(self.refine)
         return wire
 
 
@@ -282,6 +289,81 @@ class Consensus:
 
 
 @dataclass(frozen=True, slots=True)
+class RefineChange:
+    """A change of a refine round: proposed by a review or applied by an edit. ``kind`` is
+    "defect", "clarity", "simplification" or "requirement" ("merge" for the lines of the
+    first version, which say what it took from each answer)."""
+
+    kind: str
+    text: str
+
+    def to_wire(self) -> Wire:
+        return {"kind": self.kind, "text": self.text}
+
+
+@dataclass(frozen=True, slots=True)
+class RefineRound:
+    """The end of a refine round (docs/adr/0010-mode-perfecciona.md): round 1 merges the
+    answers into version 1; each later round reviews the current version and may write
+    the next one."""
+
+    request_id: str
+    round: int
+    version: int
+    """The current version after the round (the last accepted one)."""
+    accepted: bool
+    """The round wrote a new version that became the current one."""
+    words: int
+    """Words of the current version."""
+    budget_words: int
+    """The word limit of every version of the turn."""
+    usage: Usage
+    """What the round's calls billed."""
+    total: Usage
+    """What the turn has billed so far."""
+    reason: str | None = None
+    """Why the round wrote no new version (Catalan); None when it did."""
+    changes: Sequence[RefineChange] = ()
+    """The changes of the new version (its changelog); none when not accepted."""
+    proposals: Mapping[AgentName, int | None] = field(default_factory=dict)
+    """Changes each agent's review proposed (None: no review of that agent)."""
+    scores: Mapping[AgentName, int | None] = field(default_factory=dict)
+    """How fit for the brief each review scored the version, 0-100 (None: none)."""
+    converged: bool = False
+    """The round completed the convergence rule (the turn stops by itself)."""
+
+    def to_wire(self) -> Wire:
+        return {
+            "type": "refine.round",
+            "request_id": self.request_id,
+            "round": self.round,
+            "version": self.version,
+            "accepted": self.accepted,
+            "reason": self.reason,
+            "words": self.words,
+            "budget_words": self.budget_words,
+            "changes": [change.to_wire() for change in self.changes],
+            "proposals": {agent: self.proposals.get(agent) for agent in AGENTS},
+            "scores": {agent: self.scores.get(agent) for agent in AGENTS},
+            "converged": self.converged,
+            "usage": self.usage.to_dict(),
+            "total": self.total.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TurnStopping:
+    """The owner asked a refine turn to stop: it ends after ``round``, the round in
+    course, with its last version (``turn.stop``)."""
+
+    request_id: str
+    round: int
+
+    def to_wire(self) -> Wire:
+        return {"type": "turn.stopping", "request_id": self.request_id, "round": self.round}
+
+
+@dataclass(frozen=True, slots=True)
 class TurnCompleted:
     request_id: str
     conversation_id: int
@@ -291,9 +373,11 @@ class TurnCompleted:
     savings: Savings
     consensus: Consensus | None = None
     cached: bool = False
+    stop_reason: RefineStopReason | None = None
+    """Refine turns: why the turn ended with its last version. On the wire only when set."""
 
     def to_wire(self) -> Wire:
-        return {
+        wire: Wire = {
             "type": "turn.completed",
             "request_id": self.request_id,
             "conversation_id": self.conversation_id,
@@ -304,6 +388,9 @@ class TurnCompleted:
             "consensus": self.consensus.to_wire() if self.consensus else None,
             "cached": self.cached,
         }
+        if self.stop_reason is not None:
+            wire["stop_reason"] = self.stop_reason
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +466,9 @@ class TurnOutcome:
     consensus: Consensus | None = None
     final_message_ids: Sequence[int] = ()
     cached: bool = False
+    stop_reason: RefineStopReason | None = None
+    """Refine turns: why the turn ended with its last version (a cancelled one keeps it
+    too). On the wire only when set."""
 
     def to_wire(self) -> Wire:
         wire: Wire = {"status": self.status}
@@ -392,6 +482,8 @@ class TurnOutcome:
             final_message_ids=list(self.final_message_ids),
             cached=self.cached,
         )
+        if self.stop_reason is not None:
+            wire["stop_reason"] = self.stop_reason
         return wire
 
 
@@ -399,6 +491,8 @@ ServerEvent = (
     TurnStarted
     | PhaseChanged
     | PdfCheckChanged
+    | RefineRound
+    | TurnStopping
     | StreamStarted
     | StreamDelta
     | StreamCompleted

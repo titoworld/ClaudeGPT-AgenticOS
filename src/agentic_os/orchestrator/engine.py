@@ -250,6 +250,9 @@ class _Turn:
     on_outcome: OnOutcome | None = None
     outcome: TurnOutcome | None = None
     """How the turn ended, once decided (see :meth:`Engine._settle`)."""
+    stop: asyncio.Event | None = None
+    """Set when the owner asks the turn to stop after the round in course (``turn.stop``):
+    only refine turns read it; ``turn.cancel`` cancels the turn instead."""
     outcome_write: asyncio.Task[None] | None = None
     """The write of :attr:`outcome` on the question (shielded from cancellation)."""
     savings_write: asyncio.Task[None] | None = None
@@ -487,6 +490,7 @@ class Engine:
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
         on_outcome: OnOutcome | None = None,
+        stop: asyncio.Event | None = None,
     ) -> AsyncIterator[ServerEvent]:
         """Run one turn, yielding its events (see docs/PROTOCOL.md).
 
@@ -503,6 +507,9 @@ class Engine:
         event here: the web layer announces it with what the turn spent). A cancelled
         consumer gets its ``CancelledError`` after that call and after the outcome is
         stored.
+
+        ``stop``, when set, asks a refine turn to end after the round in course, with its
+        last version (the owner's ``turn.stop``); other modes ignore it.
         """
         queue: asyncio.Queue[ServerEvent | _End] = asyncio.Queue()
         turn = _Turn(
@@ -511,6 +518,7 @@ class Engine:
             question=request.text.strip(),
             prices=price_overrides,
             on_outcome=on_outcome,
+            stop=stop,
         )
         task = asyncio.create_task(
             self._execute(turn, compaction_threshold_tokens),

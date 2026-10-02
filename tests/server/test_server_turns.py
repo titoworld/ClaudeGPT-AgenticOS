@@ -85,6 +85,7 @@ class ScriptedRunner:
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
         on_outcome: Callable[[TurnOutcome], None] | None = None,
+        stop: asyncio.Event | None = None,
     ) -> AsyncIterator[ServerEvent]:
         self.thresholds.append(compaction_threshold_tokens)
         self.prices.append(price_overrides)
@@ -235,6 +236,7 @@ async def test_engine_turn_failed_is_terminal() -> None:
             compaction_threshold_tokens: int | None = None,
             price_overrides: Mapping[str, ModelPrice] | None = None,
             on_outcome: Callable[[TurnOutcome], None] | None = None,
+            stop: asyncio.Event | None = None,
         ) -> AsyncIterator[ServerEvent]:
             yield TurnFailed(request.request_id, ErrorInfo("invalid", "La pregunta és buida."))
 
@@ -294,6 +296,7 @@ class SlowStopRunner:
         compaction_threshold_tokens: int | None = None,
         price_overrides: Mapping[str, ModelPrice] | None = None,
         on_outcome: Callable[[TurnOutcome], None] | None = None,
+        stop: asyncio.Event | None = None,
     ) -> AsyncIterator[ServerEvent]:
         yield TurnStarted(request.request_id, 41, 7, request.mode, True)
         try:
