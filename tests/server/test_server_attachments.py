@@ -682,7 +682,7 @@ def test_claudes_check_reaches_the_socket_and_is_kept_for_later_turns(tmp_path: 
     Claude check its text: ``pdf.check`` is one more event of the turn (its ``seq``, its
     replay), ChatGPT's answer says how it read the PDF, live and reloaded, and the check
     stored in the database serves the next turn without any call."""
-    claude = FakeProvider("claude", chunk_delay=0)
+    claude = FakeProvider("claude", chunk_delay=0, mode="cli")  # the demo's never checks
     chatgpt = FakeProvider("chatgpt", chunk_delay=0, mode="cli")
     providers: dict[AgentName, Provider] = {"claude": claude, "chatgpt": chatgpt}
     app = create_app(make_settings(tmp_path), providers=providers, clock=Clock())

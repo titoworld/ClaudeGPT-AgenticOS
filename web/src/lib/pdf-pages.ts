@@ -5,7 +5,8 @@
 // the text the server extracted, and Claude reads for it the pages where that text would
 // mislead it. Page lists are compact («pàg. 2–4, 9») so a long PDF still fits a card.
 
-import type { PdfCheckState, PdfNotes, PdfReading } from './protocol';
+import type { PdfNotes, PdfReading } from './protocol';
+import type { PdfCheckStatus } from './turns.svelte';
 
 const isPage = (n: number): boolean => Number.isInteger(n) && n >= 1;
 
@@ -46,6 +47,24 @@ function pagesInProse(pages: readonly number[]): { text: string; count: number }
   const { parts, count } = pageParts(pages);
   const text = parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} i ${parts.at(-1)}`;
   return { text, count };
+}
+
+/** Names that keep their capital letter anywhere in a sentence. */
+const NAMES: ReadonlySet<string> = new Set(['Claude', 'ChatGPT', 'Codex']);
+
+/**
+ * A sentence of its own, such as the server's reasons («La comprovació de Claude ha trigat
+ * massa.»), as it goes after a colon, where Catalan starts with a lowercase letter: «…sense
+ * contrastar: la comprovació de Claude ha trigat massa.». A name or an acronym keeps its
+ * capital («Claude no l'ha volgut contrastar.», «PDF…»); a reason on a line of its own keeps
+ * it too, so this is only for the text after a colon.
+ */
+export function afterColon(sentence: string): string {
+  const word = /^\p{L}+/u.exec(sentence)?.[0];
+  if (!word || NAMES.has(word)) return sentence;
+  const rest = word.slice(1);
+  if (rest !== rest.toLowerCase()) return sentence; // an acronym or a name such as «OpenAI»
+  return sentence.charAt(0).toLowerCase() + sentence.slice(1);
 }
 
 // ------------------------------------------------------------ the card
@@ -99,7 +118,7 @@ export function pdfNoteLines(notes: PdfNotes | null): PdfNoteLine[] {
 
 /** What the turn knows of a PDF's check, as `checkDetails` reads it. */
 export interface CheckFacts {
-  state: PdfCheckState;
+  state: PdfCheckStatus;
   claudePages: readonly number[];
   hiddenPages: readonly number[];
   uncheckedPages: readonly number[];
@@ -110,8 +129,8 @@ export interface CheckFacts {
  * What a finished check with pages checked adds to its headline («ChatGPT llegeix
  * «informe.pdf» contrastat per Claude»): the pages ChatGPT reads through Claude, the
  * hidden text it does not get, the pages left unchecked and why, or that Claude found
- * nothing to correct. Nothing while it runs, nor for a PDF nobody checked: its headline
- * gives the reason.
+ * nothing to correct. Nothing while it runs, nor for a PDF nobody checked through it: its
+ * headline says why.
  */
 export function checkDetails(check: CheckFacts): string[] {
   if (check.state !== 'checked') return [];
@@ -126,7 +145,7 @@ export function checkDetails(check: CheckFacts): string[] {
   const unchecked = pagesInProse(check.uncheckedPages);
   if (unchecked.count) {
     const pages = unchecked.count === 1 ? `pàgina ${unchecked.text}` : `pàgines ${unchecked.text}`;
-    details.push(check.reason ? `${pages} sense contrastar: ${check.reason}` : `${pages} sense contrastar`);
+    details.push(check.reason ? `${pages} sense contrastar: ${afterColon(check.reason)}` : `${pages} sense contrastar`);
   }
   if (!details.length) details.push('Claude no hi ha trobat cap diferència');
   return details;

@@ -115,7 +115,8 @@ class PdfReading:
     checked: bool
     """Claude checked at least one page of it."""
     claude_pages: tuple[int, ...] = ()
-    """Pages ChatGPT read, all or in part, as Claude read them."""
+    """Pages ChatGPT read, all or in part, as Claude read them: their text, or what their
+    figures show as Claude described it (``PdfCheck.claude_pages``)."""
     hidden_pages: tuple[int, ...] = ()
     """Pages with text that is not visible, which ChatGPT did not get."""
     unchecked_pages: tuple[int, ...] = ()

@@ -32,7 +32,7 @@ import struct
 import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -96,10 +96,12 @@ MAX_PDF_TEXT_CHARS: Final = 1_000_000
 """Characters of the text kept from a PDF (about 250 000 tokens): beyond it the text is
 cut, with a notice at the end."""
 TINY_POINTS: Final = 1.0
-"""Text shown smaller than this many points, every scale it is drawn with included,
-cannot be read on the page."""
+"""Text shown smaller than this many points in any direction, every scale it is drawn with
+included (its size, its horizontal scaling and the matrices that place it), cannot be read
+on the page."""
 OFFPAGE_MARGIN: Final = 1.0
-"""Points outside a page's visible box beyond which the origin of a text is off the page."""
+"""Points outside a page's visible box beyond which the origin of a text (raised by its text
+rise) is off the page."""
 INVISIBLE_MODES: Final = frozenset({3, 7})
 """Text render modes that paint nothing: 3 (neither fill nor stroke) and 7 (only add to
 the clipping path)."""
@@ -788,7 +790,8 @@ def has_images(resources: object, depth: int = 0, seen: set[int] | None = None) 
     """Whether a page's (or a form's) resources have an image, their own or one of their
     forms' (:data:`MAX_FORM_DEPTH` levels down): a page that draws a scan or a picture.
     It counts the images a page could draw, which is enough to tell a scan with its
-    recognized text in an invisible layer from a page that hides text."""
+    recognized text in an invisible layer from a page that hides text; an image that the
+    page lists and never draws counts too (a limit of the analysis, docs/adr/0009-adjunts.md)."""
     seen = set() if seen is None else seen
     xobjects = _entry(_resolved(resources), "/XObject")
     if not isinstance(xobjects, dict) or id(xobjects) in seen:
@@ -822,13 +825,45 @@ def shown_characters(operands: object) -> int:
     return count
 
 
+def smallest_scale(a: float, b: float, c: float, d: float) -> float:
+    """The smallest factor by which the linear map ``[a b; c d]`` (of row vectors, like a
+    PDF matrix) scales a length, in any direction: its smaller singular value. Glyphs
+    that a map draws under a point one way cannot be read, however large they are the
+    other way."""
+    largest = (math.hypot(a + d, b - c) + math.hypot(a - d, b + c)) / 2
+    return abs(a * d - b * c) / largest if largest else 0.0
+
+
+def _finite(value: Any) -> float:
+    """A number operand, or ``ValueError`` (the analysis then skips its operator)."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(number)
+    return number
+
+
+@dataclass(frozen=True, slots=True)
+class _TextState:
+    """What the analysis follows of the graphics state and pypdf's extraction does not
+    (``q`` saves it and ``Q`` restores it, with the rest of the graphics state)."""
+
+    mode: int = 0
+    """The text render mode (``Tr``)."""
+    size: float = 0.0
+    """The font size (``Tf``): no size until a ``Tf``, and text shown without one is not
+    readable."""
+    scale: float = 1.0
+    """The horizontal scaling (``Tz``) as a factor: 0.5 draws the glyphs half as wide."""
+    rise: float = 0.0
+    """The text rise (``Ts``): how far up the text's vertical axis the glyphs are drawn."""
+
+
 @dataclass(frozen=True, slots=True)
 class _Drawing:
     """What a ``Do`` saves (a form is drawn as if between ``q`` and ``Q``), and the
     resources and matrix of the stream that draws it."""
 
-    mode: int
-    size: float
+    state: _TextState
     depth: int
     floor: int
     resources: object
@@ -840,20 +875,26 @@ class PageSigns:
     text (``extract_text``'s operator visitors: :meth:`before` and :meth:`after` each
     operator).
 
-    It follows what pypdf's extraction does not: the text render mode and the font
-    size, which ``q`` saves and ``Q`` restores; and the matrix each form is drawn with
-    (pypdf reads a form's content from its own origin). A form is drawn as if between
-    ``q`` and ``Q``: its state stays inside it, and it cannot restore more states than
-    it saved. Every character a text-showing operator shows counts as ``invisible`` in
-    a render mode that paints nothing, else as ``tiny`` when its size, every scale
-    included, is under :data:`TINY_POINTS`; and as ``offpage`` when the text's origin is
-    more than :data:`OFFPAGE_MARGIN` outside the page's visible box.
+    It follows what pypdf's extraction does not (:class:`_TextState`): the text render
+    mode, the font size, the horizontal scaling and the text rise, which ``q`` saves and
+    ``Q`` restores; and the matrix each form is drawn with (pypdf reads a form's content
+    from its own origin). A form is drawn as if between ``q`` and ``Q``: it starts with
+    the state of the stream that draws it, its own changes stay inside it, and it cannot
+    restore more states than it saved. Every character a text-showing operator shows
+    counts as ``invisible`` in a render mode that paints nothing, else as ``tiny`` when
+    the glyphs are under :data:`TINY_POINTS` in any direction (:func:`smallest_scale` of
+    the text rendering matrix: the font size, the horizontal scaling, the text matrix,
+    the transformation matrix and the matrix of the form that draws it); and as
+    ``offpage`` when the text's origin, raised by its text rise, is more than
+    :data:`OFFPAGE_MARGIN` outside the page's visible box.
 
-    ``images`` starts as whether the page's resources have an image (:func:`has_images`)
-    and an inline image makes it true.
+    ``images`` starts as whether the page's resources have an image (:func:`has_images`,
+    drawn or not) and an inline image makes it true. It does not see text hidden by a
+    clipping path or drawn in the colour of what is under it: Claude's check, which sees
+    the page, is for those.
 
-    An operand it cannot use (a mode that is not a number...) is skipped: the visitors
-    never raise, so they never cost the page its text."""
+    An operand it cannot use (a mode that is not a number, a scaling that is not finite...)
+    is skipped: the visitors never raise, so they never cost the page its text."""
 
     def __init__(self, resources: object, box: Box | None, *, images: bool = False) -> None:
         self.images = images
@@ -861,10 +902,8 @@ class PageSigns:
         self.tiny = 0
         self.offpage = 0
         self._box = box
-        self._mode = 0
-        self._size = 0.0
-        """No size until a ``Tf``: text shown without one is not readable."""
-        self._saved: list[tuple[int, float]] = []
+        self._state = _TextState()
+        self._saved: list[_TextState] = []
         self._floor = 0
         """The saved states of the stream being read start here (a form's ``Q`` cannot
         restore the states of the stream that draws it)."""
@@ -888,20 +927,23 @@ class PageSigns:
 
     def _before(self, operator: object, operands: Any, cm: Any) -> None:
         if operator == b"q":
-            self._saved.append((self._mode, self._size))
+            self._saved.append(self._state)
         elif operator == b"Q":
             if len(self._saved) > self._floor:
-                self._mode, self._size = self._saved.pop()
+                self._state = self._saved.pop()
         elif operator == b"Tr":
-            self._mode = int(operands[0])
+            self._state = replace(self._state, mode=int(operands[0]))
         elif operator == b"Tf":
-            self._size = abs(float(operands[1]))
+            self._state = replace(self._state, size=abs(float(operands[1])))
+        elif operator == b"Tz":
+            self._state = replace(self._state, scale=_finite(operands[0]) / 100)
+        elif operator == b"Ts":
+            self._state = replace(self._state, rise=_finite(operands[0]))
         elif operator == b"Do":
             # Saved first: whatever happens next, the matching after() restores it.
             self._drawings.append(
                 _Drawing(
-                    self._mode,
-                    self._size,
+                    self._state,
                     len(self._saved),
                     self._floor,
                     self._resources,
@@ -921,7 +963,7 @@ class PageSigns:
         if not self._drawings:
             return
         drawing = self._drawings.pop()
-        self._mode, self._size = drawing.mode, drawing.size
+        self._state = drawing.state
         self._floor, self._resources, self._base = drawing.floor, drawing.resources, drawing.base
         del self._saved[drawing.depth :]
 
@@ -929,11 +971,19 @@ class PageSigns:
         count = shown_characters(operands)
         if not count:
             return
-        a, b, c, d, x, y = multiply(multiply(tm, cm), self._base)
-        if self._mode in INVISIBLE_MODES:
+        state = self._state
+        a, b, c, d, e, f = multiply(multiply(tm, cm), self._base)
+        if state.mode in INVISIBLE_MODES:
             self.invisible += count
-        elif self._size * math.sqrt(abs(a * d - b * c)) < TINY_POINTS:
-            self.tiny += count
+        else:
+            # The text rendering matrix: the font size scales the glyphs, and the
+            # horizontal scaling scales them across once more.
+            across = state.size * state.scale
+            size = smallest_scale(across * a, across * b, state.size * c, state.size * d)
+            if size < TINY_POINTS:
+                self.tiny += count
+        # The glyphs' origin: the text rise moves it up the text's own vertical axis.
+        x, y = c * state.rise + e, d * state.rise + f
         box = self._box
         if box is not None and not (
             box[0] - OFFPAGE_MARGIN <= x <= box[2] + OFFPAGE_MARGIN

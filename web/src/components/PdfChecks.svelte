@@ -3,11 +3,14 @@
   // (docs/adr/0009-adjunts.md): ChatGPT cannot open a PDF, so it reads the text the server
   // extracted, and Claude checks that text against the document while it answers. Each
   // PDF says that it is being checked, then what ChatGPT reads through Claude and what the
-  // check cost (tokens and euros, like the rest of the turn's usage), or why nobody could
-  // check it. A polite live region: the end of each check is announced.
+  // check cost (tokens and euros, like the rest of the turn's usage), why nobody could
+  // check it, or that the turn ended before the check did. A polite live region announces
+  // each change: the turn keeps it in the page from the start, even with no check in it
+  // (then out of the layout), since a region that comes with its content is not announced
+  // and a PDF's only event may be its end (a check an earlier turn stored).
   import { approxEur, costTitle, processedTokens, tokenBreakdown } from '../lib/costs';
   import { formatInt } from '../lib/format';
-  import { checkDetails } from '../lib/pdf-pages';
+  import { afterColon, checkDetails } from '../lib/pdf-pages';
   import type { PdfCheckView } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
   import PlainText from './PlainText.svelte';
@@ -38,58 +41,66 @@
   }
 </script>
 
-<ul class="pdf-checks" aria-live="polite" aria-label="Contrast dels PDF per a ChatGPT">
-  {#each checks as check (check.attachmentId)}
-    {@const details = checkDetails(check)}
-    {@const reused = check.reused && check.state === 'checked'}
-    {@const bill = billed(check)}
-    <li class="pdf-check {check.state}">
-      <span class="mark" aria-hidden="true">
-        {#if check.state === 'checking'}
-          <span class="spinner"></span>
-        {:else if check.state === 'checked'}
-          <Icon name="check" size={14} />
-        {:else}
-          <Icon name="alert" size={14} />
-        {/if}
-      </span>
-      <div class="body">
-        <p class="head">
-          {#if check.state === 'checking'}
-            Claude contrasta «<PlainText text={check.name} />» per a ChatGPT…
-          {:else if check.state === 'checked'}
-            ChatGPT llegeix «<PlainText text={check.name} />» contrastat per Claude
-          {:else}
-            ChatGPT llegeix el text de «<PlainText text={check.name} />» sense contrastar{check.reason
-              ? `: ${check.reason}`
-              : '.'}
-          {/if}
-        </p>
-        {#if details.length || reused || bill}
-          <ul class="facts">
-            {#each details as detail (detail)}
-              <li class="detail">{detail}</li>
-            {/each}
-            {#if reused}
-              <li class="detail">ja contrastat abans</li>
-            {:else if bill}
-              {#if bill.tokens}
-                <li class="detail tokens" title={bill.tokensTitle}>
-                  {bill.tokens} <span class="sr-only">({bill.tokensTitle})</span>
-                </li>
-              {/if}
-              {#if bill.cost}
-                <li class="detail cost" class:equivalent={check.costBasis === 'equivalent'} title={bill.costTitle}>
-                  {bill.cost} <span class="sr-only">({bill.costTitle})</span>
-                </li>
-              {/if}
+<div class="pdf-live" class:sr-only={!checks.length} aria-live="polite">
+  {#if checks.length}
+    <ul class="pdf-checks" aria-label="Contrast dels PDF per a ChatGPT">
+      {#each checks as check (check.attachmentId)}
+        {@const details = checkDetails(check)}
+        {@const reused = check.reused && check.state === 'checked'}
+        {@const bill = billed(check)}
+        <li class="pdf-check {check.state}">
+          <span class="mark" aria-hidden="true">
+            {#if check.state === 'checking'}
+              <span class="spinner"></span>
+            {:else if check.state === 'checked'}
+              <Icon name="check" size={14} />
+            {:else if check.state === 'interrupted'}
+              <Icon name="x" size={14} />
+            {:else}
+              <Icon name="alert" size={14} />
             {/if}
-          </ul>
-        {/if}
-      </div>
-    </li>
-  {/each}
-</ul>
+          </span>
+          <div class="body">
+            <p class="head">
+              {#if check.state === 'checking'}
+                Claude contrasta «<PlainText text={check.name} />» per a ChatGPT…
+              {:else if check.state === 'checked'}
+                ChatGPT llegeix «<PlainText text={check.name} />» contrastat per Claude
+              {:else if check.state === 'interrupted'}
+                El torn s'ha aturat abans que Claude acabés de contrastar «<PlainText text={check.name} />».
+              {:else}
+                ChatGPT llegeix el text de «<PlainText text={check.name} />» sense contrastar{check.reason
+                  ? `: ${afterColon(check.reason)}`
+                  : '.'}
+              {/if}
+            </p>
+            {#if details.length || reused || bill}
+              <ul class="facts">
+                {#each details as detail (detail)}
+                  <li class="detail">{detail}</li>
+                {/each}
+                {#if reused}
+                  <li class="detail">ja contrastat abans</li>
+                {:else if bill}
+                  {#if bill.tokens}
+                    <li class="detail tokens" title={bill.tokensTitle}>
+                      {bill.tokens} <span class="sr-only">({bill.tokensTitle})</span>
+                    </li>
+                  {/if}
+                  {#if bill.cost}
+                    <li class="detail cost" class:equivalent={check.costBasis === 'equivalent'} title={bill.costTitle}>
+                      {bill.cost} <span class="sr-only">({bill.costTitle})</span>
+                    </li>
+                  {/if}
+                {/if}
+              </ul>
+            {/if}
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>
 
 <style>
   .pdf-checks {
@@ -118,6 +129,11 @@
     border-left-color: var(--warning);
   }
 
+  /* Stopped with the turn: neither a result nor a warning about what ChatGPT read. */
+  .pdf-check.interrupted {
+    border-left-color: var(--border-strong);
+  }
+
   .mark {
     display: grid;
     place-items: center;
@@ -129,6 +145,10 @@
 
   .unchecked .mark {
     color: var(--warning);
+  }
+
+  .interrupted .mark {
+    color: var(--text-muted);
   }
 
   .spinner {
@@ -153,6 +173,10 @@
 
   .unchecked .head {
     color: #ffd99a;
+  }
+
+  .interrupted .head {
+    color: var(--text-secondary);
   }
 
   .facts {

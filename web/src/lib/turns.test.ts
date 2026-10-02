@@ -880,6 +880,61 @@ describe("Claude's check of the PDFs for ChatGPT (pdf.check)", () => {
     ]);
   });
 
+  it('a PDF that no call checks gets only its end, and that end is enough', () => {
+    // No «checking» first: the server could not analyse its pages, or the turn's time ran out
+    // while the PDF still waited for a check slot (protocol.ts, the `pdf.check` event).
+    const turn = live('rl');
+    const unchecked = { type: 'pdf.check' as const, state: 'unchecked' as const, claude_pages: [], hidden_pages: [], reused: false };
+    applyAll(turn, sequence('rl', [
+      { type: 'turn.started', conversation_id: 3, turn_id: 13, mode: 'duel', new_conversation: false },
+      {
+        ...unchecked, attachment_id: 7, name: 'informe.pdf', unchecked_pages: [1, 2, 3], usage: priced(0, 0, 0),
+        reason: "El servidor no n'ha pogut analitzar les pàgines.",
+      },
+      {
+        ...unchecked, attachment_id: 8, name: 'annex.pdf', unchecked_pages: [1, 2], usage: priced(0, 0, 0),
+        reason: 'La comprovació de Claude ha trigat massa.',
+      },
+    ]));
+    expect(turn.pdfChecks).toMatchObject([
+      { attachmentId: 7, state: 'unchecked', uncheckedPages: [1, 2, 3], reason: "El servidor no n'ha pogut analitzar les pàgines." },
+      { attachmentId: 8, state: 'unchecked', uncheckedPages: [1, 2], reason: 'La comprovació de Claude ha trigat massa.' },
+    ]);
+  });
+
+  // The server sends no end for a check that a cancelled or failed turn stopped (its task stops
+  // with the turn): the turn's end settles it, so it never looks as if Claude still worked on it.
+  for (const end of [
+    { type: 'turn.cancelled', usage: CHECK_USAGE },
+    { type: 'turn.failed', error: { kind: 'internal', message: 'Error intern.' }, usage: CHECK_USAGE },
+  ] as const) {
+    it(`a check still running when the turn ends (${end.type}) stopped with it`, () => {
+      const turn = live('rs');
+      const events = checkedDuelEvents('rs');
+      // Claude was checking «informe.pdf», and «annex.pdf» had been checked before.
+      applyAll(turn, [...events.slice(0, 5), { ...end, request_id: 'rs', seq: 6 }]);
+      expect(turn.pdfChecks.map((c) => [c.name, c.state])).toEqual([
+        ['informe.pdf', 'interrupted'],
+        ['annex.pdf', 'checked'],
+      ]);
+      // Nothing it billed is known by itself: the turn's total has it.
+      expect(turn.pdfChecks[0]).toMatchObject({ usage: null, claudePages: [], reason: null });
+    });
+  }
+
+  it('a turn that completes with a check still running settles it too', () => {
+    const turn = live('rs');
+    const savings = { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null };
+    applyAll(turn, [
+      ...checkedDuelEvents('rs').slice(0, 4),
+      {
+        type: 'turn.completed', request_id: 'rs', seq: 5, conversation_id: 3, turn_id: 12, final_message_ids: [],
+        usage: CHECK_USAGE, savings, consensus: null, cached: false,
+      },
+    ]);
+    expect(turn.pdfChecks.map((c) => c.state)).toEqual(['interrupted']);
+  });
+
   it('shows them in the order of the attachments, whatever order they ended in', () => {
     const turn = createLiveTurn({
       requestId: 'rc', question: 'Compara-ho', mode: 'duel', conversationId: 3,

@@ -19,9 +19,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, cast
 
-CHECK_VERSION: Final = 1
-"""Version of Claude's check (its prompt and output format): a stored check of another
-version is never reused."""
+CHECK_VERSION: Final = 2
+"""Version of Claude's check (its prompt, its output format and what makes a check): a
+stored check of another version is never reused. 2: version 1 also stored the demo
+Claude's canned check, which passes every page as right, and gave the pages that may hide
+text too small an output budget, so its partial checks stopped short of them for good."""
 
 NO_TEXT_LETTERS: Final = 25
 """A page with fewer letters in its extracted text has no text worth the name: a scan,
@@ -216,7 +218,8 @@ Any finding may have ``visual``: what the page's figures, charts, tables or imag
 PAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok", "missing", "garbled", "partial", "hidden"})
 _NEEDS_TEXT: Final = frozenset({"missing", "garbled", "partial"})
 READ_BY_CLAUDE: Final[frozenset[str]] = frozenset({"missing", "garbled", "partial", "hidden"})
-"""Statuses whose page ChatGPT reads, all of it or in part, through Claude."""
+"""Statuses whose page's text ChatGPT reads, all of it or in part, through Claude (so does
+what the figures of a page with a ``visual`` description show: :attr:`PdfCheck.claude_pages`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,8 +335,10 @@ class PdfCheck:
 
     @property
     def claude_pages(self) -> tuple[int, ...]:
-        """Pages whose text ChatGPT reads, all of it or in part, through Claude."""
-        return tuple(f.page for f in self.findings if f.status in READ_BY_CLAUDE)
+        """Pages ChatGPT reads, all or in part, through Claude: their text (missing,
+        garbled, partial or with text that is not visible) or what their figures show (a
+        page with a ``visual`` description, its text right or not)."""
+        return tuple(f.page for f in self.findings if f.status in READ_BY_CLAUDE or f.visual)
 
     @property
     def hidden_pages(self) -> tuple[int, ...]:

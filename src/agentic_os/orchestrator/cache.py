@@ -27,7 +27,8 @@ the declined tokens at the serving model's rates; 5: the key includes the attach
 and the system prompt says how to treat them; 6: a file's text is neutralized and
 enclosed, and a PDF without text goes whole to the revisions; 7: ChatGPT with the
 subscription reads a PDF's text as Claude checked it, the prompts warn of hidden text and
-say which pages ChatGPT read through Claude, and the key has the check's version)."""
+say which pages ChatGPT read through Claude, and the key has the check's version and what
+the server's reader made of each PDF)."""
 
 
 def _digest(payload: object) -> str:
@@ -52,6 +53,24 @@ def context_fingerprint(context: TurnContext) -> str:
     )
 
 
+def _attachment_key(attachment: Attachment) -> tuple[object, ...]:
+    """An attachment in the key: its content and name (the prompts name it) and, for a
+    PDF, what the server's reader made of it, which the models get: whether it has any
+    text (ChatGPT with the subscription reads it; the revisions get a PDF without any
+    whole) and the warnings of its pages (every model's label, ChatGPT's view and Claude's
+    check), None when it was not analysed. Two uploads of the same file may differ there:
+    one from before the page analysis existed, or whose reading timed out."""
+    if attachment.kind != "pdf":
+        return (attachment.sha256, attachment.name)
+    notes = attachment.pdf_notes
+    return (
+        attachment.sha256,
+        attachment.name,
+        has_text(attachment),
+        notes.to_wire() if notes is not None else None,
+    )
+
+
 def turn_cache_key(
     *,
     mode: TurnMode,
@@ -67,9 +86,10 @@ def turn_cache_key(
 
     ``identities`` maps each agent taking part to its provider identity
     (``"<mode>:<model>"``, with the model requested for this turn). The attachments
-    count by content and name (the prompts name them), in order, and with a PDF the
-    version of Claude's check of its text (``pdf_facts.CHECK_VERSION``: a ChatGPT that
-    cannot open PDFs reads what it found). The solo target, the debate options and
+    count by content and name (the prompts name them), in order, a PDF also by what the
+    server's reader made of it (:func:`_attachment_key`), and with a PDF the version of
+    Claude's check of its text (``pdf_facts.CHECK_VERSION``: a ChatGPT that cannot open
+    PDFs reads what it found). The solo target, the debate options and
     ``pdf_in_revisions`` (how the revisions get the PDFs that have text: one without any
     goes whole) only count where they change what the models get, so irrelevant
     differences do not cause misses.
@@ -95,7 +115,7 @@ def turn_cache_key(
                 else None
             ),
             "question": normalize_question(question),
-            "attachments": [[attachment.sha256, attachment.name] for attachment in attachments],
+            "attachments": [_attachment_key(attachment) for attachment in attachments],
             "pdf_check": (
                 CHECK_VERSION
                 if any(attachment.kind == "pdf" for attachment in attachments)

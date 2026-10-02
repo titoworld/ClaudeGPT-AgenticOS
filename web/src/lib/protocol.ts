@@ -448,8 +448,11 @@ export type TurnEvent =
   | (TurnEventBase & {
       /**
        * Claude's check of a PDF of the question for ChatGPT with the subscription: "checking"
-       * when it starts (never for a check an earlier turn stored), then "checked" or
-       * "unchecked". Its pages as in PdfReading.
+       * when Claude starts checking it, then "checked" or "unchecked". A PDF no call checks
+       * gets only its end: a check an earlier turn stored, a PDF the server could not analyse,
+       * a turn without Claude, or the time running out before its check started. A turn that
+       * is cancelled or fails while Claude checks a PDF sends no end for it. Its pages as in
+       * PdfReading.
        */
       type: 'pdf.check';
       attachment_id: number;

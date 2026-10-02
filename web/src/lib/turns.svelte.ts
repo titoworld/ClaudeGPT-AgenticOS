@@ -70,13 +70,20 @@ export interface StreamView {
 }
 
 /**
+ * Where a PDF's check stands in a live turn: as its latest `pdf.check` says, or "interrupted"
+ * when the turn ended while Claude was still checking it. The server sends no end for such a
+ * check (it stops with the turn), and nobody read the PDF through it.
+ */
+export type PdfCheckStatus = PdfCheckState | 'interrupted';
+
+/**
  * Claude's check of a PDF of the question for ChatGPT with the subscription, as the turn's
  * `pdf.check` events tell it (docs/adr/0009-adjunts.md). Pages as in PdfReading.
  */
 export interface PdfCheckView {
   attachmentId: number;
   name: string;
-  state: PdfCheckState;
+  state: PdfCheckStatus;
   claudePages: number[];
   hiddenPages: number[];
   uncheckedPages: number[];
@@ -104,8 +111,9 @@ export interface TurnView {
   attachments: Attachment[];
   /**
    * Claude's check of the question's PDFs for ChatGPT, one per PDF, as the events came
-   * (`pdfChecks` orders them). Live only: a stored turn has none, its ChatGPT messages say
-   * how it read them (`StreamView.pdfReading`).
+   * (`pdfChecks` orders them); a check the turn's end found running is "interrupted". Live
+   * only: a stored turn has none, its ChatGPT messages say how it read them
+   * (`StreamView.pdfReading`).
    */
   pdfChecks: PdfCheckView[];
   createdAt: string;
@@ -230,6 +238,15 @@ function stopOpenStreams(turn: TurnView, to: StreamStatus): void {
 }
 
 /**
+ * The turn ended while Claude still checked these PDFs: their checks stopped with it (a
+ * cancelled or failed turn stops its check, and the server sends no end for it). A completed
+ * turn ends its checks first: for it, this only keeps a check from looking as if it still ran.
+ */
+function stopOpenChecks(turn: TurnView): void {
+  for (const c of turn.pdfChecks) if (c.state === 'checking') c.state = 'interrupted';
+}
+
+/**
  * Apply one server event to a turn. Idempotent by `seq`: duplicates and older
  * events (replays after a reconnect) are ignored. Returns true if applied.
  */
@@ -316,6 +333,7 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       turn.consensus = ev.consensus;
       turn.cached = ev.cached;
       stopOpenStreams(turn, 'done');
+      stopOpenChecks(turn);
       if (ev.cached) for (const s of turn.streams) s.cached = true;
       break;
     case 'turn.failed':
@@ -324,11 +342,13 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       // A turn that fails or is cancelled may have billed calls too: its total (N10).
       turn.usage = ev.usage ?? turn.usage;
       stopOpenStreams(turn, 'interrupted');
+      stopOpenChecks(turn);
       break;
     case 'turn.cancelled':
       turn.status = 'cancelled';
       turn.usage = ev.usage ?? turn.usage;
       stopOpenStreams(turn, 'interrupted');
+      stopOpenChecks(turn);
       break;
   }
   return true;

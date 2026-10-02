@@ -3,7 +3,7 @@
 // of its text for ChatGPT in the turn, and the badge on ChatGPT's messages that says how
 // it read it. All in Catalan.
 import { describe, expect, it } from 'vitest';
-import { checkDetails, pageList, pageRanges, pageRefs, pdfNoteLines, readingGroups } from './pdf-pages';
+import { afterColon, checkDetails, pageList, pageRanges, pageRefs, pdfNoteLines, readingGroups } from './pdf-pages';
 import type { PdfReading } from './protocol';
 
 /** A no-break space: «pàg.» never ends a line apart from its number. */
@@ -92,6 +92,23 @@ describe("what the turn says of a finished check (Claude's check for ChatGPT)", 
     expect(checkDetails({ ...partial, uncheckedPages: [40], reason: null })).toEqual(['pàgina 40 sense contrastar']);
   });
 
+  it('a reason after the colon starts with a lowercase letter, unless it starts with a name', () => {
+    const failed = {
+      ...checked,
+      claudePages: [1, 2, 3],
+      hiddenPages: [],
+      uncheckedPages: [4, 5, 6, 7, 8, 9, 10, 11, 12],
+      reason: 'La comprovació de Claude ha fallat: Error inesperat del proveïdor.',
+    };
+    expect(checkDetails(failed)).toEqual([
+      'pàgines 1–3 llegides per Claude',
+      'pàgines 4–12 sense contrastar: la comprovació de Claude ha fallat: Error inesperat del proveïdor.',
+    ]);
+    expect(checkDetails({ ...failed, reason: "Claude no l'ha volgut contrastar." })[1]).toBe(
+      "pàgines 4–12 sense contrastar: Claude no l'ha volgut contrastar.",
+    );
+  });
+
   it('a check that found nothing to correct says so', () => {
     expect(checkDetails({ ...checked, claudePages: [], hiddenPages: [] })).toEqual(['Claude no hi ha trobat cap diferència']);
   });
@@ -174,5 +191,36 @@ describe("the badge on ChatGPT's messages (meta.pdf_reading)", () => {
 
   it('none for a message without readings', () => {
     expect(readingGroups([])).toEqual([]);
+  });
+
+  it('a reason on a line of its own keeps its capital letter', () => {
+    const [group] = readingGroups([
+      reading({ checked: false, claude_pages: [], hidden_pages: [], unchecked_pages: [1], reason: 'La comprovació de Claude ha trigat massa.' }),
+    ]);
+    expect(group!.pdfs[0]!.note).toBe('La comprovació de Claude ha trigat massa.');
+  });
+});
+
+describe('a sentence after a colon (Catalan typography)', () => {
+  it("starts with a lowercase letter: the server's reasons are sentences of their own", () => {
+    expect(afterColon('La comprovació de Claude ha trigat massa.')).toBe('la comprovació de Claude ha trigat massa.');
+    expect(afterColon("El servidor no n'ha pogut analitzar les pàgines.")).toBe("el servidor no n'ha pogut analitzar les pàgines.");
+    expect(afterColon("L'anàlisi ha fallat.")).toBe("l'anàlisi ha fallat.");
+    expect(afterColon('És massa llarg.')).toBe('és massa llarg.');
+  });
+
+  it('keeps the capital of a name or an acronym', () => {
+    expect(afterColon("Claude no l'ha volgut contrastar.")).toBe("Claude no l'ha volgut contrastar.");
+    expect(afterColon("Claude només l'ha pogut contrastar fins a la pàgina 30.")).toBe(
+      "Claude només l'ha pogut contrastar fins a la pàgina 30.",
+    );
+    expect(afterColon('ChatGPT no pot obrir el PDF.')).toBe('ChatGPT no pot obrir el PDF.');
+    expect(afterColon('PDF malmès.')).toBe('PDF malmès.');
+  });
+
+  it('leaves alone what does not start with a letter', () => {
+    expect(afterColon('')).toBe('');
+    expect(afterColon('3 pàgines sense text.')).toBe('3 pàgines sense text.');
+    expect(afterColon('«Informe» no existeix.')).toBe('«Informe» no existeix.');
   });
 });

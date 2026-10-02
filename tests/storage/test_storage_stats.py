@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agentic_os.domain import AgentName, ProviderMode, SavingKind, Usage
+from agentic_os.domain import AgentName, ProviderMode, Purpose, SavingKind, Usage
 from agentic_os.fx import FxRate
 from agentic_os.orchestrator.store import JsonValue, NewMessage, SavingRecord, UsageRecord
 from agentic_os.storage import FxSettings, RuntimeSettings, SqliteStore
@@ -45,6 +45,7 @@ async def usage(
     ttft_ms: int | None = None,
     ok: bool = True,
     mode: ProviderMode = "api",
+    purpose: Purpose = "answer",
 ) -> None:
     await store.record_usage(
         UsageRecord(
@@ -53,7 +54,7 @@ async def usage(
             agent=agent,
             provider_mode=mode,
             model="m",
-            purpose="answer",
+            purpose=purpose,
             usage=tokens,
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,
@@ -535,6 +536,28 @@ async def test_savings_value_mixes_recorded_values_and_older_turns(
     await store.record_saving(SavingRecord(None, None, "early_stop", 100))  # unpriced
     await store.record_saving(SavingRecord(None, None, "compaction", 1, cost_usd=float("nan")))
     assert (await store.stats(1, NOW))["savings"]["cost_usd"] == 0.75
+
+
+async def test_latency_counts_only_the_calls_that_write_a_message(store: SqliteStore) -> None:
+    """An agent's response time is that of its answers, revisions and syntheses: a
+    history summary (short) and Claude's check of a PDF for ChatGPT (a long
+    transcription) would skew it, so they count only in tokens and costs."""
+    calls: tuple[tuple[Purpose, int], ...] = (
+        ("answer", 1000),
+        ("revision", 2000),
+        ("synthesis", 3000),
+    )
+    for purpose, ms in calls:
+        await usage(
+            store, "claude", tokens=Usage(10, 5), latency_ms=ms, ttft_ms=100, purpose=purpose
+        )
+    await usage(store, "claude", tokens=Usage(10, 5), latency_ms=50, ttft_ms=5, purpose="summary")
+    await usage(store, "claude", tokens=Usage(10, 5), latency_ms=240_000, purpose="check")
+
+    stats = await store.stats(1, NOW)
+
+    assert stats["latency"]["claude"] == {"p50_ms": 2000, "p95_ms": 3000, "ttft_p50_ms": 100}
+    assert stats["totals"]["by_agent"]["claude"]["calls"] == 5
 
 
 async def test_unpriced_savings_have_no_value(store: SqliteStore) -> None:

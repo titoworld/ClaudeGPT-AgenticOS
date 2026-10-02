@@ -36,14 +36,16 @@ const SAVED: RuntimeSettings = {
   pdf_in_revisions: 'text',
 };
 
-const subscription = (agent: ProviderStatus['agent']): ProviderStatus => ({
+const provider = (agent: ProviderStatus['agent'], mode: ProviderStatus['mode']): ProviderStatus => ({
   agent,
-  mode: 'cli',
+  mode,
   available: true,
   model: agent === 'claude' ? 'claude-opus' : 'gpt-5',
   detail: '',
   limits: [],
 });
+const subscription = (agent: ProviderStatus['agent']): ProviderStatus => provider(agent, 'cli');
+const SUBSCRIPTIONS = [subscription('claude'), subscription('chatgpt')];
 
 const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\n%âãÏÓ\n');
 const QUESTION = "Què diu l'informe?";
@@ -97,7 +99,6 @@ beforeEach(() => {
   localStorage.clear();
   history.replaceState(null, '', '#/');
   server = new FakeApi(SAVED);
-  server.providers = [subscription('claude'), subscription('chatgpt')];
   FakeSocket.all = [];
   vi.stubGlobal('fetch', server.fetch);
   vi.stubGlobal('WebSocket', FakeSocket);
@@ -110,27 +111,36 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** The app logged in, with the socket open and both agents on the subscription. */
-async function connected() {
+/** The app logged in, with the socket open and the agents `providers` (by default, both on the subscription). */
+async function connected(providers: ProviderStatus[] = SUBSCRIPTIONS) {
+  server.providers = [...providers];
   env = await load();
   const e = env;
   await e.app.init();
   const socket = FakeSocket.last();
   socket.open();
   const greeting = hello();
-  if (greeting.type === 'hello') greeting.providers = [subscription('claude'), subscription('chatgpt')];
+  if (greeting.type === 'hello') greeting.providers = [...providers];
   socket.receive(greeting);
   return { e, socket };
 }
 
+interface Sent {
+  mode?: 'solo' | 'duel';
+  /** Who a solo turn asks. */
+  target?: 'claude' | 'chatgpt';
+  providers?: ProviderStatus[];
+}
+
 /**
- * A duel sent with the PDFs `pdfs` (already on the server), and its live turn rendered.
- * `receive` hands the socket events of the turn, numbered from the last one sent.
+ * A turn (a duel, by default) sent with the PDFs `pdfs` (already on the server), and its live
+ * turn rendered. `receive` hands the socket events of the turn, numbered from the last one sent.
  */
-async function liveDuel(pdfs: Attachment[]) {
-  const { e, socket } = await connected();
+async function liveTurn(pdfs: Attachment[], { mode = 'duel', target = 'chatgpt', providers }: Sent = {}) {
+  const { e, socket } = await connected(providers);
   e.app.composer.attachments.restore(pdfs);
-  e.app.composer.mode = 'duel';
+  e.app.composer.mode = mode;
+  if (mode === 'solo') e.app.composer.target = target;
   expect(e.app.send(QUESTION)).toBe(true);
   const requestId = String(socket.sent.find((m) => m.type === 'turn.start')!.request_id);
   const turn = e.app.turns.get(requestId)!;
@@ -141,6 +151,24 @@ async function liveDuel(pdfs: Attachment[]) {
     e.flushSync();
   };
   return { e, root, turn, receive };
+}
+
+const liveDuel = (pdfs: Attachment[]) => liveTurn(pdfs);
+
+/** The app again (as after a reload), showing conversation 3 with the stored `messages`. */
+async function reloaded(messages: Message[], providers?: ProviderStatus[]) {
+  env!.cleanup();
+  env!.app.toLogin();
+  const summary: ConversationSummary = {
+    id: 3, title: 'Informe', created_at: '2026-09-29T10:00:00Z', updated_at: '2026-09-29T10:00:00Z', last_mode: 'duel',
+    message_count: messages.length,
+  };
+  server.conversations = [summary];
+  server.messages.set(3, messages);
+  const { e } = await connected(providers);
+  await e.app.syncRoute({ name: 'chat', id: 3 });
+  const [stored] = e.app.viewTurns as TurnView[];
+  return { e, root: e.render(e.Turn, { turn: stored!, plannedRounds: 0 }) };
 }
 
 function storedPdf(id: number, name: string, pages = 12): Attachment {
@@ -165,8 +193,10 @@ describe("the turn shows Claude's check of each PDF for ChatGPT, live", () => {
       { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-opus' },
       check({ state: 'checking', claude_pages: [], hidden_pages: [], usage: null }),
     );
-    const region = root.querySelector('.pdf-checks')!;
+    // A polite live region holds the list: each change of a check is announced.
+    const region = root.querySelector('.pdf-live')!;
     expect(region.getAttribute('aria-live')).toBe('polite');
+    expect(region.querySelector('.pdf-checks')).not.toBeNull();
     let [item] = checks(root);
     expect(e.textOf(item!.querySelector('.head'))).toBe('Claude contrasta «informe.pdf» per a ChatGPT…');
     expect(item!.classList.contains('checking')).toBe(true);
@@ -230,8 +260,9 @@ describe("the turn shows Claude's check of each PDF for ChatGPT, live", () => {
     );
     items = checks(root);
     expect(items[1]!.classList.contains('unchecked')).toBe(true);
+    // The reason is a sentence of its own: after the colon it goes in lowercase.
     expect(env!.textOf(items[1]!.querySelector('.head'))).toBe(
-      'ChatGPT llegeix el text de «annex.pdf» sense contrastar: La comprovació de Claude ha trigat massa.',
+      'ChatGPT llegeix el text de «annex.pdf» sense contrastar: la comprovació de Claude ha trigat massa.',
     );
     // Nothing billed: no cost to show.
     expect(details(items[1]!)).toEqual([]);
@@ -259,6 +290,169 @@ describe("the turn shows Claude's check of each PDF for ChatGPT, live", () => {
     const { root, receive } = await liveDuel([]);
     receive({ type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false });
     expect(root.querySelector('.pdf-checks')).toBeNull();
+  });
+});
+
+// A live region inserted together with its content is not announced, and a PDF's only event
+// may be its end: a check an earlier turn stored, a PDF the server could not analyse, a turn
+// without Claude. So the region is in the page from the moment the turn is sent.
+describe('screen readers hear every check of a live turn, its first event too', () => {
+  const lone = [
+    ['a check an earlier turn stored', check({ reused: true, usage: null }), 'ChatGPT llegeix «informe.pdf» contrastat per Claude'],
+    [
+      'a PDF the server could not analyse',
+      check({
+        state: 'unchecked', claude_pages: [], hidden_pages: [], unchecked_pages: [1, 2, 3], usage: priced(0, 0, 0),
+        reason: "El servidor no n'ha pogut analitzar les pàgines.",
+      }),
+      "ChatGPT llegeix el text de «informe.pdf» sense contrastar: el servidor no n'ha pogut analitzar les pàgines.",
+    ],
+    [
+      'a turn without Claude',
+      check({
+        state: 'unchecked', claude_pages: [], hidden_pages: [], unchecked_pages: [1, 2, 3], usage: null,
+        reason: 'Claude no està disponible per contrastar-lo.',
+      }),
+      // A reason that starts with a name keeps its capital.
+      'ChatGPT llegeix el text de «informe.pdf» sense contrastar: Claude no està disponible per contrastar-lo.',
+    ],
+  ] as const;
+
+  for (const [label, end, headline] of lone) {
+    it(`${label}: its only event goes into a region that was already in the page`, async () => {
+      const { e, root, receive } = await liveDuel([storedPdf(7, 'informe.pdf', 3)]);
+      const region = root.querySelector('.pdf-live')!;
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      receive({ type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false });
+      expect(root.querySelector('.pdf-live')).toBe(region);
+      expect(e.textOf(region)).toBe('');
+
+      receive(end);
+      // The same region, still in the page: what came is a change inside it.
+      expect(root.querySelector('.pdf-live')).toBe(region);
+      expect(region.isConnected).toBe(true);
+      expect(e.textOf(region.querySelector('.head'))).toBe(headline);
+    });
+  }
+
+  it('takes no room while it is empty', async () => {
+    const { root, receive } = await liveDuel([storedPdf(7, 'informe.pdf', 3)]);
+    const region = root.querySelector('.pdf-live')!;
+    // Out of the layout (no gap in the turn), yet in the page for screen readers.
+    expect(region.classList.contains('sr-only')).toBe(true);
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+      check({ reused: true, usage: null }),
+    );
+    expect(region.classList.contains('sr-only')).toBe(false);
+  });
+
+  it('goes once the turn ends without any check', async () => {
+    const { root, receive } = await liveDuel([]);
+    expect(root.querySelector('.pdf-live')).not.toBeNull();
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 13, mode: 'duel', new_conversation: false },
+      { type: 'turn.cancelled', usage: priced(0, 0, 0) },
+    );
+    expect(root.querySelector('.pdf-live')).toBeNull();
+  });
+});
+
+// The server sends no end for a check that a cancelled or failed turn stopped: the turn's end
+// settles it, so the turn never looks as if Claude still worked on it (and billed it).
+describe('a turn that ends while Claude checks its PDF', () => {
+  const ends = [
+    [{ type: 'turn.cancelled', usage: CHECK_USAGE }, "Aquest torn s'ha aturat."],
+    [
+      { type: 'turn.failed', error: { kind: 'internal', message: 'Error intern.' }, usage: CHECK_USAGE },
+      'El torn ha fallat. Error intern.',
+    ],
+  ] as const;
+
+  for (const [end, banner] of ends) {
+    it(`${end.type}: the check stopped with it, and ChatGPT read nothing through it`, async () => {
+      const { e, root, receive } = await liveDuel([storedPdf(7, 'informe.pdf')]);
+      receive(
+        { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+        { type: 'phase', phase: 'answer', round: 0 },
+        { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-opus' },
+        check({ state: 'checking', claude_pages: [], hidden_pages: [], usage: null }),
+        end,
+      );
+      expect(e.textOf(root.querySelector('.banner'))).toBe(banner);
+      const [item] = checks(root);
+      expect(item!.classList.contains('checking')).toBe(false);
+      expect(item!.classList.contains('interrupted')).toBe(true);
+      expect(item!.querySelector('.spinner')).toBeNull();
+      expect(e.textOf(item!.querySelector('.head'))).toBe(
+        "El torn s'ha aturat abans que Claude acabés de contrastar «informe.pdf».",
+      );
+      expect(e.textOf(item)).not.toContain('ChatGPT llegeix');
+      // What the check billed is in the turn's total, not on its own.
+      expect(details(item!)).toEqual([]);
+    });
+  }
+});
+
+// Claude's check calls are in the turn's total and on no answer. In a solo turn for ChatGPT with
+// the subscription, the reloaded turn knows only that ChatGPT read the PDF through a check, not
+// what kind of cost Claude's calls were: the total says the same live and after a reload (P5),
+// and never calls Claude's API spend a value included in the subscription.
+describe("the turn's total when Claude by API checked the PDF for ChatGPT with the subscription", () => {
+  const CHECK = priced(40_000, 800, 0.05);
+  const SOLO_ANSWER = priced(1200, 300, 0.01);
+  const TOTAL = priced(41_200, 1100, 0.06);
+  const PROVIDERS = [provider('claude', 'api'), provider('chatgpt', 'cli')];
+  const reading: PdfReading = { ...READING, claude_pages: [2], hidden_pages: [] };
+
+  function storedSolo(pdf: Attachment): Message[] {
+    const at = '2026-09-29T10:00:00Z';
+    return [
+      {
+        id: 11, turn_id: 12, kind: 'question', content: QUESTION, agent: null, round: 0, final: true, created_at: at,
+        meta: {
+          mode: 'solo',
+          target: 'chatgpt',
+          attachments: [pdf],
+          outcome: {
+            status: 'completed', failures: [], usage: TOTAL, savings: NO_SAVINGS, consensus: null, final_message_ids: [14],
+            cached: false,
+          },
+        },
+      },
+      {
+        id: 14, turn_id: 12, kind: 'answer', content: 'Resposta de ChatGPT', agent: 'chatgpt', round: 0, final: true, created_at: at,
+        meta: { model: 'gpt-5', usage: SOLO_ANSWER, cost_basis: 'equivalent', pdf_reading: [reading] },
+      },
+    ];
+  }
+
+  it('puts the check among the other calls, live and after a reload', async () => {
+    const pdf = storedPdf(7, 'informe.pdf');
+    const { root, receive } = await liveTurn([pdf], { mode: 'solo', target: 'chatgpt', providers: PROVIDERS });
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'solo', new_conversation: false },
+      check({ state: 'checking', claude_pages: [], hidden_pages: [], usage: null }),
+      check({ claude_pages: [2], hidden_pages: [], usage: CHECK }),
+      { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'gpt-5' },
+      {
+        type: 'stream.completed', stream_id: 'g', message_id: 14, usage: SOLO_ANSWER, latency_ms: 900, ttft_ms: 100,
+        agreement: null, unchanged: false, cost_basis: 'equivalent', pdf_reading: [reading],
+      },
+      {
+        type: 'turn.completed', conversation_id: 3, turn_id: 12, final_message_ids: [14], usage: TOTAL, savings: NO_SAVINGS,
+        consensus: null, cached: false,
+      },
+    );
+    // The check's own cost says what it is: Claude's mode tells it, live.
+    expect(root.querySelector('.pdf-check .detail.cost')!.getAttribute('title')).toBe("Cost real de l'API (0,05 $)");
+    const live = root.querySelector('.totals .cost')!.getAttribute('title')!;
+    expect(plain(live)).toBe(
+      "Cost del torn a preus d'API · valor inclòs a la subscripció: 0,009 € · altres crides: 0,045 €",
+    );
+
+    const { root: again } = await reloaded(storedSolo(pdf), PROVIDERS);
+    expect(again.querySelector('.totals .cost')!.getAttribute('title')).toBe(live);
   });
 });
 
@@ -346,24 +540,15 @@ describe("the badge on ChatGPT's messages says how it read the PDFs", () => {
     expect(checks(root)).toHaveLength(1);
 
     // A reload: the conversation comes from the server.
-    e.cleanup();
-    e.app.toLogin();
-    const summary: ConversationSummary = {
-      id: 3, title: 'Informe', created_at: '2026-09-29T10:00:00Z', updated_at: '2026-09-29T10:00:00Z', last_mode: 'duel', message_count: 3,
-    };
-    server.conversations = [summary];
-    server.messages.set(3, storedDuel(pdf));
-    const { e: again } = await connected();
-    await again.app.syncRoute({ name: 'chat', id: 3 });
-    const [stored] = again.app.viewTurns as TurnView[];
-    const reloaded = again.render(again.Turn, { turn: stored!, plannedRounds: 0 });
-    const after = badge(reloaded, 'chatgpt')!;
+    const { e: again, root: shown } = await reloaded(storedDuel(pdf));
+    const after = badge(shown, 'chatgpt')!;
     expect([after.label, after.tip, after.role]).toEqual([live.label, live.tip, live.role]);
-    expect(badge(reloaded, 'claude')).toBeNull();
+    expect(badge(shown, 'claude')).toBeNull();
     // What the check did live is not stored: the badge says it.
-    expect(reloaded.querySelector('.pdf-checks')).toBeNull();
+    expect(shown.querySelector('.pdf-checks')).toBeNull();
+    expect(shown.querySelector('.pdf-live')).toBeNull();
     // The question's card shows the warnings of the PDF's pages.
-    expect(again.textOf(reloaded.querySelector('.question .pdf-note .note-text'))).toBe('Possible text ocult: pàg. 5');
+    expect(again.textOf(shown.querySelector('.question .pdf-note .note-text'))).toBe('Possible text ocult: pàg. 5');
   });
 
   it("an unchecked PDF's badge says so, with its pages and why", async () => {

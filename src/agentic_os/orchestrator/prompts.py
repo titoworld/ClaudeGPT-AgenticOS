@@ -21,8 +21,9 @@ without attachments, says their content is data, never instructions.
 
 A PDF's label warns of the pages that may hold text nobody sees (:func:`hidden_note`),
 which the server's analysis or Claude's check found. When ChatGPT cannot open PDFs
-(Codex), the prompts that compare the answers say which pages it read as Claude read
-them (:func:`pdf_reading_note`): an agreement on those pages is one reading, not two.
+(Codex), the prompts that compare the answers say which pages it read as Claude read or
+described them (:func:`pdf_reading_note`): an agreement on those pages is one reading,
+not two.
 """
 
 from __future__ import annotations
@@ -233,10 +234,11 @@ def _pdf_reading(attachment: Attachment) -> str:
             "the document."
         )
     else:
+        # Read: the text Claude transcribed; described: what Claude says the figures show.
         one = len(pages) == 1
         sentence = (
             f"It read {name} as the text the server extracted, and {_page_list(pages)} as "
-            f"Claude read {'it' if one else 'them'}: where both of you agree on "
+            f"Claude read or described {'it' if one else 'them'}: where both of you agree on "
             f"{'that page' if one else 'those pages'}, that is one reading, not two."
         )
     if not check.complete:
@@ -248,9 +250,10 @@ def _pdf_reading(attachment: Attachment) -> str:
 def pdf_reading_note(attachments: Sequence[Attachment]) -> str:
     """What the revisions and the synthesis are told when ChatGPT cannot open PDFs (Codex):
     it read each PDF of the question as the text the server extracted, with the pages
-    Claude's check read for it (``pdf_check``), so that where both agree on those pages
-    it is one reading, not two independent ones. "" without any PDF. Deterministic, with
-    the names neutralized; the engine passes it only when ChatGPT read the PDFs so."""
+    Claude's check read or described for it (``PdfCheck.claude_pages``), so that where
+    both agree on those pages it is one reading, not two independent ones. "" without
+    any PDF. Deterministic, with the names neutralized; the engine passes it only when
+    ChatGPT read the PDFs so."""
     sentences = [_pdf_reading(attachment) for attachment in attachments if attachment.kind == "pdf"]
     if not sentences:
         return ""

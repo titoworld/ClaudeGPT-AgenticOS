@@ -1,6 +1,7 @@
 """Claude's check of a PDF in the tests (orchestrator/pdf_check.py): the JSON lines Claude
-writes, analysed PDFs as the server stores them, and a Claude whose check calls follow a
-script (a reply, an error, or a call that waits until the test releases it)."""
+writes, analysed PDFs as the server stores them, a Claude that can check (a real one's
+mode: the demo's never checks), and one whose check calls follow a script (a reply, an
+error, or a call that waits until the test releases it)."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Collection, Mapping
 from dataclasses import replace
+from typing import Any
 
 from agentic_os.domain import Usage
 from agentic_os.providers.base import (
@@ -52,13 +54,20 @@ def analysed(
     return replace(files.pdf(name, pages=len(texts), text=text), pdf_pages=pages)
 
 
+def checking_claude(**options: Any) -> FakeProvider:
+    """A Claude that can check a PDF: the fake in mode "cli", as a real Claude reports
+    (the demo Claude, mode "fake", never checks one); ``options`` are the fake's."""
+    return FakeProvider("claude", chunk_delay=0, mode="cli", **options)
+
+
 class ScriptedClaude(FakeProvider):
     """Claude whose "check" calls follow ``script``, one step per call (the last one
     repeats): a reply, or an exception to raise. The calls in ``gated`` (by their index,
     from 0) first wait for :attr:`gate`: :attr:`waiting` is set when one starts waiting,
     and :attr:`cancelled` counts the ones cancelled meanwhile. A reply bills
     :data:`CHECK_USAGE` plus its call index in input tokens, after the ``declined``
-    attempts (a server-side fallback). Every other call is the fake's."""
+    attempts (a server-side fallback). Every other call is the fake's. It reports mode
+    "cli", like a real Claude (the demo's never checks)."""
 
     def __init__(
         self,
@@ -66,7 +75,7 @@ class ScriptedClaude(FakeProvider):
         gated: Collection[int] = (),
         declined: tuple[DeclinedAttempt, ...] = (),
     ) -> None:
-        super().__init__("claude", chunk_delay=0)
+        super().__init__("claude", chunk_delay=0, mode="cli")
         self.script: tuple[str | Exception, ...] = script or (END,)
         self.gated = frozenset(gated)
         self.declined = declined

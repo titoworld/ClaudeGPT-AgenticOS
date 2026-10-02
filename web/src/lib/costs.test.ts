@@ -15,9 +15,16 @@ import {
   turnCostTitle,
   type TurnCost,
 } from './costs';
-import type { Agent, AgentSpend, FxRate, TurnMode } from './protocol';
-import { usage } from './test-fixtures';
-import { createLiveTurn, type CostBasis, type StreamView, type TurnView } from './turns.svelte';
+import type { Agent, AgentSpend, FxRate, Message, PdfReading, TurnMode } from './protocol';
+import { sequence, usage } from './test-fixtures';
+import {
+  applyTurnEvent,
+  createLiveTurn,
+  turnsFromMessages,
+  type CostBasis,
+  type StreamView,
+  type TurnView,
+} from './turns.svelte';
 
 // Intl uses a no-break space before "€" and "%" in Catalan.
 const plain = (s: string | null | undefined) => s?.replace(/ | /g, ' ');
@@ -224,6 +231,103 @@ describe('turn cost split: the calls no answer shows (A8)', () => {
     expect(cost).toMatchObject({ apiUsd: 0, equivalentUsd: 0 });
     expect(cost.otherUsd).toBeCloseTo(0.0262, 12);
     expect(turnCostTitle(cost, 1)).toBe("Cost del torn a preus d'API");
+  });
+});
+
+// Claude checks the text of the PDFs that ChatGPT with the subscription reads (P7b): its calls
+// are in the turn's total and on no answer, in a solo turn for ChatGPT too. What both views know
+// of them is that ChatGPT read a PDF through the check (`pdf_reading`), never their kind of cost:
+// the rest of such a turn is not passed off as ChatGPT's, live or after a reload (P5).
+describe("turn cost split: Claude's check of the PDFs ChatGPT reads (P7b)", () => {
+  const billed = (input: number, output: number, usd: number) => ({ ...usage(input, output), cost_usd: usd });
+  const CHECK = billed(40_000, 800, 0.05); // Claude by API: real money
+  const ANSWER = billed(1200, 300, 0.01); // ChatGPT with the subscription: a value
+  const TOTAL = billed(41_200, 1100, 0.06);
+  const NO_SAVINGS = { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null };
+  const READING: PdfReading = {
+    attachment_id: 7,
+    name: 'informe.pdf',
+    checked: true,
+    claude_pages: [2, 5],
+    hidden_pages: [],
+    unchecked_pages: [],
+    reason: null,
+  };
+
+  /**
+   * A solo turn for ChatGPT whose PDF Claude checked, live. The app sets each basis: the
+   * answer's from its stream.completed, the check's from Claude's mode.
+   */
+  function live(claude: CostBasis): TurnView {
+    const turn = createLiveTurn({ requestId: 'r', question: 'Què diu?', mode: 'solo', target: 'chatgpt', conversationId: 3 });
+    const check = { type: 'pdf.check', attachment_id: 7, name: 'informe.pdf', reused: false, reason: null } as const;
+    for (const ev of sequence('r', [
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'solo', new_conversation: false },
+      { ...check, state: 'checking', claude_pages: [], hidden_pages: [], unchecked_pages: [], usage: null },
+      { ...check, state: 'checked', claude_pages: [2, 5], hidden_pages: [], unchecked_pages: [], usage: CHECK },
+      { type: 'stream.started', stream_id: 'g', agent: 'chatgpt', kind: 'answer', round: 0, model: 'gpt-5' },
+      {
+        type: 'stream.completed', stream_id: 'g', message_id: 14, usage: ANSWER, latency_ms: 900, ttft_ms: 100,
+        agreement: null, unchanged: false, cost_basis: 'equivalent', pdf_reading: [READING],
+      },
+      {
+        type: 'turn.completed', conversation_id: 3, turn_id: 12, final_message_ids: [14], usage: TOTAL,
+        savings: NO_SAVINGS, consensus: null, cached: false,
+      },
+    ])) {
+      applyTurnEvent(turn, ev);
+    }
+    turn.streams[0]!.costBasis = 'equivalent';
+    turn.pdfChecks[0]!.costBasis = claude;
+    return turn;
+  }
+
+  /** The same turn after a reload: the check is only in the total, the answer says how ChatGPT read the PDF. */
+  function reloaded(): TurnView {
+    const at = '2026-09-29T10:00:00Z';
+    const messages: Message[] = [
+      {
+        id: 11, turn_id: 12, kind: 'question', content: 'Què diu?', agent: null, round: 0, final: true, created_at: at,
+        meta: {
+          mode: 'solo',
+          target: 'chatgpt',
+          outcome: {
+            status: 'completed', failures: [], usage: TOTAL, savings: NO_SAVINGS, consensus: null,
+            final_message_ids: [14], cached: false,
+          },
+        },
+      },
+      {
+        id: 14, turn_id: 12, kind: 'answer', content: 'Diu…', agent: 'chatgpt', round: 0, final: true, created_at: at,
+        meta: { model: 'gpt-5', usage: ANSWER, cost_basis: 'equivalent', pdf_reading: [READING] },
+      },
+    ];
+    return turnsFromMessages(messages, 3)[0]!;
+  }
+
+  it("never passes Claude's check off as ChatGPT's subscription value: it is among the other calls", () => {
+    const cost = turnCost(live('api'));
+    expect(cost).toMatchObject({ totalUsd: 0.06, apiUsd: 0, equivalentUsd: 0.01 });
+    expect(cost.otherUsd).toBeCloseTo(0.05, 12);
+    expect(plain(turnCostTitle(cost, 1))).toBe(
+      "Cost del torn a preus d'API · valor inclòs a la subscripció: 0,01 € · altres crides: 0,05 €",
+    );
+  });
+
+  it('splits it the same way live and after a reload, whatever mode Claude has', () => {
+    const shown = turnCost(reloaded());
+    expect(shown.otherUsd).toBeCloseTo(0.05, 12);
+    // Nothing stored says what kind of cost the check was: the live view does not use it either.
+    expect(turnCost(live('api'))).toEqual(shown);
+    expect(turnCost(live('equivalent'))).toEqual(shown);
+  });
+
+  it("keeps a solo turn's rest as its agent's when ChatGPT read no PDF through a check", () => {
+    // A declined attempt before a fallback: ChatGPT's own call, so subscription value.
+    const turn = createLiveTurn({ requestId: 'r', question: 'q', mode: 'solo', target: 'chatgpt' });
+    turn.streams = [stream({ agent: 'chatgpt', usage: priced(0.01), costBasis: 'equivalent' })];
+    turn.usage = priced(0.03);
+    expect(turnCost(turn)).toEqual({ totalUsd: 0.03, apiUsd: 0, equivalentUsd: 0.03, otherUsd: 0 });
   });
 });
 

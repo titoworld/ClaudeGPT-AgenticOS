@@ -116,8 +116,9 @@ export interface TurnCost {
   equivalentUsd: number;
   /**
    * The rest of the total when the turn does not tell its kind: calls no answer shows (a
-   * history summary, a failed call, attempts declined before a fallback) that may have been
-   * an API agent's or a subscription agent's. The three parts add up to the total.
+   * history summary, Claude's check of a PDF for ChatGPT, a failed call, attempts declined
+   * before a fallback) that may have been an API agent's or a subscription agent's. The
+   * three parts add up to the total.
    */
   otherUsd: number;
 }
@@ -129,11 +130,15 @@ const ROUNDING_USD = 1e-9;
  * The cost basis of every call of a turn, when its answers tell it: every agent that could
  * have made a call answered with that same basis (an agent's mode does not change while the
  * server runs). Those agents are both in a duel or a debate, and the one that answered in a
- * solo turn, unless it compacted the history: either agent may have written the summary
- * (Claude first, even in a turn for ChatGPT). Null when the turn does not tell.
+ * solo turn, unless the other one may have made calls too: when the turn compacted the
+ * history, since either agent may have written the summary (Claude first, even in a turn for
+ * ChatGPT), and when ChatGPT read a PDF through Claude's check (its answers say so, live and
+ * after a reload), since Claude made the check's calls. Null when the turn does not tell.
  */
 function turnBasis(turn: TurnView): CostBasis | null {
-  const callers = turn.mode === 'solo' && !turn.compacted ? new Set(turn.streams.map((s) => s.agent)) : AGENTS;
+  const readThroughCheck = turn.streams.some((s) => s.pdfReading.length > 0);
+  const alone = turn.mode === 'solo' && !turn.compacted && !readThroughCheck;
+  const callers = alone ? new Set(turn.streams.map((s) => s.agent)) : AGENTS;
   const bases = new Set<CostBasis>();
   for (const agent of callers) {
     const known = turn.streams.filter((s) => s.agent === agent && s.costBasis);
@@ -145,8 +150,10 @@ function turnBasis(turn: TurnView): CostBasis | null {
 
 /**
  * A turn's total and its split: the answers' costs by basis, and what the total has that no
- * answer shows (a history summary, failed calls, attempts declined before a fallback, a
- * billed call that was retried) under the turn's basis when it has one, else apart.
+ * answer shows (a history summary, Claude's check of the PDFs for ChatGPT, failed calls,
+ * attempts declined before a fallback, a billed call that was retried) under the turn's
+ * basis when it has one, else apart. It reads only what a reloaded turn has too, so a turn
+ * shows the same split live and after a reload.
  */
 export function turnCost(turn: TurnView): TurnCost {
   let apiUsd = 0;

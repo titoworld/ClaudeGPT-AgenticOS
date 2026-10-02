@@ -235,7 +235,8 @@ CHECK = PdfCheck(
 
 
 def test_what_the_check_says_about_each_page() -> None:
-    assert CHECK.claude_pages == (1, 3, 4)
+    # Page 2's text is right, but ChatGPT reads what its figure shows as Claude describes it.
+    assert CHECK.claude_pages == (1, 2, 3, 4)
     assert CHECK.hidden_pages == (3,)
     assert CHECK.unchecked_pages == (5, 6)
     assert not CHECK.complete

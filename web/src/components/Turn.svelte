@@ -112,7 +112,8 @@
     <p class="notice"><Icon name="refresh" size={14} />Compactant l'historial per estalviar tokens…</p>
   {/if}
 
-  {#if checks.length}
+  <!-- In the page while the turn runs, even before any check comes: its live region announces the first one too. -->
+  {#if active || checks.length}
     <PdfChecks {checks} eurPerUsd={app.eurPerUsd} />
   {/if}
 

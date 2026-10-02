@@ -19,7 +19,9 @@ with a code, ``[Fitxer: <name> · <code>]``, and the closing line ``[Fi del fitx
 <code>]``. The code (:func:`file_code`) hashes the content's SHA-256 and the name, so
 neither the file nor its name can hold it (each would have to contain its own hash) and a
 forged end of file is told apart; it is deterministic, so the prompt caches keep hitting.
-The prompt lists the attachments by :func:`attachment_label`.
+ChatGPT's page-by-page view of a PDF (:func:`pdf_view`) and Claude's check of its text
+have codes of their own, seeded apart (:func:`view_code`, :func:`check_code`): only
+ChatGPT ever sees the view's. The prompt lists the attachments by :func:`attachment_label`.
 """
 
 from __future__ import annotations
@@ -158,6 +160,13 @@ def file_code(attachment: Attachment) -> str:
     return hashlib.sha256(seed).hexdigest()[:FILE_CODE_LENGTH]
 
 
+def _enclose(opening: str, body: str, code: str) -> str:
+    """:func:`enclosed` with this ``code``."""
+    text = neutralize_tags(body)
+    end = "" if text.endswith("\n") else "\n"
+    return f"[{opening} · {code}]\n{text}{end}[Fi del fitxer {code}]\n"
+
+
 def enclosed(opening: str, body: str, attachment: Attachment) -> str:
     """An attachment's text as the models get it: the line ``[<opening> · <code>]``, the
     body with every tag of the app's prompts neutralized (``neutralize_tags``) and the
@@ -165,10 +174,7 @@ def enclosed(opening: str, body: str, attachment: Attachment) -> str:
     break (Codex joins its text items: what follows starts on a line of its own). The
     body cannot close the block or open a section of the prompt: whatever it says, it
     stays the file's content."""
-    code = file_code(attachment)
-    text = neutralize_tags(body)
-    end = "" if text.endswith("\n") else "\n"
-    return f"[{opening} · {code}]\n{text}{end}[Fi del fitxer {code}]\n"
+    return _enclose(opening, body, file_code(attachment))
 
 
 def attachment_text(attachment: Attachment) -> str:
@@ -182,10 +188,18 @@ def attachment_text(attachment: Attachment) -> str:
 
 def check_code(attachment: Attachment) -> str:
     """The code that encloses a PDF's text in Claude's check prompt: another one than
-    :func:`file_code`, so that Claude never sees the code of ChatGPT's view of the PDF
-    (:func:`pdf_view`) and nothing it writes, whatever the PDF asks of it, can forge a
-    page or a note of that view."""
+    :func:`file_code` and :func:`view_code`, seeded apart."""
     seed = f"check\n{attachment.sha256}\n{attachment.name}".encode()
+    return hashlib.sha256(seed).hexdigest()[:FILE_CODE_LENGTH]
+
+
+def view_code(attachment: Attachment) -> str:
+    """The code of ChatGPT's view of a PDF (:func:`pdf_view`), seeded apart from
+    :func:`file_code`, which Claude sees whenever a call gets the PDF as its text (the
+    debate's revisions), and from :func:`check_code`: only ChatGPT ever sees it, so
+    nothing Claude writes, whatever the PDF asks of it, can carry a real page line or
+    note of the view. Deterministic, like the others, for the prompt caches."""
+    seed = f"view\n{attachment.sha256}\n{attachment.name}".encode()
     return hashlib.sha256(seed).hexdigest()[:FILE_CODE_LENGTH]
 
 
@@ -245,24 +259,24 @@ def _page_view(
 
 def pdf_view(attachment: Attachment) -> str:
     """What ChatGPT with the subscription reads of a PDF (Codex cannot open one), enclosed
-    as a file's text (:func:`enclosed`): page by page, the text the server extracted, and
-    where Claude's check (``attachment.pdf_check``) found it missing, unreadable,
-    incomplete or with text that is not visible, Claude's reading instead, marked. Every
-    page line carries the file's code, so neither the PDF nor Claude (who never sees that
-    code) can forge one. Pages that were not checked say so. A PDF that was not analysed
-    (no ``pdf_pages``) is its extracted text, unchecked."""
+    as a file's text: page by page, the text the server extracted, and where Claude's
+    check (``attachment.pdf_check``) found it missing, unreadable, incomplete or with text
+    that is not visible, Claude's reading instead, marked. Its opening, its page lines
+    and its end carry the view's own code (:func:`view_code`), which only ChatGPT sees,
+    so neither the PDF nor Claude can forge one. Pages that were not checked say so. A
+    PDF that was not analysed (no ``pdf_pages``) is its extracted text, unchecked."""
     name = neutralize_tags(attachment.name)
     pages = attachment.pdf_pages
+    code = view_code(attachment)
     if pages is None:
         if not has_text(attachment):
             return f"[PDF «{name}»: no se n'ha pogut extreure el text]\n"
         count = f", {pages_label(attachment.pages)}" if attachment.pages else ""
-        return enclosed(
+        return _enclose(
             f"PDF «{name}»{count}: text extret pel servidor, sense contrastar",
             attachment.text or "",
-            attachment,
+            code,
         )
-    code = file_code(attachment)
     check = attachment.pdf_check
     covered = check.covered if check is not None else 0
     if covered <= 0:
@@ -279,7 +293,7 @@ def pdf_view(attachment: Attachment) -> str:
         finding = check.finding(page.number) if check is not None else None
         blocks.append(_page_view(attachment, page, finding, page.number <= covered, code))
     header = f"PDF «{name}», {pages_label(len(pages))}: {state}"
-    return enclosed(header, "\n\n".join(blocks), attachment)
+    return _enclose(header, "\n\n".join(blocks), code)
 
 
 async def read_files(attachments: Sequence[Attachment]) -> list[bytes | None]:

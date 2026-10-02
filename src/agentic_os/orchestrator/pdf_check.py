@@ -15,6 +15,10 @@ page after it, up to :data:`MAX_CHECK_CALLS` calls. A check that covered every p
 many as its calls could, is stored by the PDF's content and reused by every later turn and
 conversation; one that failed, was refused, stopped making progress, took too long or was
 cancelled is not, so the next turn tries again.
+
+The demo Claude (mode "fake") never checks: its canned reply says every page is right
+without reading any, so it would pass a scan as empty and hidden text as visible. With it,
+as without Claude, ChatGPT reads the PDF unchecked, and nothing is stored or reused.
 """
 
 from __future__ import annotations
@@ -60,8 +64,8 @@ CHECK_CONCURRENCY: Final = 2
 CHECK_BASE_TOKENS: Final = 2_000
 """Output budget of every check call, before its pages."""
 CHECK_TEXT_PAGE_TOKENS: Final = 1_200
-"""Output budget per page of the call without text or with garbled text, which Claude
-transcribes whole."""
+"""Output budget per page of the call without text, with garbled text or that may hide
+text, which Claude transcribes whole (of the last, all the text it shows)."""
 CHECK_PAGE_TOKENS: Final = 100
 """Output budget per other page of the call: most pages need no line, the rest a short
 one."""
@@ -69,6 +73,8 @@ CHECK_MAX_TOKENS: Final = 32_000
 """The largest output budget of a check call."""
 
 NO_CLAUDE: Final = "Claude no està disponible per contrastar-lo."
+DEMO_CLAUDE: Final = "Claude està en mode de demostració i no el pot contrastar."
+"""Why a PDF stays unchecked with the demo Claude (``AOS_CLAUDE_MODE=fake``)."""
 CHECK_FAILED: Final = "La comprovació de Claude ha fallat: {message}"
 CHECK_REFUSED: Final = "Claude no l'ha volgut contrastar."
 CHECK_TIMED_OUT: Final = "La comprovació de Claude ha trigat massa."
@@ -142,9 +148,11 @@ class CheckOutcome:
     """Why pages remain unchecked (Catalan, for the owner); None when all were checked."""
     final: bool = True
     """Another turn would read the PDF the same way: the check was reused or stored, or
-    there is nothing to check it with (no Claude, a PDF that was not analysed). False
-    when the next turn checks it again (an error, a refusal, a reply that made no
-    progress, a timeout): the engine then keeps the turn out of the turn cache."""
+    the PDF was not analysed (a copy of it that was is another key of the turn cache).
+    False when another turn may read it otherwise: the next turn checks it again (an
+    error, a refusal, a reply that made no progress, a timeout), or a Claude configured
+    later would (there is none, or only the demo's). The engine then keeps the turn out
+    of the turn cache."""
 
 
 CheckRecord = Callable[[str, Usage, int, int | None, ProviderError | None], Awaitable[Usage]]
@@ -167,11 +175,12 @@ def unchecked_pages(attachment: Attachment, check: PdfCheck | None) -> tuple[int
 
 def check_budget(attachment: Attachment, first: int) -> int:
     """The output budget of a check call from page ``first`` to the last one: more for
-    the pages Claude will likely transcribe whole (without text, or garbled), capped at
+    the pages Claude will likely transcribe whole (without text, garbled, or that may
+    hide text: a "hidden" page comes with all the text it shows), capped at
     :data:`CHECK_MAX_TOKENS`."""
     pages = attachment.pdf_pages or ()
     budget = CHECK_BASE_TOKENS + sum(
-        CHECK_TEXT_PAGE_TOKENS if page.no_text or page.garbled else CHECK_PAGE_TOKENS
+        CHECK_TEXT_PAGE_TOKENS if page.no_text or page.garbled or page.hidden else CHECK_PAGE_TOKENS
         for page in pages[first - 1 :]
     )
     return min(budget, CHECK_MAX_TOKENS)
@@ -220,7 +229,7 @@ def check_prompt(attachment: Attachment, first: int, last: int) -> str:
     (the document itself goes before it). The fixed instructions come first and the
     variable parts last: the PDF's name and pages, the server's hints for these pages,
     and their extracted text, enclosed with :func:`~prompt_format.check_code` (never the
-    code of ChatGPT's view, ``file_code``) and neutralized, so that the PDF can neither
+    code of ChatGPT's view, ``view_code``) and neutralized, so that the PDF can neither
     end its text nor open a section. A later call says it continues from ``first``."""
     pages = attachment.pdf_pages or ()
     code = check_code(attachment)
@@ -328,11 +337,17 @@ async def check_pdf(
     when the calls run out. Every call is recorded (``record``), a failed or refused one
     with what it billed. The check is stored only when complete or when its calls ran
     out: after anything else the next turn tries again. Cancelling it cancels its call
-    (``CancelledError`` always propagates) and stores nothing."""
+    (``CancelledError`` always propagates) and stores nothing.
+
+    Without a Claude, or with the demo's (mode "fake": its canned reply would pass every
+    page as right), the PDF stays unchecked: nothing is called, stored or reused, and the
+    outcome is not final, so a Claude configured later checks it."""
     if attachment.pdf_pages is None:
         return CheckOutcome(None, False, Usage(), NOT_ANALYSED)
     if provider is None:
-        return CheckOutcome(None, False, Usage(), NO_CLAUDE)
+        return CheckOutcome(None, False, Usage(), NO_CLAUDE, final=False)
+    if provider.mode == "fake":
+        return CheckOutcome(None, False, Usage(), DEMO_CLAUDE, final=False)
     pages = len(attachment.pdf_pages)
     stored = await _stored(store, attachment.sha256, pages)
     if stored is not None:

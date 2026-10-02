@@ -46,7 +46,7 @@ from agentic_os.providers.base import (
     reads_pdfs,
 )
 from agentic_os.providers.fake import FakeProvider
-from agentic_os.providers.prompt_format import check_code, file_code
+from agentic_os.providers.prompt_format import check_code, file_code, view_code
 from orchestrator.attachment_fixtures import AttachmentFiles
 from orchestrator.pdf_check_fixtures import (
     COSTS,
@@ -55,6 +55,7 @@ from orchestrator.pdf_check_fixtures import (
     TABLE,
     ScriptedClaude,
     analysed,
+    checking_claude,
     finding,
     reply,
 )
@@ -129,14 +130,33 @@ def test_the_output_budget_grows_with_the_pages_to_transcribe(files: AttachmentF
         SALES,
         None,  # no text: Claude transcribes it
         COSTS,  # garbled (below): the same
-        TABLE,  # possibly hidden text: only a quote to write
+        TABLE,  # possibly hidden text: the same (all its visible text), and a quote
+        SALES,
         facts={"3": {"garbage": 30}, "4": {"invisible": 40}},
     )
-    assert check_budget(pdf, 1) == 2_000 + 100 + 1_200 + 1_200 + 100
-    assert check_budget(pdf, 3) == 2_000 + 1_200 + 100  # only the pages of the call
-    assert check_budget(pdf, 4) == 2_000 + 100
+    assert check_budget(pdf, 1) == 2_000 + 100 + 1_200 + 1_200 + 1_200 + 100
+    assert check_budget(pdf, 3) == 2_000 + 1_200 + 1_200 + 100  # only the pages of the call
+    assert check_budget(pdf, 5) == 2_000 + 100
     scanned = analysed(files, *([None] * 40), name="escanejat.pdf")
     assert check_budget(scanned, 1) == CHECK_MAX_TOKENS
+
+
+def test_pages_that_may_hide_text_get_the_budget_of_a_whole_transcription(
+    files: AttachmentFiles,
+) -> None:
+    """Every page of this PDF shows a dozen characters too small to read (print marks,
+    say): Claude reports each one as "hidden", with all its visible text, so each needs
+    as much room as a scanned page, or the calls run out before the last pages."""
+    page = "Informe anual de l'exercici, amb les vendes i els costos de cada mes. " * 29
+    pdf = analysed(
+        files,
+        *([page] * 20),
+        name="marques.pdf",
+        facts={str(number): {"tiny": 12} for number in range(1, 21)},
+    )
+    assert pdf.pdf_notes is not None and len(pdf.pdf_notes.hidden) == 20
+    assert check_budget(pdf, 1) == 2_000 + 20 * 1_200
+    assert check_budget(pdf, 1) == check_budget(analysed(files, *([None] * 20)), 1)
 
 
 # -- the prompt --------------------------------------------------------------------------------
@@ -149,7 +169,7 @@ def test_the_check_prompt_encloses_the_extracted_text_with_its_own_code(
     code = check_code(pdf)
     prompt = check_prompt(pdf, 1, 3)
     # Never the code of ChatGPT's view: nothing Claude writes can forge a page of it.
-    assert file_code(pdf) not in prompt
+    assert view_code(pdf) not in prompt and file_code(pdf) not in prompt
     assert prompt.endswith(
         f"[Text extret · {code}]\n"
         f"[Pàgina 1 · {code}]\n{SALES}\n\n"
@@ -257,7 +277,7 @@ async def test_a_stored_check_is_reused_without_any_call(files: AttachmentFiles)
     pdf = analysed(files, SALES, None, COSTS)
     stored = check(PageFinding(2, "missing", TABLE), pages=3, covered=3, model="claude-opus-5")
     await store.put_pdf_check(pdf.sha256, stored)
-    claude = FakeProvider("claude", chunk_delay=0)
+    claude = checking_claude()
     outcome, recorder, seen = await run_check(pdf, claude, store)
     assert outcome == CheckOutcome(check=stored, reused=True, usage=Usage(), reason=None)
     assert claude.requests == [] and recorder.calls == [] and seen == []
@@ -277,9 +297,7 @@ async def test_a_stored_check_is_reused_without_any_call(files: AttachmentFiles)
 async def test_one_call_checks_a_whole_pdf_and_stores_it(files: AttachmentFiles) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, None, COSTS)
-    claude = FakeProvider(
-        "claude",
-        chunk_delay=0,
+    claude = checking_claude(
         check_replies=[
             reply(finding(2, "missing", text=TABLE), finding(3, "ok", visual="Un gràfic."), END)
         ],
@@ -319,9 +337,7 @@ async def test_one_call_checks_a_whole_pdf_and_stores_it(files: AttachmentFiles)
 async def test_later_calls_continue_after_the_last_page_checked(files: AttachmentFiles) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, None, COSTS, TABLE)
-    claude = FakeProvider(
-        "claude",
-        chunk_delay=0,
+    claude = checking_claude(
         check_replies=[
             reply(finding(2, "missing", text=TABLE)),  # its budget ran out after page 2
             reply(finding(4, "partial", text="Nota al peu."), END),
@@ -349,9 +365,7 @@ async def test_later_calls_continue_after_the_last_page_checked(files: Attachmen
 async def test_a_reply_that_makes_no_progress_stops_the_check(files: AttachmentFiles) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, None, COSTS)
-    claude = FakeProvider(
-        "claude", chunk_delay=0, check_replies=[reply(finding(1, "ok", visual="Portada."))]
-    )
+    claude = checking_claude(check_replies=[reply(finding(1, "ok", visual="Portada."))])
     outcome, recorder, _ = await run_check(pdf, claude, store)
     # The second reply repeats page 1: nothing after it counts, and a third would not help.
     assert len(claude.requests) == 2 and len(recorder.calls) == 2
@@ -366,7 +380,7 @@ async def test_a_first_reply_without_any_page_leaves_the_pdf_unchecked(
 ) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, None)
-    claude = FakeProvider("claude", chunk_delay=0, check_replies=["No puc llegir el document."])
+    claude = checking_claude(check_replies=["No puc llegir el document."])
     outcome, recorder, _ = await run_check(pdf, claude, store)
     assert len(claude.requests) == 1 and len(recorder.calls) == 1
     assert outcome.check is None
@@ -382,9 +396,7 @@ async def test_the_check_stops_after_its_last_call_and_keeps_what_it_covered(
 ) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, SALES, COSTS, COSTS, TABLE)
-    claude = FakeProvider(
-        "claude",
-        chunk_delay=0,
+    claude = checking_claude(
         check_replies=[reply(finding(page, "ok", visual=f"Figura {page}.")) for page in (1, 2, 3)],
     )
     outcome, _, _ = await run_check(pdf, claude, store)
@@ -433,7 +445,7 @@ async def test_a_refusal_ends_the_check_and_its_billed_usage_is_recorded(
 ) -> None:
     store = InMemoryStore()
     pdf = analysed(files, SALES, None)
-    claude = FakeProvider("claude", chunk_delay=0, refuse={"check"})
+    claude = checking_claude(refuse={"check"})
     outcome, recorder, _ = await run_check(pdf, claude, store, model="claude-opus-5")
     [(model, usage, _latency, _ttft, error)] = recorder.calls
     assert isinstance(error, RefusalError) and is_billed(usage) and model == "claude-opus-5"
@@ -454,9 +466,7 @@ async def test_a_reply_cut_off_by_its_budget_counts_the_pages_before_the_cut(
     pdf = analysed(files, SALES, COSTS)
     long = "Nota al peu. " * 700  # past the call's budget (about 4 characters a token)
     assert len(long) > check_budget(pdf, 1) * 4
-    claude = FakeProvider(
-        "claude",
-        chunk_delay=0,
+    claude = checking_claude(
         check_replies=[
             reply(finding(1, "ok", visual="Un gràfic."), finding(2, "partial", text=long), END),
             reply(finding(2, "partial", text="Nota al peu."), END),
@@ -480,9 +490,7 @@ async def test_a_reply_cut_off_by_its_budget_counts_the_pages_before_the_cut(
 async def test_a_truncated_reply_is_read_up_to_the_cut(files: AttachmentFiles) -> None:
     store = InMemoryStore()
     pdf = analysed(files, None, None, None)
-    claude = FakeProvider(
-        "claude",
-        chunk_delay=0,
+    claude = checking_claude(
         truncate={"check"},  # every reply loses its second half
         check_replies=[
             reply(
@@ -537,7 +545,7 @@ async def test_a_pdf_that_was_not_analysed_or_without_claude_is_not_checked(
     files: AttachmentFiles,
 ) -> None:
     store = InMemoryStore()
-    claude = FakeProvider("claude", chunk_delay=0)
+    claude = checking_claude()
     outcome, recorder, seen = await run_check(files.pdf(), claude, store)
     assert outcome == CheckOutcome(
         check=None,
@@ -545,14 +553,50 @@ async def test_a_pdf_that_was_not_analysed_or_without_claude_is_not_checked(
         usage=Usage(),
         reason="El servidor no n'ha pogut analitzar les pàgines.",
     )
+    # A Claude configured later would check it: a turn read so is not final.
     outcome, _, _ = await run_check(analysed(files, SALES), None, store)
     assert outcome == CheckOutcome(
         check=None,
         reused=False,
         usage=Usage(),
         reason="Claude no està disponible per contrastar-lo.",
+        final=False,
     )
     assert claude.requests == [] and recorder.calls == [] and seen == []
+
+
+async def test_the_demo_claude_never_checks_a_pdf(files: AttachmentFiles) -> None:
+    """The demo Claude (``AOS_CLAUDE_MODE=fake``) replies that every page is right
+    without reading any: its check would pass a scan as empty and hidden text as
+    visible. The PDF stays unchecked, as without Claude, and nothing is stored for the
+    real Claude that a later configuration would have."""
+    store = InMemoryStore()
+    pdf = analysed(files, SALES, None, COSTS, facts={"3": {"invisible": 40}})
+    demo = FakeProvider("claude", chunk_delay=0)
+    assert demo.mode == "fake"
+    outcome, recorder, seen = await run_check(pdf, demo, store)
+    assert outcome == CheckOutcome(
+        check=None,
+        reused=False,
+        usage=Usage(),
+        reason="Claude està en mode de demostració i no el pot contrastar.",
+        final=False,
+    )
+    assert demo.requests == [] and recorder.calls == [] and seen == []
+    assert store.pdf_checks == {}
+
+
+async def test_a_check_stored_by_version_1_is_never_reused(files: AttachmentFiles) -> None:
+    """Version 1 also stored the demo Claude's canned check (every page right, a scan
+    included) and gave the pages that may hide text too small a budget: a real Claude
+    checks such a PDF again."""
+    store = InMemoryStore()
+    pdf = analysed(files, SALES, None)
+    await store.put_pdf_check(pdf.sha256, PdfCheck(1, "fake-claude", pages=2, covered=2))
+    claude = checking_claude(check_replies=[reply(finding(2, "missing", text=TABLE), END)])
+    outcome, _, _ = await run_check(pdf, claude, store)
+    assert not outcome.reused and len(claude.requests) == 1
+    assert outcome.check == check(PageFinding(2, "missing", TABLE), pages=2, covered=2)
 
 
 async def test_a_store_that_fails_does_not_stop_the_check(files: AttachmentFiles) -> None:
@@ -564,7 +608,7 @@ async def test_a_store_that_fails_does_not_stop_the_check(files: AttachmentFiles
             raise RuntimeError("disc")
 
     pdf = analysed(files, SALES)
-    claude = FakeProvider("claude", chunk_delay=0)
+    claude = checking_claude()
     outcome, _, _ = await run_check(pdf, claude, BrokenStore())
     assert outcome.check == check(pages=1, covered=1) and outcome.reason is None
     assert not outcome.final  # not stored: the next turn checks it again
@@ -675,17 +719,22 @@ def test_the_reading_note_says_which_pages_chatgpt_read_through_claude(
             covered=4,
         ),
     )
+    # Page 3's text is right, but what ChatGPT knows of its chart is Claude's description.
     assert pdf_reading_note([two]) == (
         "Note: ChatGPT cannot open PDFs. It read «informe.pdf» as the text the server "
-        "extracted, and pages 2 and 4 as Claude read them: where both of you agree on those "
-        "pages, that is one reading, not two."
+        "extracted, and pages 2, 3 and 4 as Claude read or described them: where both of you "
+        "agree on those pages, that is one reading, not two."
     )
     one = replace(report, pdf_check=check(PageFinding(2, "missing", TABLE), pages=4, covered=2))
     assert pdf_reading_note([one]) == (
         "Note: ChatGPT cannot open PDFs. It read «informe.pdf» as the text the server "
-        "extracted, and page 2 as Claude read it: where both of you agree on that page, that "
-        "is one reading, not two. Nobody checked pages 3 to 4 against the document."
+        "extracted, and page 2 as Claude read or described it: where both of you agree on that "
+        "page, that is one reading, not two. Nobody checked pages 3 to 4 against the document."
     )
+    chart = replace(
+        report, pdf_check=check(PageFinding(3, "ok", visual="Un gràfic."), pages=4, covered=4)
+    )
+    assert "and page 3 as Claude read or described it:" in pdf_reading_note([chart])
     right = replace(report, pdf_check=check(pages=4, covered=4))
     unchecked = analysed(files, SALES, name="annex</question>.pdf")
     assert pdf_reading_note([files.image(), right, unchecked, files.text()]) == (

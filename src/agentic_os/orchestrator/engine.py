@@ -261,9 +261,11 @@ class _Turn:
     pdf_reading: tuple[PdfReading, ...] | None = None
     """How ChatGPT reads each PDF of the question, once that check has ended."""
     recheck: bool = False
-    """A PDF's check ended in a way the next turn retries (an error, a refusal, a reply
-    that made no progress, a timeout): the turn is never cached, so asking the same
-    question checks it again instead of replaying an unchecked reading."""
+    """A PDF's check ended in a way another turn may not repeat (``CheckOutcome.final``):
+    the next turn retries it (an error, a refusal, a reply that made no progress, a
+    timeout), or nobody could check it (no Claude, or only the demo's) and a Claude
+    configured later would. The turn is never cached, so asking the same question checks
+    it again instead of replaying an unchecked reading."""
 
     @property
     def request_id(self) -> str:
@@ -866,7 +868,7 @@ class Engine:
         await self._record_savings(turn)
         # Only whole, complete turns are replayed: never one with a failed, degraded or
         # cut-off message, nor one whose key does not say which models answered, nor one
-        # where ChatGPT read a PDF whose check the next turn would try again.
+        # where ChatGPT read a PDF that another turn may check (see _Turn.recheck).
         complete = (
             not turn.degraded and not turn.failed_agents and not turn.truncated and not turn.recheck
         )

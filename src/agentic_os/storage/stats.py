@@ -337,8 +337,14 @@ async def compute_stats(
         """,
         (start, end),
     )
+    # An agent's response time is that of the calls that write a message: a history
+    # summary (short) and Claude's check of a PDF for ChatGPT (a long transcription) would
+    # skew it, so they count only in the tokens and costs.
     latency_rows = await tx.fetchall(
-        "SELECT agent, latency_ms, ttft_ms FROM usage WHERE ts >= ? AND ts < ? AND ok = 1",
+        """
+        SELECT agent, latency_ms, ttft_ms FROM usage
+        WHERE ts >= ? AND ts < ? AND ok = 1 AND purpose IN ('answer', 'revision', 'synthesis')
+        """,
         (start, end),
     )
     saving_rows = await tx.fetchall(

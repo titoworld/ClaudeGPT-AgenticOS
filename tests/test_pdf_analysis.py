@@ -9,6 +9,7 @@ unanalysed)."""
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
 from collections.abc import Sequence
@@ -19,7 +20,14 @@ import pytest
 from attachment_files import Form, Page, drawn_pdf, literal, pdf, shown
 
 from agentic_os import attachments
-from agentic_os.attachments import PdfInfo, PdfReader, StoredText, cut_notice, text_counts
+from agentic_os.attachments import (
+    PdfInfo,
+    PdfReader,
+    StoredText,
+    cut_notice,
+    smallest_scale,
+    text_counts,
+)
 from agentic_os.pdf_facts import PdfPage, pdf_notes
 
 VISIBLE = "Informe de vendes del segon trimestre"
@@ -276,6 +284,107 @@ async def test_text_outside_the_visible_box(tmp_path: Path) -> None:
     for page, offpage in zip(analysed(info), expected, strict=True):
         assert signs(page) == (False, 0, 0, offpage), page.number
         assert page.hidden
+
+
+def test_the_size_that_counts_is_the_shortest_axis_of_the_glyphs() -> None:
+    """The smallest scale of a matrix in any direction: rotating or mirroring the text
+    changes nothing, flattening it in one direction makes it as small as that."""
+    assert smallest_scale(12, 0, 0, 12) == pytest.approx(12)
+    assert smallest_scale(12 * 0.005, 0, 0, 12) == pytest.approx(0.06)  # 0.5 % wide
+    assert smallest_scale(12, 0, 0, 0.12) == pytest.approx(0.12)  # flattened
+    cos, sin = math.cos(0.7), math.sin(0.7)
+    assert smallest_scale(10 * cos, 10 * sin, -10 * sin, 10 * cos) == pytest.approx(10)
+    assert smallest_scale(-12, 0, 0, 12) == pytest.approx(12)  # mirrored
+    assert smallest_scale(1, 0, 0.2, 1) == pytest.approx(0.905, abs=0.001)  # slanted
+    assert smallest_scale(0, 0, 0, 0) == 0
+
+
+def hidden_with(operators: bytes, then: bytes = b"") -> bytes:
+    """``HIDDEN`` shown at (50, 700) after these text state ``operators``, inside ``q`` and
+    ``Q`` (which restore the state), then ``then`` and ``VISIBLE`` as usual."""
+    return (
+        b"q BT /F1 12 Tf %s 50 700 Td %s Tj ET Q\n" % (operators, literal(HIDDEN))
+        + then
+        + shown(VISIBLE, y=600)
+    )
+
+
+async def test_text_squeezed_flattened_or_raised_out_of_sight(tmp_path: Path) -> None:
+    """Horizontal scaling (``Tz``) and a matrix that flattens the text in one direction
+    make glyphs as unreadable as a tiny font, and a text rise (``Ts``) moves them as far as
+    a position does: pypdf follows neither the scaling nor the rise, the analysis does.
+    The size that counts is the smallest in any direction."""
+    info = await read(
+        tmp_path,
+        [
+            Page(hidden_with(b"0 Tz")),  # no width at all
+            Page(hidden_with(b"0.5 Tz")),  # a few tenths of a point wide
+            Page(  # 12 points wide, a tenth of a point tall
+                b"q BT /F1 12 Tf 1 0 0 0.01 50 700 Tm %s Tj ET Q\n" % literal(HIDDEN)
+                + shown(VISIBLE, y=600)
+            ),
+            Page(hidden_with(b"5000 Ts")),  # far above the page
+            Page(hidden_with(b"-2000 Ts")),  # far below it
+        ],
+    )
+    pages = analysed(info)
+    for page in pages[:3]:
+        assert signs(page) == (False, 0, len(HIDDEN), 0), page.number
+    for page in pages[3:]:
+        assert signs(page) == (False, 0, 0, len(HIDDEN)), page.number
+    for page in pages:
+        assert page.hidden
+        text = page_text(info, page)
+        assert text is not None and HIDDEN in text  # what a model reading the text gets
+
+
+async def test_readable_scaling_and_rise_are_no_warning(tmp_path: Path) -> None:
+    """Condensed or mirrored text, a superscript and a scale that keeps the glyphs above
+    a point in every direction are readable."""
+    info = await read(
+        tmp_path,
+        [
+            Page(hidden_with(b"50 Tz")),
+            Page(hidden_with(b"-100 Tz")),
+            Page(hidden_with(b"4 Ts")),
+            Page(
+                b"q BT /F1 12 Tf 2 0 0 0.5 50 700 Tm %s Tj ET Q\n" % literal(HIDDEN)
+                + shown(VISIBLE, y=600)
+            ),
+        ],
+    )
+    for page in analysed(info):
+        assert signs(page) == (False, 0, 0, 0), page.number
+
+
+async def test_the_scaling_and_the_rise_are_saved_and_restored_like_the_mode(
+    tmp_path: Path,
+) -> None:
+    """``Q`` restores them (``hidden_with`` above), a form inherits them from the page and
+    keeps its own to itself, like the render mode and the size."""
+    info = await read(
+        tmp_path,
+        [
+            # The page's text after a form that squeezes or raises its own.
+            Page(b"/Fm1 Do\n" + shown(VISIBLE, y=600), form=Form(b"0 Tz " + shown(FORM))),
+            Page(b"/Fm1 Do\n" + shown(VISIBLE, y=600), form=Form(b"5000 Ts " + shown(FORM))),
+            # A form drawn with the page's scaling or rise.
+            Page(b"q 0 Tz /Fm1 Do Q\n" + shown(VISIBLE, y=600), form=Form(shown(FORM))),
+            Page(b"q 5000 Ts /Fm1 Do Q\n" + shown(VISIBLE, y=600), form=Form(shown(FORM))),
+            # Text after an unbalanced form that tries to restore the page's scaling.
+            Page(
+                b"q 0 Tz q 100 Tz /Fm1 Do Q %s Q\n" % b"BT /F1 12 Tf 50 650 Td (x) Tj ET"
+                + shown(VISIBLE, y=600),
+                form=Form(b"Q Q " + shown(FORM, y=500)),
+            ),
+        ],
+    )
+    first, second, third, fourth, fifth = analysed(info)
+    assert signs(first) == (False, 0, len(FORM), 0)
+    assert signs(second) == (False, 0, 0, len(FORM))
+    assert signs(third) == (False, 0, len(FORM), 0)
+    assert signs(fourth) == (False, 0, 0, len(FORM))
+    assert signs(fifth) == (False, 0, 1, 0)  # only the page's «x», squeezed by its own Tz
 
 
 async def test_text_at_the_edge_or_drawn_into_the_page_is_on_it(tmp_path: Path) -> None:
