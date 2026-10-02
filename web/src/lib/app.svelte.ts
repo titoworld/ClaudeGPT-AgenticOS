@@ -67,6 +67,8 @@ const ATTACHMENTS_FAILED =
 
 const ATTACHMENTS_UPLOADING = 'Encara es pugen adjunts. Espera que acabin i torna-ho a provar.';
 
+const STOP_UNSENT = "Sense connexió: no s'ha pogut demanar que s'aturi en acabar la ronda.";
+
 /**
  * Requests the app makes by itself (refreshes after `hello`, after turn events, retries):
  * the server does not count them as owner activity, so an unused tab does not keep the
@@ -682,6 +684,8 @@ class App {
     const requestId = uuid();
     const options: TurnOptions = {
       debate: { rounds: c.rounds, consensus_threshold: c.threshold, synthesizer: c.synthesizer },
+      // Only a refine turn uses them: the server would validate them for any turn.
+      ...(c.mode === 'refine' ? { refine: c.refineOptions() } : {}),
       use_cache: c.useCache,
     };
     const conversationId = this.convs.currentId;
@@ -731,6 +735,21 @@ class App {
     }
   }
 
+  /**
+   * «Atura en acabar la ronda»: the running refine turn ends after the round in course
+   * (turn.stop), with its last version; it says so until turn.stopping names that round.
+   * Only a refine turn has rounds to finish (any turn stops at once with `cancel`).
+   */
+  stopAfterRound(): void {
+    const turn = this.runningTurn;
+    if (!turn?.requestId || turn.mode !== 'refine' || turn.stopRequested || turn.stoppingRound != null) return;
+    if (!this.conn.send({ type: 'turn.stop', request_id: turn.requestId })) {
+      toasts.push(STOP_UNSENT, 'error');
+      return;
+    }
+    turn.stopRequested = true;
+  }
+
   // ------------------------------------------------------------ server messages
 
   #onMessage(msg: ServerMessage): void {
@@ -757,6 +776,10 @@ class App {
           turn.status = 'failed';
           turn.error = { kind: msg.code ?? 'server', message: text };
           if (turn.turnId == null) this.composer.restore(turn.question, turn.attachments);
+        } else if (turn?.stopRequested) {
+          // A refused turn.stop: the turn goes on as it was.
+          turn.stopRequested = false;
+          toasts.push(text, 'error');
         } else if (msg.code === 'too_large' && !msg.request_id && this.#askAboutUnread()) {
           // The server's answers say which turn it was (#onUnknown), and that turn says why.
         } else {
@@ -814,7 +837,10 @@ class App {
       }
       case 'turn.completed':
         this.#turnEnded();
-        if (ev.consensus?.reached) sceneHost.flash('consensus');
+        // A refine turn whose reviewers found nothing left to improve is a consensus too.
+        if (ev.consensus?.reached || ev.stop_reason === 'converged' || ev.stop_reason === 'unchanged') {
+          sceneHost.flash('consensus');
+        }
         break;
       case 'turn.failed':
         this.#turnEnded();
@@ -851,7 +877,10 @@ class App {
 
   #resubscribe(active: { request_id: string; conversation_id: number | null; last_seq: number }[]): void {
     for (const t of this.turns.unfinished()) {
-      if (t.requestId) this.conn.send({ type: 'turn.subscribe', request_id: t.requestId, after_seq: t.lastSeq });
+      if (!t.requestId) continue;
+      this.conn.send({ type: 'turn.subscribe', request_id: t.requestId, after_seq: t.lastSeq });
+      // A turn.stop the connection may have lost: the server announces it once whatever it gets.
+      if (t.stopRequested) this.conn.send({ type: 'turn.stop', request_id: t.requestId });
     }
     // Turns running on the server that this tab does not know (e.g. after a reload): replay them.
     for (const a of active) {

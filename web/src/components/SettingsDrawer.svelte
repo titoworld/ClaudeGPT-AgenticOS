@@ -6,8 +6,8 @@
   import { lightDismiss, syncDialog } from '../lib/dialog';
   import { AGENT_LABEL } from '../lib/format';
   import { EFFECTS_LABEL, prefs } from '../lib/prefs.svelte';
-  import { AGENTS, type Agent, type RuntimeSettings, type TurnMode } from '../lib/protocol';
-  import { cleanSettings, LIMITS, normalizeSettings, validateSettings } from '../lib/settings';
+  import { AGENTS, type Agent, type DefaultMode, type RuntimeSettings } from '../lib/protocol';
+  import { cleanSettings, formatAmount, LIMITS, normalizeSettings, validateSettings } from '../lib/settings';
   import { MODE_LABEL, PROVIDER_MODE_LABEL } from '../lib/text';
   import type { SceneQuality } from '../scene/types';
   import AgentIcon from './AgentIcon.svelte';
@@ -18,7 +18,10 @@
   import PriceTable from './PriceTable.svelte';
 
   const uid = $props.id();
-  const MODES: TurnMode[] = ['solo', 'duel', 'debate'];
+  /** Never «Perfecciona» (refine): a turn that runs until the owner stops it is only started on purpose. */
+  const MODES: DefaultMode[] = ['solo', 'duel', 'debate'];
+  /** The word limit a refine turn gets when the owner turns the automatic one off. */
+  const DEFAULT_WORDS = 1000;
   const QUALITIES: SceneQuality[] = ['high', 'low', 'off'];
 
   let dialog: HTMLDialogElement | undefined = $state();
@@ -36,6 +39,9 @@
   let opening = 0;
   /** Model pickers with a custom id that is not valid yet. */
   let pickerInvalid: Record<string, boolean> = $state(noInvalidPickers());
+  /** The last word limit set, for when the owner turns the automatic one off again. */
+  let lastWords = $state(DEFAULT_WORDS);
+  const automaticWords = $derived(form.refine.max_words === null);
 
   const errors = $derived(validateSettings(form));
   const shownErrors = $derived(submitted ? errors : {});
@@ -96,9 +102,25 @@
     else formState = 'error';
   }
 
+  /** The automatic word limit (null), or a number (the last one set); an empty input is NaN, which validation reports. */
+  function setAutomaticWords(e: Event & { currentTarget: HTMLInputElement }): void {
+    const words = form.refine.max_words;
+    if (e.currentTarget.checked) {
+      if (words !== null && Number.isFinite(words)) lastWords = words;
+      form.refine.max_words = null;
+    } else {
+      form.refine.max_words = lastWords;
+    }
+  }
+
+  function setWords(e: Event & { currentTarget: HTMLInputElement }): void {
+    form.refine.max_words = e.currentTarget.valueAsNumber; // NaN when empty
+  }
+
   /** Shows `settings` (the stored ones) in the form, ready to edit. */
   function fill(settings: RuntimeSettings): void {
     form = copy(settings);
+    lastWords = settings.refine.max_words ?? DEFAULT_WORDS;
     submitted = false;
     pickerInvalid = noInvalidPickers();
     formState = 'ready';
@@ -255,6 +277,104 @@
                 text (un d'escanejat) hi va sempre sencer.
               </small>
             </fieldset>
+          </section>
+
+          <section>
+            <h3>Perfecciona</h3>
+            <p class="hint">
+              Les opcions d'un torn «Perfecciona», en què les dues IA milloren un sol document ronda rere ronda fins que
+              l'aturis. Al compositor es poden canviar per a cada torn. No pot ser el mode per defecte.
+            </p>
+            <label class="field">
+              <span>Rondes màximes ({LIMITS.refine_rounds.min}–{LIMITS.refine_rounds.max})</span>
+              <input
+                class="input narrow"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.refine_rounds.min}
+                max={LIMITS.refine_rounds.max}
+                step="1"
+                bind:value={form.refine.max_rounds}
+                aria-invalid={!!shownErrors['refine.max_rounds']}
+                aria-describedby="{uid}-refine-rounds-hint {uid}-refine-rounds-err" />
+              <small class="hint" id="{uid}-refine-rounds-hint">La ronda 1 fusiona les respostes en la primera versió.</small>
+              <small class="error-text" id="{uid}-refine-rounds-err">{shownErrors['refine.max_rounds'] ?? ''}</small>
+            </label>
+            <label class="field refine-budget">
+              <span>Pressupost per torn (€)</span>
+              <!-- An emptied amount is null until it is one again: validation reports it. -->
+              <AmountInput
+                class="input"
+                bind:value={() => form.refine.budget_eur, (v) => (form.refine.budget_eur = v as number)}
+                aria-invalid={!!shownErrors['refine.budget_eur']}
+                aria-describedby="{uid}-refine-budget-hint {uid}-refine-budget-err" />
+              <small class="hint" id="{uid}-refine-budget-hint">
+                Entre {formatAmount(LIMITS.refine_budget_eur.min)} i {formatAmount(LIMITS.refine_budget_eur.max)} €. En mode
+                subscripció compta el valor a preus d'API, per no esgotar la quota.
+              </small>
+              <small class="error-text" id="{uid}-refine-budget-err">{shownErrors['refine.budget_eur'] ?? ''}</small>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" class="switch" checked={automaticWords} onchange={setAutomaticWords} />
+              <span>
+                <strong>Límit automàtic de paraules</strong>
+                <small class="hint">1,2 vegades les paraules de la versió 1 (300 com a mínim).</small>
+              </span>
+            </label>
+            <label class="field">
+              <span>Límit de paraules ({LIMITS.refine_words.min}–{LIMITS.refine_words.max.toLocaleString('ca-ES')})</span>
+              <input
+                class="input narrow"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.refine_words.min}
+                max={LIMITS.refine_words.max}
+                step="50"
+                disabled={automaticWords}
+                placeholder={automaticWords ? 'Automàtic' : ''}
+                value={automaticWords || Number.isNaN(form.refine.max_words) ? '' : form.refine.max_words}
+                oninput={setWords}
+                aria-invalid={!!shownErrors['refine.max_words']}
+                aria-describedby="{uid}-refine-words-err" />
+              <small class="error-text" id="{uid}-refine-words-err">{shownErrors['refine.max_words'] ?? ''}</small>
+            </label>
+            <fieldset class="field">
+              <legend class="field-label">Editor</legend>
+              <div class="segmented">
+                {#each AGENTS as agent (agent)}
+                  <label>
+                    <input type="radio" name="{uid}-editor" value={agent} bind:group={form.refine.editor} />
+                    <AgentIcon {agent} size={15} />{AGENT_LABEL[agent]}
+                  </label>
+                {/each}
+              </div>
+              <small class="hint">Fusiona les respostes i escriu cada versió.</small>
+            </fieldset>
+            <label class="toggle">
+              <input type="checkbox" class="switch" bind:checked={form.refine.stop_on_convergence} />
+              <span>
+                <strong>S'atura sol quan convergeix</strong>
+                <small class="hint">
+                  Quan tots dos li donen el llindar o més, sense proposar cap defecte, dues rondes seguides. Sense, només s'atura
+                  quan l'aturis, quan cap dels dos hi troba res a canviar o en arribar a un límit.
+                </small>
+              </span>
+            </label>
+            <label class="field">
+              <span>Llindar de convergència ({LIMITS.refine_threshold.min}–{LIMITS.refine_threshold.max})</span>
+              <input
+                class="input narrow"
+                type="number"
+                inputmode="numeric"
+                min={LIMITS.refine_threshold.min}
+                max={LIMITS.refine_threshold.max}
+                step="1"
+                disabled={!form.refine.stop_on_convergence}
+                bind:value={form.refine.convergence_threshold}
+                aria-invalid={!!shownErrors['refine.convergence_threshold']}
+                aria-describedby="{uid}-refine-threshold-err" />
+              <small class="error-text" id="{uid}-refine-threshold-err">{shownErrors['refine.convergence_threshold'] ?? ''}</small>
+            </label>
           </section>
 
           <section>
@@ -682,7 +802,9 @@
     gap: 0.6rem;
   }
 
-  .narrow {
+  .narrow,
+  /* The input lives in AmountInput, outside this component's scope. */
+  .refine-budget :global(.input) {
     max-width: 10rem;
   }
 

@@ -1,4 +1,4 @@
-"""Turn engine: runs solo, duel and debate turns and streams their events.
+"""Turn engine: runs solo, duel, debate and refine turns and streams their events.
 
 See docs/ARQUITECTURA.md (modes, token savings) and docs/PROTOCOL.md (event order).
 The turn itself runs in its own task and hands events to :meth:`Engine.run`
@@ -22,12 +22,24 @@ Claude answers, and every call of ChatGPT waits for that same check before it st
 (``pdf.check`` events). The check's calls are billed to the turn; ChatGPT's messages say
 how it read each PDF (``meta.pdf_reading``), and so do the revisions and the synthesis
 (``prompts.pdf_reading_note``). A replay from the turn cache checks nothing.
+
+A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) improves one document
+until the owner stops it (see :meth:`Engine._refine`): both agents answer (round 0), the
+editor merges the answers into version 1 (round 1), and from round 2 on both review the
+current version and the editor writes the next one, which the engine checks without any
+model (a complete version, within the word budget, not the same as before). It ends when
+the owner asks it to stop after the round in course (``turn.stop``), when neither finds
+anything left to change, when both score it above the threshold, at its rounds or its
+budget, or when both agents fail; its last version is then stored, without any call, as
+the turn's final message, which later turns see. Cancelling it stores that version too,
+before the outcome. It is never cached.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 import uuid
@@ -42,17 +54,23 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal, Protocol
 
 from agentic_os.attachments import snapshot
 from agentic_os.domain import (
     AGENTS,
+    REFINE_BUDGET_FACTOR,
+    REFINE_CONVERGENCE_ROUNDS,
+    REFINE_MIN_BUDGET_WORDS,
     AgentName,
     MessageKind,
     ProviderMode,
     Purpose,
+    RefineOptions,
+    RefineStopReason,
     Usage,
     other_agent,
+    words,
 )
 from agentic_os.orchestrator.accounting import (
     TurnAccounting,
@@ -73,7 +91,10 @@ from agentic_os.orchestrator.events import (
     PdfCheckChanged,
     PdfReading,
     PhaseChanged,
+    RefineChange,
+    RefineRound,
     Savings,
+    Section,
     ServerEvent,
     StreamCompleted,
     StreamDelta,
@@ -85,6 +106,7 @@ from agentic_os.orchestrator.events import (
     TurnOutcome,
     TurnStarted,
     TurnStatus,
+    TurnStopping,
 )
 from agentic_os.orchestrator.memory import (
     TurnContext,
@@ -104,11 +126,23 @@ from agentic_os.orchestrator.pdf_check import (
 )
 from agentic_os.orchestrator.prompts import (
     answer_prompt,
+    changelog_tail,
     debate_answer_prompt,
     pdf_reading_note,
+    refine_answer_prompt,
+    refine_edit_prompt,
+    refine_merge_prompt,
+    refine_review_prompt,
+    refine_shorten_prompt,
     revision_prompt,
     synthesis_prompt,
     system_prompt,
+)
+from agentic_os.orchestrator.refine import (
+    EditStream,
+    RefinePiece,
+    ReviewParse,
+    ReviewStream,
 )
 from agentic_os.orchestrator.sections import RevisionStreamParser
 from agentic_os.orchestrator.store import (
@@ -157,6 +191,23 @@ Emit = Callable[[ServerEvent], None]
 OnOutcome = Callable[[TurnOutcome], None]
 INTERNAL_ERROR = ErrorInfo("internal", "S'ha produït un error intern i el torn s'ha aturat.")
 
+REFINE_ROUNDS_RANGE: Final = (2, 50)
+REFINE_WORDS_RANGE: Final = (100, 20_000)
+REFINE_THRESHOLD_RANGE: Final = (50, 100)
+"""The ranges of a refine turn's options (``RefineOptions``), which the server checks too."""
+REFINE_OVER_BUDGET = "La nova versió passava del límit de paraules."
+REFINE_INCOMPLETE = "L'editor no ha escrit cap versió completa."
+REFINE_IDENTICAL = "La nova versió és igual a l'anterior."
+REFINE_NOTHING_TO_CHANGE = "Cap dels dos hi ha trobat res a canviar."
+REFINE_FAILED_ROUND = "Els models han fallat i la ronda no ha escrit cap versió."
+"""Why a round of a refine turn wrote no new version (``refine.round``'s ``reason``, and
+the ``reason`` of a version that was not accepted)."""
+REFINE_NO_CHANGES = "La revisió no té la llista de canvis que se li demanava."
+"""The error of a review whose reply has no changes section, or whose section neither
+lists a change in the format asked for nor says UNCHANGED: it failed."""
+REFINE_UNCHANGED = "UNCHANGED"
+"""What a review stores when its changes section is empty."""
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -195,6 +246,10 @@ class _Outcome:
     kept: bool = False
     """A revision whose content is the previous answer (UNCHANGED, or cut off before
     its answer): the previous answer's completeness still applies."""
+    message_id: int | None = None
+    """The message the call stored."""
+    model: str = ""
+    """The model that answered."""
 
 
 @dataclass(slots=True)
@@ -217,6 +272,207 @@ class _Answers:
 @dataclass(slots=True)
 class _Progress:
     emitted: bool = False
+
+
+class _SectionParser(Protocol):
+    """Splits a streaming reply into the sections to show (a debate revision, a refine
+    review or edit)."""
+
+    def feed(self, chunk: str) -> Sequence[tuple[Section, str]]: ...
+
+
+@dataclass(slots=True)
+class _Version:
+    """A version of a refine turn's document that became the current one."""
+
+    number: int
+    text: str
+    words: int
+    agent: AgentName
+    """The agent that wrote it, or whose answer it copies."""
+    round: int
+    message_id: int
+    model: str
+    truncated: bool = False
+    finish_reason: str | None = None
+    """A copy of an answer that was cut off keeps its mark."""
+
+
+@dataclass(slots=True)
+class _Refine:
+    """The state of a refine turn (see :meth:`Engine._refine`)."""
+
+    options: RefineOptions
+    active: tuple[AgentName, ...] = ()
+    """The agents that answered the brief: one whose answer failed takes no further part
+    in the turn."""
+    round: int = 0
+    """The round in course (the last one, once the turn ends)."""
+    current: _Version | None = None
+    budget_words: int = 0
+    """The word limit of every version: the owner's, or derived from version 1."""
+    changelog: list[tuple[int, RefineChange]] = field(default_factory=list)
+    """Every change the accepted versions applied, with their version, in order."""
+    edit_failed: set[AgentName] = field(default_factory=set)
+    """Agents whose merge or edit failed in this turn: the other one edits first."""
+    unchanged_rounds: int = 0
+    """Consecutive rounds where no review proposed any change."""
+    converging_rounds: int = 0
+    """Consecutive rounds where every agent scored the version at least the threshold
+    and nobody proposed a defect."""
+    announced: bool = False
+    """``turn.stopping`` was emitted."""
+    stop_reason: RefineStopReason | None = None
+    final_write: asyncio.Task[None] | None = None
+    """The write of the last version as the final message (shielded from cancellation)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Read:
+    """What a refine call made of its reply: the message to store and its
+    ``meta.refine``, or why the call failed (``error``, or no content)."""
+
+    content: str
+    refine: dict[str, JsonValue] = field(default_factory=dict)
+    error: str | None = None
+
+
+def _changes_json(changes: Sequence[RefineChange]) -> list[JsonValue]:
+    """``RefineChange.to_wire()`` of each change, as JSON for a message's meta."""
+    return [{"kind": change.kind, "text": change.text} for change in changes]
+
+
+def _budget_words(max_words: int | None, first_words: int) -> int:
+    """The word limit of a refine turn's versions: the owner's, else
+    ``REFINE_BUDGET_FACTOR`` times the words of version 1, at least
+    ``REFINE_MIN_BUDGET_WORDS``."""
+    if max_words is not None:
+        return max_words
+    # Rounded before the ceiling: 1.2 * 5 must give 6, never 6.000000000000001 -> 7.
+    budget = math.ceil(round(REFINE_BUDGET_FACTOR * first_words, 6))
+    return max(REFINE_MIN_BUDGET_WORDS, budget)
+
+
+class _ReviewReader:
+    """Streams and reads a review of a refine turn (orchestrator/refine.py): a reply
+    without its changes, in the format asked for or as UNCHANGED, fails the call; an
+    empty list stores UNCHANGED."""
+
+    def __init__(self) -> None:
+        self._stream = ReviewStream()
+        self.review: ReviewParse | None = None
+        """The review, once its call has a reply."""
+
+    def start(self) -> ReviewStream:
+        """The stream of a new attempt of the call."""
+        self._stream = ReviewStream()
+        return self._stream
+
+    def finish(self, truncated: bool) -> tuple[list[RefinePiece], _Read]:
+        """The rest of the reply to show, and what to store of it."""
+        pieces = self._stream.close()
+        review = self.review = self._stream.final()
+        if not review.ok:
+            return pieces, _Read("", error=REFINE_NO_CHANGES)
+        content = review.text
+        if not content:  # an empty list proposes nothing: shown as it is stored
+            content = REFINE_UNCHANGED
+            pieces.append(("critique", content))
+        meta: dict[str, JsonValue] = {
+            "role": "review",
+            "score": review.score,
+            "unchanged": review.unchanged,
+            "changes": _changes_json(review.changes),
+        }
+        return pieces, _Read(content, meta)
+
+
+class _VersionReader:
+    """Streams and reads a merge, an edit or its shortening, and decides whether the
+    version it writes is accepted, before its message is stored with the verdict. The
+    guards are the engine's, without any model (docs/adr/0010-mode-perfecciona.md): a
+    complete version section, then within the word budget and (an edit) not the same as
+    the current version (after stripping). The merge's budget is the owner's limit, or
+    the one its version 1 sets (which it always fits)."""
+
+    def __init__(
+        self,
+        *,
+        number: int,
+        current: _Version | None,
+        budget_words: int | None,
+        max_words: int | None,
+        keep_over: bool = False,
+    ) -> None:
+        """``current`` None: the merge, which writes version 1 (or its shortening);
+        otherwise an edit or a shortening of ``current`` within ``budget_words``.
+        ``keep_over``: a complete version over the budget is accepted all the same (the
+        shortening of version 1, which has no earlier version to keep)."""
+        self._number = number
+        self._current = current
+        self._budget = budget_words
+        self._max_words = max_words
+        self._keep_over = keep_over
+        self._stream = EditStream(merge=current is None)
+        self.text = ""
+        self.words = 0
+        self.budget_words = 0
+        self.changes: tuple[RefineChange, ...] = ()
+        self.reason: str | None = None
+        """Why the version was not accepted (a Catalan ``REFINE_*`` reason)."""
+        self.accepted = False
+
+    def start(self) -> EditStream:
+        """The stream of a new attempt of the call."""
+        self._stream = EditStream(merge=self._current is None)
+        return self._stream
+
+    def finish(self, truncated: bool) -> tuple[list[RefinePiece], _Read]:
+        """The rest of the reply to show, and what to store of it (a version that was
+        cut off is never complete)."""
+        pieces = self._stream.close(truncated=truncated)
+        edit = self._stream.final()
+        self.text, self.changes = edit.text, edit.changes
+        if not edit.text:
+            return pieces, _Read("")  # nothing written: the call fails as empty
+        self.words = words(edit.text)
+        self.budget_words = (
+            self._budget if self._budget is not None else _budget_words(self._max_words, self.words)
+        )
+        current = self._current
+        if not edit.complete:
+            self.reason = REFINE_INCOMPLETE
+        elif not self._keep_over and self.words > self.budget_words:
+            self.reason = REFINE_OVER_BUDGET
+        elif current is not None and edit.text == current.text:
+            self.reason = REFINE_IDENTICAL
+        self.accepted = self.reason is None
+        meta: dict[str, JsonValue] = {
+            "role": "version",
+            "version": self._number,
+            "words": self.words,
+            "budget_words": self.budget_words,
+            "accepted": self.accepted,
+            "reason": self.reason,
+            "changelog": _changes_json(edit.changes),
+        }
+        return pieces, _Read(edit.text, meta)
+
+
+_Reader = _ReviewReader | _VersionReader
+
+
+def _usage_since(start: Usage, now: Usage) -> Usage:
+    """What a turn's calls billed between two of its running totals."""
+    cost = None if now.cost_usd is None else now.cost_usd - (start.cost_usd or 0.0)
+    return Usage(
+        input_tokens=now.input_tokens - start.input_tokens,
+        output_tokens=now.output_tokens - start.output_tokens,
+        cache_read_tokens=now.cache_read_tokens - start.cache_read_tokens,
+        cache_write_tokens=now.cache_write_tokens - start.cache_write_tokens,
+        reasoning_tokens=now.reasoning_tokens - start.reasoning_tokens,
+        cost_usd=cost,
+    )
 
 
 @dataclass(slots=True)
@@ -253,6 +509,11 @@ class _Turn:
     stop: asyncio.Event | None = None
     """Set when the owner asks the turn to stop after the round in course (``turn.stop``):
     only refine turns read it; ``turn.cancel`` cancels the turn instead."""
+    refine: _Refine | None = None
+    """A refine turn's state (see :meth:`Engine._refine`)."""
+    closing: asyncio.Task[None] | None = None
+    """A cancelled refine turn's last writes, its last version as the final message and
+    then its outcome (shielded from cancellation, see :meth:`Engine._close_refine`)."""
     outcome_write: asyncio.Task[None] | None = None
     """The write of :attr:`outcome` on the question (shielded from cancellation)."""
     savings_write: asyncio.Task[None] | None = None
@@ -291,11 +552,14 @@ async def _end_turn(task: asyncio.Task[None], turn: _Turn) -> None:
     announces the cancellation then comes after the stored outcome, with what the turn
     spent, and no write of the turn outlives :meth:`Engine.run` (nor, at shutdown, the
     store). The wait is bounded by how long the providers take to stop a call and the
-    store takes to write."""
+    store takes to write. A cancelled refine turn first stores its last version (see
+    :attr:`_Turn.closing`), and that is waited for too."""
     if not task.done():
         task.cancel()
     interrupted: asyncio.CancelledError | None = None
-    while pending := [t for t in (task, turn.outcome_write) if t is not None and not t.done()]:
+    while pending := [
+        t for t in (task, turn.closing, turn.outcome_write) if t is not None and not t.done()
+    ]:
         try:
             await asyncio.wait(pending)
         except asyncio.CancelledError as exc:
@@ -556,8 +820,15 @@ class Engine:
             if current is not None and current.cancelling():
                 # Cancelled by the owner, a closed iterator or a shutdown: the turn's
                 # calls have stopped. How it ended is stored (shielded, see _settle)
-                # before the cancellation goes on.
-                await self._settle(turn, "cancelled")
+                # before the cancellation goes on; a refine turn stores its last
+                # version first, so nothing already paid for is lost.
+                if turn.refine is not None and turn.refine.current is not None:
+                    turn.closing = self._write(
+                        self._close_refine(turn), name=f"close-{turn.request_id}"
+                    )
+                    await asyncio.shield(turn.closing)
+                else:
+                    await self._settle(turn, "cancelled")
             else:
                 # Nobody cancelled the turn: a call raised the error by itself (a bug in
                 # a provider or a library). run() reports an internal failure, so the
@@ -603,7 +874,9 @@ class Engine:
             agent: identity for agent, identity in zip(agents, identities, strict=True) if identity
         }
         # A key without the model of every agent would match other models' turns: a turn
-        # that could not learn one neither reads nor writes the turn cache.
+        # that could not learn one neither reads nor writes the turn cache. A refine turn
+        # never does: it runs until the owner stops it, so the same question is never
+        # the same turn.
         cache_key = (
             turn_cache_key(
                 mode=request.mode,
@@ -615,7 +888,7 @@ class Engine:
                 attachments=turn.attachments,
                 pdf_in_revisions=request.pdf_in_revisions,
             )
-            if len(known) == len(agents)
+            if len(known) == len(agents) and request.mode != "refine"
             else None
         )
         cached: CachedTurn | None = None
@@ -680,15 +953,19 @@ class Engine:
             return
 
         consensus: Consensus | None = None
+        stop_reason: RefineStopReason | None = None
         if request.mode == "solo":
             ok = await self._solo(turn)
         elif request.mode == "duel":
             ok = await self._duel(turn)
+        elif request.mode == "refine":
+            stop_reason = await self._refine(turn)
+            ok = stop_reason is not None
         else:
             consensus = await self._debate(turn)
             ok = consensus is not None
         if ok:
-            await self._finish(turn, consensus, cache_key)
+            await self._finish(turn, consensus, cache_key, stop_reason)
 
     def _validate(self, request: TurnRequest) -> ErrorInfo | None:
         text = request.text
@@ -699,7 +976,7 @@ class Engine:
                 "invalid",
                 f"La pregunta és massa llarga (màxim {self._config.max_question_chars} caràcters).",
             )
-        if request.mode not in ("solo", "duel", "debate"):
+        if request.mode not in ("solo", "duel", "debate", "refine"):
             return ErrorInfo("invalid", "Mode de torn desconegut.")
         if request.mode == "solo" and request.target not in AGENTS:
             return ErrorInfo("invalid", "Agent desconegut.")
@@ -713,6 +990,8 @@ class Engine:
                 return ErrorInfo("invalid", "El llindar de consens ha de ser entre 0 i 100.")
             if debate.synthesizer not in AGENTS:
                 return ErrorInfo("invalid", "Agent sintetitzador desconegut.")
+        if request.mode == "refine" and (invalid := self._validate_refine(request)):
+            return invalid
         for model in (*request.models.values(), *request.fast_models.values()):
             if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
                 return ErrorInfo("invalid", "Identificador de model invàlid.")
@@ -729,6 +1008,32 @@ class Engine:
         for agent in self._agents(request):
             if agent not in self._providers:
                 return ErrorInfo("unavailable", f"{AGENT_LABELS[agent]} no està configurat.")
+        return None
+
+    @staticmethod
+    def _validate_refine(request: TurnRequest) -> ErrorInfo | None:
+        """A refine turn's options in their ranges (the server checks them too) and its
+        budget in dollars, when known, a positive number."""
+        options = request.options.refine
+        low, high = REFINE_ROUNDS_RANGE
+        if not low <= options.max_rounds <= high:
+            return ErrorInfo(
+                "invalid", f"Les rondes de «Perfecciona» han de ser entre {low} i {high}."
+            )
+        low, high = REFINE_WORDS_RANGE
+        if options.max_words is not None and not low <= options.max_words <= high:
+            most = f"{high:,}".replace(",", ".")
+            return ErrorInfo("invalid", f"El límit de paraules ha de ser entre {low} i {most}.")
+        low, high = REFINE_THRESHOLD_RANGE
+        if not low <= options.convergence_threshold <= high:
+            return ErrorInfo(
+                "invalid", f"El llindar de convergència ha de ser entre {low} i {high}."
+            )
+        if options.editor not in AGENTS:
+            return ErrorInfo("invalid", "Agent editor desconegut.")
+        budget = request.refine_budget_usd
+        if budget is not None and not (math.isfinite(budget) and budget > 0):
+            return ErrorInfo("invalid", "El pressupost de «Perfecciona» ha de ser positiu.")
         return None
 
     @staticmethod
@@ -793,6 +1098,17 @@ class Engine:
         }
         if models:
             meta["models"] = models
+        if request.mode == "refine":
+            # Its limits, as the options' wire: a reloaded turn shows them.
+            refine = request.options.refine
+            meta["refine"] = {
+                "max_rounds": refine.max_rounds,
+                "budget_eur": refine.budget_eur,
+                "max_words": refine.max_words,
+                "stop_on_convergence": refine.stop_on_convergence,
+                "convergence_threshold": refine.convergence_threshold,
+                "editor": refine.editor,
+            }
         return meta
 
     async def _identity(self, agent: AgentName, model: str | None = None) -> str | None:
@@ -871,7 +1187,11 @@ class Engine:
         return result.context
 
     async def _finish(
-        self, turn: _Turn, consensus: Consensus | None, cache_key: str | None
+        self,
+        turn: _Turn,
+        consensus: Consensus | None,
+        cache_key: str | None,
+        stop_reason: RefineStopReason | None = None,
     ) -> None:
         await self._record_savings(turn)
         # Only whole, complete turns are replayed: never one with a failed, degraded or
@@ -893,7 +1213,9 @@ class Engine:
                 )
             except Exception:
                 logger.exception("Could not store turn %s in the cache", turn.turn_id)
-        outcome = await self._settle(turn, "completed", consensus=consensus)
+        outcome = await self._settle(
+            turn, "completed", consensus=consensus, stop_reason=stop_reason
+        )
         turn.emit(
             TurnCompleted(
                 turn.request_id,
@@ -904,6 +1226,7 @@ class Engine:
                 outcome.savings,
                 consensus,
                 cached=False,
+                stop_reason=outcome.stop_reason,
             )
         )
 
@@ -920,6 +1243,7 @@ class Engine:
         error: ErrorInfo | None = None,
         consensus: Consensus | None = None,
         cached: bool = False,
+        stop_reason: RefineStopReason | None = None,
     ) -> TurnOutcome:
         """How the turn ended (docs/adr/0007-resultat-del-torn.md), decided once: a later
         call (a cancellation while the outcome is being written) gets the same outcome.
@@ -930,7 +1254,10 @@ class Engine:
         Only a turn whose messages are all stored records savings, right before it
         completes, so a failed or cancelled turn has none; one cancelled while its saving
         rows were being written keeps them (the rows are written in full, see
-        :meth:`_record_savings`), and its outcome is stored after them."""
+        :meth:`_record_savings`), and its outcome is stored after them.
+
+        ``stop_reason``: why a refine turn ended with its last version (a cancelled one
+        too, once that version is stored)."""
         if turn.outcome is None:
             accounting = turn.accounting
             done = status == "completed"
@@ -944,6 +1271,7 @@ class Engine:
                 consensus=consensus if done else None,
                 final_message_ids=tuple(sorted(turn.final_ids)),
                 cached=done and cached,
+                stop_reason=stop_reason if status != "failed" else None,
             )
             if turn.on_outcome is not None:
                 try:
@@ -1228,6 +1556,614 @@ class Engine:
                 pdf_reading=pdf_reading,
             )
         )
+
+    # -- refine («Perfecciona») ----------------------------------------------------------
+
+    async def _refine(self, turn: _Turn) -> RefineStopReason | None:
+        """Refine turn (docs/adr/0010-mode-perfecciona.md): why it ended, once its last
+        version is stored as the final message; None if it failed (no answer came back).
+
+        Round 0: both agents answer the brief, and one whose answer fails takes no
+        further part in the turn. Round 1: the editor merges the answers into version 1
+        (:meth:`_merge`). Each later round starts unless the owner asked the turn to stop,
+        its total reached the budget or the rounds ran out (:meth:`_stop_before`); it may
+        end the turn itself (:meth:`_refine_round`)."""
+        state = _Refine(turn.request.options.refine)
+        turn.refine = state
+        turn.emit(PhaseChanged(turn.request_id, "answer", 0))
+        self._prewarm_refine(turn, state, "synthesis")
+        answers = await self._parallel(
+            {
+                agent: self._call(
+                    turn,
+                    agent=agent,
+                    kind="answer",
+                    round_=0,
+                    request=self._context_request(
+                        turn,
+                        agent,
+                        refine_answer_prompt(agent, turn.question, turn.attachments),
+                        "answer",
+                    ),
+                    final=False,
+                )
+                for agent in AGENTS
+            }
+        )
+        state.active = tuple(agent for agent in AGENTS if answers[agent].ok)
+        if not state.active:
+            await self._fail_all(turn, answers)
+            return None
+        self._announce_stop(turn, state)
+        await self._merge(turn, state, answers)
+        reason: RefineStopReason | None = None
+        round_ = 2
+        while reason is None:
+            reason = self._stop_before(turn, state, round_)
+            if reason is None:
+                reason = await self._refine_round(turn, state, round_)
+            round_ += 1
+        state.stop_reason = reason
+        await asyncio.shield(self._final_write(turn, state))
+        return reason
+
+    @staticmethod
+    def _announce_stop(turn: _Turn, state: _Refine) -> bool:
+        """Whether the owner asked the refine turn to stop (``turn.stop``, read between
+        calls only: a call in course is never cut). The first time it is seen,
+        ``turn.stopping`` says the round the turn ends after: the one in course, and at
+        least round 1, so that the turn ends with a version."""
+        if turn.stop is None or not turn.stop.is_set():
+            return False
+        if not state.announced:
+            state.announced = True
+            turn.emit(TurnStopping(turn.request_id, max(state.round, 1)))
+        return True
+
+    def _stop_before(self, turn: _Turn, state: _Refine, round_: int) -> RefineStopReason | None:
+        """Why a refine turn ends before ``round_`` starts, if it does: the owner asked it
+        to stop, its total reached its budget (when both are known: the fake models, or
+        a model without a price, have no cost) or the rounds ran out."""
+        if self._announce_stop(turn, state):
+            return "owner"
+        budget, spent = turn.request.refine_budget_usd, turn.accounting.usage.cost_usd
+        if budget is not None and spent is not None and spent >= budget:
+            return "budget"
+        if round_ > state.options.max_rounds:
+            return "max_rounds"
+        return None
+
+    @staticmethod
+    def _editors(state: _Refine) -> list[AgentName]:
+        """Who writes a version, in order: the editor and then the other agent, the ones
+        that take part in the turn; one whose merge or edit already failed goes last, so
+        that a provider that is down is not waited for every round."""
+        editor = state.options.editor
+        order = [agent for agent in (editor, other_agent(editor)) if agent in state.active]
+        return sorted(order, key=lambda agent: agent in state.edit_failed)
+
+    async def _merge(
+        self, turn: _Turn, state: _Refine, answers: Mapping[AgentName, _Outcome]
+    ) -> None:
+        """Round 1: the editors (:meth:`_editors`) in turn merge the answers into version
+        1, until one writes it whole. If none does, version 1 is a copy of the editor's
+        answer (else the other's), stored without any call (:meth:`_copy_answer`). The
+        merge carries the conversation and every attachment whole, like a synthesis.
+
+        A merge over the owner's word limit gets one retry, shorter, by the same agent
+        (:meth:`_shorten_first`); with no earlier version to keep, that one is version 1
+        even if it still passes the limit, and the later rounds' edits must fit it. That
+        retry failing hands the merge to the other agent, as a failed merge does. While
+        it runs, the merge is the last complete version: a turn cancelled meanwhile keeps
+        it as its final answer."""
+        state.round = 1
+        turn.emit(PhaseChanged(turn.request_id, "edit", 1))
+        self._prewarm_refine(turn, state, "revision")
+        start = turn.accounting.usage
+        prompt = refine_merge_prompt(
+            turn.question,
+            {agent: answers[agent].content for agent in state.active},
+            turn.attachments,
+            incomplete={agent for agent in state.active if answers[agent].truncated},
+            max_words=state.options.max_words,
+            reading_note=self._reading_note(turn),
+        )
+        for agent in self._editors(state):
+            reader = _VersionReader(
+                number=1, current=None, budget_words=None, max_words=state.options.max_words
+            )
+            outcome = await self._call(
+                turn,
+                agent=agent,
+                kind="revision",
+                round_=1,
+                request=self._context_request(turn, agent, prompt, "synthesis"),
+                final=False,
+                reader=reader,
+            )
+            self._announce_stop(turn, state)
+            if outcome.ok and reader.reason == REFINE_OVER_BUDGET:
+                # Version 1 while it is shortened, should the turn be cancelled meanwhile;
+                # once the shortening ends, it decides what version 1 is (round 1 has
+                # written nothing else to the changelog).
+                self._accept(state, reader, outcome)
+                reader, outcome = await self._shorten_first(turn, state, agent, reader)
+                state.current = None
+                state.changelog.clear()
+            if not outcome.ok:
+                state.edit_failed.add(agent)
+            elif reader.accepted:
+                self._accept(state, reader, outcome)
+                break
+        if state.current is None:
+            await self._copy_answer(turn, state, answers)
+        changes = tuple(change for number, change in state.changelog if number == 1)
+        self._refine_round_ended(turn, state, start, accepted=True, changes=changes)
+
+    async def _shorten_first(
+        self, turn: _Turn, state: _Refine, agent: AgentName, draft: _VersionReader
+    ) -> tuple[_VersionReader, _Outcome]:
+        """The one retry of a merge over the owner's word limit: the same version, shorter,
+        by the same agent, self-contained like a round's shortening. Its reader, and the
+        outcome of its call."""
+        attachments = self._revision_attachments(turn)
+        reader = _VersionReader(
+            number=1,
+            current=None,
+            budget_words=draft.budget_words,
+            max_words=state.options.max_words,
+            keep_over=True,
+        )
+        prompt = refine_shorten_prompt(
+            turn.question,
+            draft.text,
+            draft.changes,
+            draft.words,
+            draft.budget_words,
+            attachments,
+        )
+        outcome = await self._call(
+            turn,
+            agent=agent,
+            kind="revision",
+            round_=1,
+            request=self._refine_request(turn, agent, prompt, "synthesis", attachments),
+            final=False,
+            reader=reader,
+        )
+        self._announce_stop(turn, state)
+        return reader, outcome
+
+    async def _copy_answer(
+        self, turn: _Turn, state: _Refine, answers: Mapping[AgentName, _Outcome]
+    ) -> None:
+        """Version 1 when no merge came back whole: the editor's answer (else the other
+        agent's) as it is, stored without any call (``meta.refine.copied_from``), even
+        over the owner's word limit: there is no earlier version, nor anyone to shorten
+        it (both merges failed)."""
+        editor = state.options.editor
+        agent = editor if editor in state.active else state.active[0]
+        answer = answers[agent]
+        count = words(answer.content)
+        state.budget_words = _budget_words(state.options.max_words, count)
+        refine: dict[str, JsonValue] = {
+            "role": "version",
+            "version": 1,
+            "words": count,
+            "budget_words": state.budget_words,
+            "accepted": True,
+            "reason": None,
+            "changelog": [],
+            "copied_from": answer.message_id,
+        }
+        model = answer.model or self._model_name(turn, agent)
+        cut = answer.finish_reason if answer.truncated else None
+        message_id = await self._store_copy(
+            turn,
+            agent=agent,
+            kind="revision",
+            round_=1,
+            content=answer.content,
+            model=model,
+            refine=refine,
+            truncated=answer.truncated,
+            finish_reason=cut,
+        )
+        state.current = _Version(
+            1, answer.content, count, agent, 1, message_id, model, answer.truncated, cut
+        )
+
+    @staticmethod
+    def _accept(state: _Refine, reader: _VersionReader, outcome: _Outcome) -> None:
+        """The version a call wrote becomes the current one, and its changes go to the
+        turn's changelog. Version 1 sets the word budget of the turn."""
+        assert outcome.message_id is not None
+        number = state.current.number + 1 if state.current is not None else 1
+        state.current = _Version(
+            number,
+            reader.text,
+            reader.words,
+            outcome.agent,
+            state.round,
+            outcome.message_id,
+            outcome.model,
+        )
+        if number == 1:
+            state.budget_words = reader.budget_words
+        state.changelog.extend((number, change) for change in reader.changes)
+
+    async def _refine_round(
+        self, turn: _Turn, state: _Refine, round_: int
+    ) -> RefineStopReason | None:
+        """Round ``round_`` (from 2 on): every agent in the turn reviews the current
+        version and, unless none proposes a change, the editor writes the next one
+        (:meth:`_edit`). A failed review sits that agent out of the round. Why the round
+        ends the turn, if it does: nothing to change ``REFINE_CONVERGENCE_ROUNDS`` rounds
+        in a row ("unchanged", always), every agent scoring it at least the threshold
+        without a defect as many rounds in a row ("converged", when the owner wants it),
+        or no review or no version coming back ("failed")."""
+        state.round = round_
+        start = turn.accounting.usage
+        current = state.current
+        assert current is not None
+        turn.emit(PhaseChanged(turn.request_id, "review", round_))
+        self._prewarm_refine(turn, state, "synthesis")
+        attachments = self._revision_attachments(turn)
+        tail = changelog_tail(state.changelog)
+        note = self._reading_note(turn)
+        readers = {agent: _ReviewReader() for agent in state.active}
+        outcomes = await self._parallel(
+            {
+                agent: self._call(
+                    turn,
+                    agent=agent,
+                    kind="revision",
+                    round_=round_,
+                    request=self._refine_request(
+                        turn,
+                        agent,
+                        refine_review_prompt(
+                            agent,
+                            turn.question,
+                            current.text,
+                            current.words,
+                            state.budget_words,
+                            tail,
+                            attachments,
+                            reading_note=note,
+                        ),
+                        "revision",
+                        attachments,
+                    ),
+                    final=False,
+                    reader=readers[agent],
+                )
+                for agent in state.active
+            }
+        )
+        self._announce_stop(turn, state)
+        reviews = {
+            agent: review
+            for agent, reader in readers.items()
+            if outcomes[agent].ok and (review := reader.review) is not None
+        }
+        if not reviews:
+            self._refine_round_ended(turn, state, start, accepted=False, reason=REFINE_FAILED_ROUND)
+            return "failed"
+        accepted = False
+        reason: str | None = REFINE_NOTHING_TO_CHANGE
+        changes: tuple[RefineChange, ...] = ()
+        if all(review.unchanged for review in reviews.values()):
+            state.unchanged_rounds += 1
+        else:
+            state.unchanged_rounds = 0
+            turn.emit(PhaseChanged(turn.request_id, "edit", round_))
+            self._prewarm_refine(turn, state, "revision")
+            edited = await self._edit(turn, state, reviews)
+            if edited is None:
+                self._refine_round_ended(
+                    turn, state, start, accepted=False, reason=REFINE_FAILED_ROUND, reviews=reviews
+                )
+                return "failed"
+            accepted, reason, changes = edited
+        options = state.options
+        converging = set(reviews) == set(state.active) and all(
+            review.score is not None
+            and review.score >= options.convergence_threshold
+            and all(change.kind != "defect" for change in review.changes)
+            for review in reviews.values()
+        )
+        state.converging_rounds = state.converging_rounds + 1 if converging else 0
+        stop: RefineStopReason | None = None
+        if state.unchanged_rounds >= REFINE_CONVERGENCE_ROUNDS:
+            stop = "unchanged"
+        elif options.stop_on_convergence and state.converging_rounds >= REFINE_CONVERGENCE_ROUNDS:
+            stop = "converged"
+        self._refine_round_ended(
+            turn,
+            state,
+            start,
+            accepted=accepted,
+            reason=reason,
+            changes=changes,
+            reviews=reviews,
+            converged=stop == "converged",
+        )
+        return stop
+
+    async def _edit(
+        self, turn: _Turn, state: _Refine, reviews: Mapping[AgentName, ReviewParse]
+    ) -> tuple[bool, str | None, tuple[RefineChange, ...]] | None:
+        """The edit of a round: the editors (:meth:`_editors`) in turn, until one replies,
+        write the next version from the changes the reviews proposed. Whether it was
+        accepted, why not, and its changes; None when every editor failed.
+
+        A version over the word budget gets one retry, shorter, by the same agent;
+        still over (or that retry failing), the round keeps the current version. A
+        version without a complete section, or the same as the current one, is not
+        accepted either, and nobody else edits: it was a reply, not a failure."""
+        current = state.current
+        assert current is not None
+        attachments = self._revision_attachments(turn)
+        prompt = refine_edit_prompt(
+            turn.question,
+            current.text,
+            {agent: review.changes for agent, review in reviews.items()},
+            changelog_tail(state.changelog),
+            current.words,
+            state.budget_words,
+            attachments,
+        )
+        for agent in self._editors(state):
+            reader = self._version_reader(state)
+            outcome = await self._call(
+                turn,
+                agent=agent,
+                kind="revision",
+                round_=state.round,
+                request=self._refine_request(turn, agent, prompt, "synthesis", attachments),
+                final=False,
+                reader=reader,
+            )
+            self._announce_stop(turn, state)
+            if not outcome.ok:
+                state.edit_failed.add(agent)
+                continue
+            if reader.reason == REFINE_OVER_BUDGET:
+                draft, reader = reader, self._version_reader(state)
+                shorten = refine_shorten_prompt(
+                    turn.question,
+                    draft.text,
+                    draft.changes,
+                    draft.words,
+                    state.budget_words,
+                    attachments,
+                )
+                outcome = await self._call(
+                    turn,
+                    agent=agent,
+                    kind="revision",
+                    round_=state.round,
+                    request=self._refine_request(turn, agent, shorten, "synthesis", attachments),
+                    final=False,
+                    reader=reader,
+                )
+                self._announce_stop(turn, state)
+                if not outcome.ok:
+                    state.edit_failed.add(agent)
+                    return False, REFINE_OVER_BUDGET, ()
+            if not reader.accepted:
+                return False, reader.reason, ()
+            self._accept(state, reader, outcome)
+            return True, None, reader.changes
+        return None
+
+    @staticmethod
+    def _version_reader(state: _Refine) -> _VersionReader:
+        """The reader of the next version of a refine turn (an edit or its shortening)."""
+        current = state.current
+        assert current is not None
+        return _VersionReader(
+            number=current.number + 1,
+            current=current,
+            budget_words=state.budget_words,
+            max_words=state.options.max_words,
+        )
+
+    def _refine_round_ended(
+        self,
+        turn: _Turn,
+        state: _Refine,
+        start: Usage,
+        *,
+        accepted: bool,
+        reason: str | None = None,
+        changes: Sequence[RefineChange] = (),
+        reviews: Mapping[AgentName, ReviewParse] | None = None,
+        converged: bool = False,
+    ) -> None:
+        """``refine.round``: how the round in course ended, with what its calls billed
+        (the turn's total since ``start``) and the turn's total so far."""
+        version = state.current
+        assert version is not None
+        reviewed = reviews or {}
+        turn.emit(
+            RefineRound(
+                turn.request_id,
+                round=state.round,
+                version=version.number,
+                accepted=accepted,
+                words=version.words,
+                budget_words=state.budget_words,
+                usage=_usage_since(start, turn.accounting.usage),
+                total=turn.accounting.usage,
+                reason=None if accepted else reason,
+                changes=tuple(changes) if accepted else (),
+                proposals={agent: len(review.changes) for agent, review in reviewed.items()},
+                scores={agent: review.score for agent, review in reviewed.items()},
+                converged=converged,
+            )
+        )
+
+    def _refine_request(
+        self,
+        turn: _Turn,
+        agent: AgentName,
+        prompt: str,
+        purpose: Purpose,
+        attachments: tuple[Attachment, ...],
+    ) -> GenerationRequest:
+        """A self-contained request of a refine round (a review, an edit, its shortening):
+        no history, and the attachments as the revisions get them, round after round."""
+        return GenerationRequest(
+            system=system_prompt(agent),
+            prompt=prompt,
+            purpose=purpose,
+            model=turn.request.models.get(agent),
+            max_output_tokens=self._config.max_output_tokens,
+            reasoning="default",
+            attachments=attachments,
+        )
+
+    def _prewarm_refine(self, turn: _Turn, state: _Refine, purpose: Purpose) -> None:
+        """Hint the providers of a refine turn's next calls while the current ones run:
+        the reviews (every agent in the turn) or the next version (its first editor)."""
+        if purpose == "revision":
+            agents = list(state.active or AGENTS)
+        else:
+            agents = self._editors(state)[:1] if state.active else [state.options.editor]
+        for agent in agents:
+            request = GenerationRequest(
+                system=system_prompt(agent),
+                prompt="",
+                purpose=purpose,
+                model=turn.request.models.get(agent),
+                max_output_tokens=self._config.max_output_tokens,
+                reasoning="default",
+            )
+            self._prewarm(turn, agent, request)
+
+    def _final_write(self, turn: _Turn, state: _Refine) -> asyncio.Task[None]:
+        """The write of a refine turn's last version as its final message, started once,
+        in a task of its own (shielded from cancellation): the turn's last step and a
+        cancellation meanwhile wait for the same write."""
+        if state.final_write is None:
+            state.final_write = self._write(
+                self._store_final(turn, state), name=f"final-{turn.request_id}"
+            )
+        return state.final_write
+
+    async def _store_final(self, turn: _Turn, state: _Refine) -> None:
+        """The last version as the final message of a refine turn: a synthesis by the
+        agent that wrote it, in the turn's last round, stored without any call
+        (``meta.copied_from``)."""
+        version = state.current
+        assert version is not None
+        refine: dict[str, JsonValue] = {
+            "role": "final",
+            "version": version.number,
+            "words": version.words,
+            "budget_words": state.budget_words,
+            "stop_reason": state.stop_reason or "owner",
+        }
+        await self._store_copy(
+            turn,
+            agent=version.agent,
+            kind="synthesis",
+            round_=state.round,
+            content=version.text,
+            model=version.model,
+            refine=refine,
+            copied_from=version.message_id,
+            truncated=version.truncated,
+            finish_reason=version.finish_reason,
+        )
+
+    async def _close_refine(self, turn: _Turn) -> None:
+        """A cancelled refine turn's last writes, in a task of their own: its last version
+        as the final message (stopped by the owner, unless the turn was already ending for
+        another reason), then its outcome, cancelled, with that final message."""
+        state = turn.refine
+        assert state is not None
+        if state.stop_reason is None:
+            state.stop_reason = "owner"
+        try:
+            await asyncio.shield(self._final_write(turn, state))
+        except Exception:
+            logger.exception("Could not store the last version of turn %s", turn.request_id)
+        await self._settle(turn, "cancelled", stop_reason=state.stop_reason)
+
+    async def _store_copy(
+        self,
+        turn: _Turn,
+        *,
+        agent: AgentName,
+        kind: MessageKind,
+        round_: int,
+        content: str,
+        model: str,
+        refine: dict[str, JsonValue],
+        copied_from: int | None = None,
+        truncated: bool = False,
+        finish_reason: str | None = None,
+    ) -> int:
+        """Store a refine turn's message that copies one already stored, without any call
+        (version 1 from an answer, the final message from the last version), and stream it
+        like the others: a version as the answer, the final message as text. Only the
+        final message (a synthesis) is final; it carries the turn's savings."""
+        final = kind == "synthesis"
+        stream_id = uuid.uuid4().hex
+        turn.emit(StreamStarted(turn.request_id, stream_id, agent, kind, round_, model))
+        turn.emit(StreamDelta(turn.request_id, stream_id, "text" if final else "answer", content))
+        meta: dict[str, JsonValue] = {
+            "model": model,
+            "usage": _usage_json(Usage()),
+            "latency_ms": 0,
+            "ttft_ms": None,
+            "cached": False,
+        }
+        if copied_from is not None:
+            meta["copied_from"] = copied_from
+        if truncated:
+            _set_truncated(meta, finish_reason)
+            turn.truncated = True
+        # ChatGPT's text, written from its reading of the PDFs: it keeps saying so.
+        pdf_reading = self._reading_of(turn, agent)
+        if pdf_reading:
+            meta["pdf_reading"] = _pdf_reading_json(pdf_reading)
+        meta["refine"] = refine
+        if final:
+            meta["savings"] = _savings_json(turn.accounting.savings())
+            _set_unstored(meta, turn.accounting)
+        message_id = await self._store.add_message(
+            NewMessage(
+                conversation_id=turn.conversation_id,
+                kind=kind,
+                content=content,
+                turn_id=turn.turn_id,
+                agent=agent,
+                round=round_,
+                final=final,
+                meta=meta,
+            )
+        )
+        if final:
+            turn.final_ids.append(message_id)
+        turn.emit(
+            StreamCompleted(
+                turn.request_id,
+                stream_id,
+                message_id,
+                Usage(),
+                0,
+                None,
+                truncated=truncated,
+                finish_reason=finish_reason if truncated else None,
+                pdf_reading=pdf_reading,
+                refine=refine,
+            )
+        )
+        return message_id
 
     # -- cache replay ------------------------------------------------------------------
 
@@ -1598,11 +2534,16 @@ class Engine:
         final: bool,
         previous: str | None = None,
         extra_meta: Mapping[str, JsonValue] | None = None,
+        reader: _Reader | None = None,
     ) -> _Outcome:
         """One model call: stream it, retry once if allowed, store and report the message.
 
         A ChatGPT that cannot open PDFs first waits for Claude's check of the question's
-        PDFs (the turn's one check, started by its first call) and gets them with it."""
+        PDFs (the turn's one check, started by its first call) and gets them with it.
+
+        A refine turn's review or version comes through its ``reader``, which says what
+        each part of the reply streams as, what is stored (with its ``meta.refine``) or
+        why the call failed: a review without its changes, billed like an empty reply."""
         provider = self._providers[agent]
         pdf_reading: tuple[PdfReading, ...] = ()
         if not reads_pdfs(provider) and any(a.kind == "pdf" for a in request.attachments):
@@ -1618,7 +2559,13 @@ class Engine:
         attempt = 0
         while True:
             attempt += 1
-            parser = RevisionStreamParser() if kind == "revision" else None
+            parser: _SectionParser | None
+            if reader is not None:
+                parser = reader.start()
+            elif kind == "revision":
+                parser = RevisionStreamParser()
+            else:
+                parser = None
             progress = _Progress()
             started = time.monotonic()
             try:
@@ -1669,9 +2616,17 @@ class Engine:
         unchanged = False
         note: str | None = None
         kept = False
-        if parser is not None:
-            for section, text in parser.close():
+        refine: dict[str, JsonValue] | None = None
+        invalid: str | None = None
+        if reader is not None:
+            pieces, read = reader.finish(result.truncated)
+            for section, text in pieces:
                 turn.emit(StreamDelta(turn.request_id, stream_id, section, text))
+            content, invalid = read.content, read.error
+            refine = read.refine
+        elif isinstance(parser, RevisionStreamParser):
+            for revision_section, text in parser.close():
+                turn.emit(StreamDelta(turn.request_id, stream_id, revision_section, text))
             parsed = parser.final()
             critique, agreement = parsed.critique, parsed.agreement
             if parsed.answer and not parsed.unchanged:
@@ -1694,10 +2649,10 @@ class Engine:
         usage = replace(
             result.usage, cost_usd=estimate_cost_usd(result.model, result.usage, turn.prices)
         )
-        if not content:
+        if not content or invalid:
             # Billed all the same: it counts in the turn's usage (not in its savings).
             turn.accounting.add_unstored(usage)
-            error = ProviderError(_empty_reply_message(result), kind="invalid")
+            error = ProviderError(invalid or _empty_reply_message(result), kind="invalid")
             await self._record_usage(
                 turn,
                 agent,
@@ -1746,7 +2701,9 @@ class Engine:
             # A usable partial answer, never a complete one: shown as such, never cached.
             _set_truncated(meta, result.finish_reason)
             turn.truncated = True
-        if kind == "revision":
+        if refine is not None:
+            meta["refine"] = refine
+        elif kind == "revision":
             meta.update(critique=critique or "", agreement=agreement, unchanged=unchanged)
             if note:
                 meta["unchanged_note"] = note
@@ -1788,6 +2745,7 @@ class Engine:
                 finish_reason=result.finish_reason if result.truncated else None,
                 unchanged_note=note,
                 pdf_reading=pdf_reading,
+                refine=refine,
             )
         )
         return _Outcome(
@@ -1799,6 +2757,8 @@ class Engine:
             truncated=result.truncated,
             finish_reason=result.finish_reason if result.truncated else None,
             kept=kept,
+            message_id=message_id,
+            model=result.model,
         )
 
     async def _stream(
@@ -1807,7 +2767,7 @@ class Engine:
         provider: Provider,
         request: GenerationRequest,
         stream_id: str,
-        parser: RevisionStreamParser | None,
+        parser: _SectionParser | None,
         progress: _Progress,
     ) -> GenerationResult:
         """Consume one provider stream, forwarding its text as StreamDelta events."""

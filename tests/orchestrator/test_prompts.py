@@ -71,6 +71,22 @@ def test_plain_text_is_embedded_verbatim() -> None:
     assert prompt.count(text) == 3
 
 
+def test_the_council_prompts_keep_the_refine_tags_as_written() -> None:
+    """Only a refine turn's prompts use ``<version>``, ``<review>``, ``<score>``... as
+    delimiters: the solo, duel and debate prompts embed a pom.xml or a React component as
+    it was written (docs/adr/0010-mode-perfecciona.md)."""
+    code = (
+        "```xml\n<version>1.2.0</version>\n```\n```jsx\n<Review score={5}><Score /></Review>\n```\n"
+        "<brief> <changes> <changelog> <draft>"
+    )
+    prompt = revision_prompt("chatgpt", code, code, code)
+    assert prompt.count(code) == 3
+    assert debate_answer_prompt("claude", code).count(code) == 1
+    synthesis = synthesis_prompt(code, {"claude": code, "chatgpt": code}, {"claude": code})
+    assert synthesis.count(code) == 4
+    assert prompts.answer_prompt(code) == code
+
+
 def test_every_template_tag_is_reserved() -> None:
     """A new tag in a template must be added to RESERVED_TAGS, or embedded text could
     forge it."""

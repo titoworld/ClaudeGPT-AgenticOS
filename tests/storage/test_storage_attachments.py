@@ -109,7 +109,7 @@ async def test_version_3_databases_get_the_attachment_tables(tmp_path: Path) -> 
         conn.commit()
     db = await Database.open(path)
     try:
-        assert await db.schema_version() == SCHEMA_VERSION == 5
+        assert await db.schema_version() == SCHEMA_VERSION == 6
         async with db.transaction(write=False) as tx:
             tables = {r[0] for r in await tx.fetchall("SELECT name FROM sqlite_master")}
             kept = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
@@ -140,7 +140,7 @@ async def test_version_4_databases_get_the_page_facts_and_the_checks(tmp_path: P
         conn.commit()
     async with await SqliteStore.open(path) as store:
         async with store._db.transaction(write=False) as tx:
-            assert await tx.user_version() == SCHEMA_VERSION == 5
+            assert await tx.user_version() == SCHEMA_VERSION == 6
         [old] = await store.get_attachments([7])
         assert (old.text, old.pdf_pages, old.pdf_notes) == ("--- Pàgina 1 ---\nHola", None, None)
         record = await store.get_attachment(7)

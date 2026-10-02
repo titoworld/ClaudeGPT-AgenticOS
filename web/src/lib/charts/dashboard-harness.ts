@@ -160,7 +160,9 @@ function mockStats(days: number): Stats {
     latency: empty
       ? { claude: { p50_ms: null, p95_ms: null, ttft_p50_ms: null }, chatgpt: { p50_ms: null, p95_ms: null, ttft_p50_ms: null } }
       : { claude: { p50_ms: 6200, p95_ms: 14800, ttft_p50_ms: 1150 }, chatgpt: { p50_ms: 4900, p95_ms: 17300, ttft_p50_ms: 780 } },
-    turns: empty ? { solo: 0, duel: 0, debate: 0 } : { solo: Math.round(days * 0.9), duel: Math.round(days * 0.5), debate: debates },
+    turns: empty
+      ? { solo: 0, duel: 0, debate: 0, refine: 0 }
+      : { solo: Math.round(days * 0.9), duel: Math.round(days * 0.5), debate: debates, refine: Math.round(days * 0.2) },
     consensus: { debates, reached: Math.round(debates * 0.64), avg_rounds: debates ? 1.4 : null },
     costs: {
       fx,

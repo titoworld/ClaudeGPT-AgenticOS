@@ -55,6 +55,8 @@ function stream(partial: Partial<StreamView>): StreamView {
     unchangedNote: null,
     degraded: false,
     pdfReading: [],
+    refineRole: null,
+    refine: null,
     ...partial,
   };
 }

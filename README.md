@@ -6,10 +6,11 @@ El teu **consell privat de Claude i ChatGPT**. Totes dues IA responen, es critiq
 
 ## Què fa
 
-- **Tres modes de treball**
+- **Quatre modes de treball**
   - **Solo:** respon un agent.
   - **Duel:** responen tots dos en paral·lel.
   - **Consell:** debat amb rondes de revisió i síntesi final.
+  - **Perfecciona:** milloren un sol document ronda rere ronda, sense inflar-lo, fins que l'atures.
 - **Estalvi de tokens mesurat**
   - Els debats envien només el context mínim.
   - Les rondes s'aturen quan hi ha consens.
@@ -93,7 +94,7 @@ La CI de GitHub Actions executa les comprovacions de Python (3.12 i 3.13), les d
 .
 ├── src/agentic_os/
 │   ├── providers/      Claude (CLI i API), ChatGPT (Codex app-server i API), fake
-│   ├── orchestrator/   motor de torns: solo, duel, consell, compactació, memòria cau
+│   ├── orchestrator/   motor de torns: solo, duel, consell, perfecciona, compactació, memòria cau
 │   ├── storage/        SQLite: converses, adjunts, ús, estalvis, sessions, configuració
 │   ├── security/       contrasenya, TOTP, sessions, límits d'intents
 │   ├── server/         FastAPI: REST, WebSocket, capçaleres de seguretat

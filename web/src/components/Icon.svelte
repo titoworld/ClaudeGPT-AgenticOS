@@ -45,6 +45,11 @@
     'mode-duel': '<circle cx="8.7" cy="12" r="5.2"/><circle cx="15.3" cy="12" r="5.2"/>',
     'mode-debate':
       '<circle cx="12" cy="5.8" r="2.6"/><circle cx="5.8" cy="17" r="2.6"/><circle cx="18.2" cy="17" r="2.6"/><path d="M10.7 8.1 7.1 14.7M13.3 8.1l3.6 6.6M8.4 17h7.2"/>',
+    // «Perfecciona»: one document, round after round.
+    'mode-refine':
+      '<path d="M11.5 20.5h-5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H13l4 4v3"/><path d="M13 3.5v4h4M8 11h5M8 14.5h2.5"/><path d="M20.6 17a3.6 3.6 0 1 1-3.6-3.6c1 0 2 .4 2.7 1.1l.9.7"/><path d="M20.6 13.4v2h-2"/>',
+    // What changed between two versions: added and removed.
+    diff: '<path d="M8 3.5v9M3.5 8h9M12.5 18.5h8"/>',
   } as const;
 
   export type IconName = keyof typeof ICONS;

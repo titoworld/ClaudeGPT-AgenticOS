@@ -44,7 +44,7 @@ function cacheHeavy(): Stats {
       claude: { p50_ms: null, p95_ms: null, ttft_p50_ms: null },
       chatgpt: { p50_ms: null, p95_ms: null, ttft_p50_ms: null },
     },
-    turns: { solo: 1, duel: 1, debate: 0 },
+    turns: { solo: 1, duel: 1, debate: 0, refine: 0 },
     consensus: { debates: 0, reached: 0, avg_rounds: null },
     costs: { fx: FX, by_agent: { claude: { api_usd: 0.53006, equivalent_usd: 0, unpriced_calls: 0 }, chatgpt: { api_usd: 0.26503, equivalent_usd: 0, unpriced_calls: 0 } } },
     month: { month: TODAY.slice(0, 7), fx: FX, by_agent: { claude: NO_SPEND, chatgpt: NO_SPEND } },
@@ -121,5 +121,21 @@ describe('Dashboard: tokens processed, cache included (A7)', () => {
     const note = [...el.querySelectorAll('.techniques li')].find((li) => textOf(li.querySelector('h4')) === 'Memòria cau del proveïdor')!;
     expect(plain(textOf(note))).toContain('60 k');
     expect(plain(textOf(note))).toContain('120 k');
+  });
+});
+
+describe('Dashboard: the turns of each mode', () => {
+  it('counts the «Perfecciona» turns with the others', async () => {
+    data.stats = { ...cacheHeavy(), turns: { solo: 1, duel: 1, debate: 0, refine: 2 } };
+    const el = await loaded();
+    const turns = tile(el, 'Torns');
+    expect(textOf(turns.querySelector('.value'))).toBe('4');
+    expect(textOf(turns.querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 2');
+  });
+
+  it('reads 0 from a server that does not count them yet', async () => {
+    data.stats = { ...cacheHeavy(), turns: { solo: 1, duel: 1, debate: 0 } as Stats['turns'] };
+    const el = await loaded();
+    expect(textOf(tile(el, 'Torns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 0');
   });
 });

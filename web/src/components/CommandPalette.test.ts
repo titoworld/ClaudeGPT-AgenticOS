@@ -145,3 +145,18 @@ describe('CommandPalette conversation search (A12)', () => {
     expect(server.lists).toHaveLength(sent);
   });
 });
+
+describe('CommandPalette: the modes', () => {
+  it('offers every mode, «Perfecciona» too: choosing it there is the owner choosing it', async () => {
+    const { e, root } = await opened(conversations(3));
+    type(root, 'mode');
+    expect(labels(root)).toEqual(
+      expect.arrayContaining(['Canvia al mode Solo', 'Canvia al mode Duel', 'Canvia al mode Consell', 'Canvia al mode Perfecciona']),
+    );
+    type(root, 'perfecciona');
+    expect(labels(root)[0]).toBe('Canvia al mode Perfecciona');
+    press(root, 'Enter');
+    expect(e.app.composer.mode).toBe('refine');
+    expect(e.app.paletteOpen).toBe(false);
+  });
+});

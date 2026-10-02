@@ -3,6 +3,7 @@
 // elsewhere (409) reloads them instead of undoing that change.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimeSettings } from '../lib/protocol';
+import { INVALID_AMOUNT } from '../lib/settings';
 import { CONFLICT_DETAIL, deferred, FakeApi, FakeSocket, polyfillDialog } from '../lib/test-server';
 
 const SAVED: RuntimeSettings = {
@@ -10,6 +11,7 @@ const SAVED: RuntimeSettings = {
   default_mode: 'solo',
   default_target: 'chatgpt',
   debate: { rounds: 1, consensus_threshold: 70, synthesizer: 'chatgpt' },
+  refine: { max_rounds: 12, budget_eur: 3, max_words: null, stop_on_convergence: true, convergence_threshold: 90, editor: 'claude' },
   use_cache: false,
   compaction_threshold_tokens: 12000,
   models: { claude: 'claude-opus-4-1', chatgpt: null },
@@ -234,5 +236,93 @@ describe('SettingsDrawer: what the revisions of a debate get of an attached PDF'
     submit(root);
     await vi.waitFor(() => expect(server.puts).toHaveLength(1));
     expect(server.puts[0]).toEqual({ ...SAVED, pdf_in_revisions: 'text' });
+  });
+});
+
+describe('SettingsDrawer: the defaults of the refine mode («Perfecciona»)', () => {
+  const section = (root: HTMLElement) =>
+    [...root.querySelectorAll('section')].find((s) => s.querySelector('h3')?.textContent === 'Perfecciona') ?? null;
+  const input = (root: HTMLElement, label: string) =>
+    [...(section(root)?.querySelectorAll<HTMLInputElement>('input') ?? [])].find((i) =>
+      (i.closest('label')?.textContent ?? i.getAttribute('aria-label') ?? '').includes(label),
+    ) ?? null;
+  const errorOf = (root: HTMLElement, label: string) => {
+    const field = input(root, label);
+    const id = field?.getAttribute('aria-describedby')?.split(' ').find((x) => x.endsWith('-err'));
+    return id ? env!.textOf(root.querySelector(`#${CSS.escape(id)}`)) : null;
+  };
+
+  it('never offers refine as the default mode: such a turn only starts when the owner chooses it', async () => {
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(modeRadio(root, 'solo')?.checked).toBe(true));
+    expect([...root.querySelectorAll<HTMLInputElement>(`input[type=radio][name$="-mode"]`)].map((r) => r.value)).toEqual([
+      'solo',
+      'duel',
+      'debate',
+    ]);
+  });
+
+  it('shows the saved ones and saves what the owner changes', async () => {
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(section(root)).not.toBeNull());
+    expect(input(root, 'Rondes màximes')?.value).toBe('12');
+    expect(input(root, 'Pressupost per torn')?.value).toBe('3');
+    expect(input(root, 'Límit automàtic')?.checked).toBe(true);
+    expect(input(root, 'Límit de paraules')?.disabled).toBe(true);
+    expect(input(root, "S'atura sol")?.checked).toBe(true);
+    expect(input(root, 'Llindar de convergència')?.value).toBe('90');
+
+    type(input(root, 'Rondes màximes')!, '20');
+    type(input(root, 'Pressupost per torn')!, '4,5');
+    input(root, 'Límit automàtic')!.click();
+    e.flushSync();
+    expect(input(root, 'Límit de paraules')?.disabled).toBe(false);
+    type(input(root, 'Límit de paraules')!, '1500');
+    section(root)!.querySelector<HTMLInputElement>('input[type=radio][value=chatgpt]')!.click();
+    type(input(root, 'Llindar de convergència')!, '80');
+    submit(root);
+    await vi.waitFor(() => expect(server.puts).toHaveLength(1));
+    expect(server.puts[0]!.refine).toEqual({
+      max_rounds: 20, budget_eur: 4.5, max_words: 1500, stop_on_convergence: true, convergence_threshold: 80, editor: 'chatgpt',
+    });
+  });
+
+  it('goes back to the automatic word limit as null', async () => {
+    server = new FakeApi({ ...SAVED, refine: { ...SAVED.refine, max_words: 800, stop_on_convergence: false } });
+    vi.stubGlobal('fetch', server.fetch);
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(input(root, 'Límit de paraules')?.value).toBe('800'));
+    expect(input(root, 'Límit automàtic')?.checked).toBe(false);
+    expect(input(root, "S'atura sol")?.checked).toBe(false);
+    input(root, 'Límit automàtic')!.click();
+    e.flushSync();
+    submit(root);
+    await vi.waitFor(() => expect(server.puts).toHaveLength(1));
+    expect(server.puts[0]!.refine).toMatchObject({ max_words: null, stop_on_convergence: false });
+  });
+
+  it('does not save values out of range, and says which', async () => {
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(section(root)).not.toBeNull());
+    type(input(root, 'Rondes màximes')!, '1');
+    type(input(root, 'Pressupost per torn')!, '1.000');
+    input(root, 'Límit automàtic')!.click();
+    e.flushSync();
+    type(input(root, 'Límit de paraules')!, '');
+    submit(root);
+    await settle();
+    expect(server.puts).toEqual([]);
+    expect(errorOf(root, 'Rondes màximes')).toBe("Ha d'estar entre 2 i 50.");
+    expect(errorOf(root, 'Pressupost per torn')).toBe(INVALID_AMOUNT);
+    expect(errorOf(root, 'Límit de paraules')).toBe('Cal un número.');
+    expect(notice(root)).toBe('Revisa els camps marcats.');
   });
 });

@@ -3,10 +3,19 @@
 
 export type Agent = 'claude' | 'chatgpt';
 export const AGENTS: readonly Agent[] = ['claude', 'chatgpt'];
-export type TurnMode = 'solo' | 'duel' | 'debate';
+/**
+ * refine («Perfecciona», docs/adr/0010-mode-perfecciona.md): both answer, the editor
+ * merges the answers into one document, and round after round both review it and the
+ * editor writes its next version, until the owner stops it or a limit does.
+ */
+export type TurnMode = 'solo' | 'duel' | 'debate' | 'refine';
+export const TURN_MODES: readonly TurnMode[] = ['solo', 'duel', 'debate', 'refine'];
+/** The modes a turn may get without choosing one: never refine, which runs until stopped. */
+export type DefaultMode = Exclude<TurnMode, 'refine'>;
 export type MessageKind = 'question' | 'answer' | 'revision' | 'synthesis';
 export type ProviderMode = 'cli' | 'api' | 'fake';
-export type Phase = 'answer' | 'revision' | 'synthesis' | 'compaction';
+/** review and edit: the two parts of a refine round (the reviews, then the editor's version). */
+export type Phase = 'answer' | 'revision' | 'synthesis' | 'compaction' | 'review' | 'edit';
 export type Section = 'text' | 'critique' | 'answer';
 export type SavingKind = 'cache' | 'compaction' | 'early_stop' | 'unchanged';
 
@@ -113,8 +122,60 @@ export interface DebateOptions {
   synthesizer: Agent;
 }
 
+/** Options of a refine turn («Perfecciona», ADR 0010); the server validates the ranges. */
+export interface RefineOptions {
+  /** Rounds that write a version, the merge of round 1 included: 2-50. */
+  max_rounds: number;
+  /** What the turn may spend, in euros (in subscription mode, the value at API prices): 0.1-100. */
+  budget_eur: number;
+  /** Word limit of every version: 100-20000, or null for 1.2 times the first version's (300 at least). */
+  max_words: number | null;
+  /** Stop by itself when both score it at least `convergence_threshold`, without a defect, 2 rounds in a row. */
+  stop_on_convergence: boolean;
+  /** 50-100. */
+  convergence_threshold: number;
+  /** The agent that merges the answers and writes every version. */
+  editor: Agent;
+}
+
+/**
+ * Why a refine turn ended with its last version: the owner stopped it (turn.stop, or
+ * turn.cancel), neither agent found anything left to change, both scored it above the
+ * threshold, the rounds or the budget ran out, or both agents failed in a round.
+ */
+export type RefineStopReason = 'owner' | 'converged' | 'unchanged' | 'max_rounds' | 'budget' | 'failed';
+
+/**
+ * A change of a refine round, proposed by a review or applied by a version. `kind`:
+ * "defect", "clarity", "simplification" or "requirement"; "merge" for the lines of
+ * version 1, which say what it took from each answer.
+ */
+export interface RefineChange {
+  kind: string;
+  text: string;
+}
+
+/** `meta.refine` of a refine turn's review, version or final message (and of its stream.completed). */
+export type RefineMeta =
+  | { role: 'review'; score: number | null; unchanged: boolean; changes: RefineChange[] }
+  | {
+      role: 'version';
+      version: number;
+      words: number;
+      budget_words: number;
+      accepted: boolean;
+      /** Why it did not become the current version (Catalan), as refine.round's `reason`. */
+      reason: string | null;
+      changelog: RefineChange[];
+      /** Version 1 stored without a call (nobody could merge): the id of the answer it copies. */
+      copied_from?: number;
+    }
+  | { role: 'final'; version: number; words: number; budget_words: number; stop_reason: RefineStopReason };
+
 export interface TurnOptions {
   debate: DebateOptions;
+  /** A refine turn's: the server takes the missing ones from the settings. */
+  refine?: RefineOptions;
   use_cache: boolean;
 }
 
@@ -130,9 +191,11 @@ export interface RuntimeSettings {
    * revision the edit was based on: 409 (SettingsConflict) if they changed since.
    */
   revision: number;
-  default_mode: TurnMode;
+  default_mode: DefaultMode;
   default_target: Agent;
   debate: DebateOptions;
+  /** The options of a refine turn that does not give its own. */
+  refine: RefineOptions;
   use_cache: boolean;
   compaction_threshold_tokens: number;
   models: Record<Agent, string | null>; // null = provider default
@@ -282,6 +345,11 @@ export interface MessageMeta {
   /** Question only: its attachments, in order, as they were when the turn started. */
   attachments?: Attachment[];
   /**
+   * Refine turns: on the question, the turn's options (a reloaded turn shows its limits);
+   * on a review, a version or the final version, what it is (as its stream.completed said).
+   */
+  refine?: RefineOptions | RefineMeta;
+  /**
    * Question only: how the turn ended (ADR 0007). `null` from the moment the question is
    * stored until the engine writes it at the end of the turn, so a turn that never ended
    * (a crash, a restart) keeps `null`; absent on turns stored before it existed.
@@ -412,6 +480,8 @@ export interface TurnOutcome {
   consensus: Consensus | null;
   final_message_ids: number[];
   cached: boolean;
+  /** Refine turns only: why it ended with its last version (a cancelled one has "owner"). */
+  stop_reason?: RefineStopReason;
 }
 
 export type ClientMessage =
@@ -427,6 +497,8 @@ export type ClientMessage =
       /** Ids of uploaded attachments, in order: at most MAX_ATTACHMENTS, each once. */
       attachments?: number[];
     }
+  /** «Atura en acabar la ronda»: a refine turn ends after the round in course (turn.stopping answers). */
+  | { type: 'turn.stop'; request_id: string }
   | { type: 'turn.cancel'; request_id: string }
   | { type: 'turn.subscribe'; request_id: string; after_seq: number }
   | { type: 'ping'; t: number };
@@ -495,6 +567,8 @@ export type TurnEvent =
       unchanged_note?: string;
       /** ChatGPT when it cannot open PDFs: how it read each one, as the stored `meta.pdf_reading`. */
       pdf_reading?: PdfReading[];
+      /** Refine turns: the message's `meta.refine` (a review, a version and whether it was accepted, the final one). */
+      refine?: RefineMeta;
     })
   | (TurnEventBase & {
       type: 'stream.failed';
@@ -504,6 +578,30 @@ export type TurnEvent =
       usage?: Usage;
     })
   | (TurnEventBase & {
+      /**
+       * The end of a refine round (from round 1, the merge). `version`: the current version
+       * after it; `accepted`: the round wrote a new one, now the current one; `reason`: why
+       * not (Catalan). `words`: the current version's; `changes`: the new version's
+       * changelog. `proposals` and `scores` per agent: null without a review (round 1 always).
+       * `usage`: the round's calls; `total`: the turn so far.
+       */
+      type: 'refine.round';
+      round: number;
+      version: number;
+      accepted: boolean;
+      reason: string | null;
+      words: number;
+      budget_words: number;
+      changes: RefineChange[];
+      proposals: Record<Agent, number | null>;
+      scores: Record<Agent, number | null>;
+      converged: boolean;
+      usage: Usage;
+      total: Usage;
+    })
+  /** The refine turn will end after `round`, the round in course (the answer to turn.stop, once). */
+  | (TurnEventBase & { type: 'turn.stopping'; round: number })
+  | (TurnEventBase & {
       type: 'turn.completed';
       conversation_id: number;
       turn_id: number;
@@ -512,6 +610,8 @@ export type TurnEvent =
       savings: Savings;
       consensus: Consensus | null;
       cached: boolean;
+      /** Refine turns only: why it ended with its last version. */
+      stop_reason?: RefineStopReason;
     })
   | (TurnEventBase & {
       type: 'turn.failed';

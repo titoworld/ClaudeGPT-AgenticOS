@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from agentic_os import __version__
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Usage
+from agentic_os.fx import manual_rate
 from agentic_os.pricing import ModelPrice
 from agentic_os.providers.base import (
     GenerationRequest,
@@ -39,6 +40,7 @@ ORIGIN = "https://aos.example"
 COOKIE = "__Host-aos_session"
 T0 = datetime(2026, 9, 27, 12, 0, 0, tzinfo=UTC)
 Message = dict[str, Any]
+FX = manual_rate()
 
 
 class GateProvider:
@@ -810,16 +812,18 @@ def test_parse_turn_start_merges_the_models_over_the_settings() -> None:
         fast_models={"claude": None, "chatgpt": "gpt-6-luna"},
     )
     data: dict[str, object] = {"request_id": "r", "text": "Hola"}
-    request = parse_turn_start(data, runtime)
+    request = parse_turn_start(data, runtime, fx=FX)
     assert request.models == {"claude": "opus"}
     assert request.fast_models == {"chatgpt": "gpt-6-luna"}
-    request = parse_turn_start({**data, "models": {"chatgpt": " gpt-6-sol", "claude": ""}}, runtime)
+    request = parse_turn_start(
+        {**data, "models": {"chatgpt": " gpt-6-sol", "claude": ""}}, runtime, fx=FX
+    )
     assert request.models == {"claude": "opus", "chatgpt": "gpt-6-sol"}
-    request = parse_turn_start({**data, "models": None}, RuntimeSettings())
+    request = parse_turn_start({**data, "models": None}, RuntimeSettings(), fx=FX)
     assert request.models == {}
     assert request.fast_models == {}
     with pytest.raises(ProtocolError) as exc:
-        parse_turn_start({**data, "models": {"claude": "x y"}}, runtime)
+        parse_turn_start({**data, "models": {"claude": "x y"}}, runtime, fx=FX)
     assert exc.value.request_id == "r"
 
 

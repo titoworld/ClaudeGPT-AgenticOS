@@ -1,9 +1,10 @@
 """Conversation context for a turn: canonical history and compaction.
 
 The canonical history only contains final messages (the question and the solo/duel
-answers or the debate synthesis); intermediate debate messages never reach the
-context. When the context grows beyond a threshold, everything except the most
-recent messages is replaced by a summary written by a fast model.
+answers, the debate synthesis or a refine turn's last version); intermediate debate
+and refine messages never reach the context. When the context grows beyond a
+threshold, everything except the most recent messages is replaced by a summary written
+by a fast model.
 
 Attachments are sent only with the turn they belong to: in the history a question
 carries just a reference to them, from its ``meta.attachments``

@@ -289,7 +289,7 @@ async def test_stats_aggregation(store: SqliteStore, clock: FakeClock) -> None:
         "claude": {"p50_ms": 1000, "p95_ms": 3000, "ttft_p50_ms": 200},
         "chatgpt": {"p50_ms": 2000, "p95_ms": 2000, "ttft_p50_ms": None},
     }
-    assert stats["turns"] == {"solo": 1, "duel": 1, "debate": 5}
+    assert stats["turns"] == {"solo": 1, "duel": 1, "debate": 5, "refine": 0}
     assert stats["consensus"] == {"debates": 4, "reached": 1, "avg_rounds": 1.25}
     assert stats["costs"] == {
         "fx": {"eur_per_usd": 0.86, "as_of": None, "source": "manual"},
@@ -347,6 +347,38 @@ async def test_consensus_stored_by_the_engine_takes_precedence(store: SqliteStor
     )
     stats = await store.stats(1, NOW)
     assert stats["consensus"] == {"debates": 3, "reached": 2, "avg_rounds": 1.33}
+
+
+async def test_refine_turns_are_counted_and_are_not_debates(store: SqliteStore) -> None:
+    """A refine turn (docs/adr/0010-mode-perfecciona.md) counts in ``turns.refine``; its
+    final version is a synthesis, but it is no debate: it never counts for consensus."""
+    conversation_id = await store.create_conversation("Perfecciona")
+    for _ in range(2):
+        question_id = await store.add_message(
+            NewMessage(
+                conversation_id=conversation_id,
+                kind="question",
+                content="Perfecciona el pla",
+                final=True,
+                meta={"mode": "refine", "target": "claude"},
+            )
+        )
+        await store.add_message(
+            NewMessage(
+                conversation_id=conversation_id,
+                kind="synthesis",
+                content="Versió 4",
+                turn_id=question_id,
+                agent="claude",
+                round=4,
+                final=True,
+                meta={"refine": {"role": "final", "version": 4, "stop_reason": "owner"}},
+            )
+        )
+    await turn(store, conversation_id, "debate", revisions={1: (90, 90)})
+    stats = await store.stats(1, NOW)
+    assert stats["turns"] == {"solo": 0, "duel": 0, "debate": 1, "refine": 2}
+    assert stats["consensus"] == {"debates": 1, "reached": 1, "avg_rounds": 1.0}
 
 
 async def test_costs_by_mode_and_month_spend(store: SqliteStore, clock: FakeClock) -> None:
@@ -585,7 +617,7 @@ async def test_empty_stats(store: SqliteStore) -> None:
     assert stats["daily"][0]["date"] == "2026-08-29"
     assert stats["daily"][-1]["date"] == "2026-09-27"
     assert stats["latency"]["chatgpt"] == {"p50_ms": None, "p95_ms": None, "ttft_p50_ms": None}
-    assert stats["turns"] == {"solo": 0, "duel": 0, "debate": 0}
+    assert stats["turns"] == {"solo": 0, "duel": 0, "debate": 0, "refine": 0}
     assert stats["consensus"] == {"debates": 0, "reached": 0, "avg_rounds": None}
     assert stats["savings"]["cost_usd"] is None
     zero = {"api_usd": 0.0, "equivalent_usd": 0.0, "unpriced_calls": 0}

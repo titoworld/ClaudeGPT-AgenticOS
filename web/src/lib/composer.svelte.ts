@@ -4,7 +4,8 @@
 //   in this tab is theirs from then on: saved defaults (the first load, a save,
 //   settings changed elsewhere) never overwrite it (audit A11, N11). The other options
 //   always show their saved default, so new settings only change those whose default
-//   changed.
+//   changed. The mode is never «Perfecciona» (refine) unless the owner picks it: no saved
+//   default can be refine, since such a turn runs until the owner stops it (ADR 0010).
 // - The draft. A question is counted as the server counts it, and one the server would
 //   refuse is never sent; one it rejected before storing it comes back (N19).
 // - What Enter does: it sends with a fine pointer (mouse, trackpad) and makes a new line
@@ -12,7 +13,7 @@
 // - The attachments of the next question (lib/composer-attachments.svelte.ts).
 
 import { ComposerAttachments } from './composer-attachments.svelte';
-import type { Agent, Attachment, RuntimeSettings, TurnMode } from './protocol';
+import type { Agent, Attachment, RefineOptions, RuntimeSettings, TurnMode } from './protocol';
 import { DEFAULT_SETTINGS } from './settings';
 
 /**
@@ -60,6 +61,14 @@ export interface ComposerOptions {
   threshold: number;
   synthesizer: Agent;
   useCache: boolean;
+  /** The refine options (RefineOptions), one by one so that each is the owner's or the default. */
+  refineRounds: number;
+  refineBudget: number;
+  /** null: the automatic word limit. */
+  refineWords: number | null;
+  refineConverge: boolean;
+  refineThreshold: number;
+  refineEditor: Agent;
 }
 
 export type ComposerOption = keyof ComposerOptions;
@@ -73,6 +82,12 @@ export function composerDefaults(s: RuntimeSettings): ComposerOptions {
     threshold: s.debate.consensus_threshold,
     synthesizer: s.debate.synthesizer,
     useCache: s.use_cache,
+    refineRounds: s.refine.max_rounds,
+    refineBudget: s.refine.budget_eur,
+    refineWords: s.refine.max_words,
+    refineConverge: s.refine.stop_on_convergence,
+    refineThreshold: s.refine.convergence_threshold,
+    refineEditor: s.refine.editor,
   };
 }
 
@@ -150,6 +165,61 @@ export class ComposerState {
   }
   set useCache(value: boolean) {
     this.#choose('useCache', value);
+  }
+
+  get refineRounds(): number {
+    return this.#options.refineRounds;
+  }
+  set refineRounds(value: number) {
+    this.#choose('refineRounds', value);
+  }
+
+  get refineBudget(): number {
+    return this.#options.refineBudget;
+  }
+  set refineBudget(value: number) {
+    this.#choose('refineBudget', value);
+  }
+
+  get refineWords(): number | null {
+    return this.#options.refineWords;
+  }
+  set refineWords(value: number | null) {
+    this.#choose('refineWords', value);
+  }
+
+  get refineConverge(): boolean {
+    return this.#options.refineConverge;
+  }
+  set refineConverge(value: boolean) {
+    this.#choose('refineConverge', value);
+  }
+
+  get refineThreshold(): number {
+    return this.#options.refineThreshold;
+  }
+  set refineThreshold(value: number) {
+    this.#choose('refineThreshold', value);
+  }
+
+  get refineEditor(): Agent {
+    return this.#options.refineEditor;
+  }
+  set refineEditor(value: Agent) {
+    this.#choose('refineEditor', value);
+  }
+
+  /** The options of a refine turn (`options.refine` of turn.start). */
+  refineOptions(): RefineOptions {
+    const o = this.#options;
+    return {
+      max_rounds: o.refineRounds,
+      budget_eur: o.refineBudget,
+      max_words: o.refineWords,
+      stop_on_convergence: o.refineConverge,
+      convergence_threshold: o.refineThreshold,
+      editor: o.refineEditor,
+    };
   }
 
   /** Whether the owner changed `option` in this tab. */

@@ -2,7 +2,7 @@
 
 import type { Agent } from './protocol';
 import type { SceneMood } from '../scene/types';
-import { isTerminal, latestAgreement, type TurnView } from './turns.svelte';
+import { isTerminal, latestAgreement, latestRefineScore, type TurnView } from './turns.svelte';
 
 export interface SceneState {
   mood: SceneMood;
@@ -21,6 +21,10 @@ export function deriveSceneState(turn: TurnView | null | undefined): SceneState 
     active[s.agent] = true;
     if (s.text || s.critique) hasText = true;
   }
+  // A refine round («Perfecciona»): both review the document, then the editor writes it;
+  // the orbs are as close as the reviews find the document fit for the brief.
+  if (turn.phase === 'review') return { mood: 'debate', active, agreement: latestRefineScore(turn) };
+  if (turn.phase === 'edit') return { mood: 'synthesis', active, agreement: latestRefineScore(turn) };
   if (turn.phase === 'synthesis') return { mood: 'synthesis', active, agreement: latestAgreement(turn) };
   if (turn.phase === 'revision') return { mood: 'debate', active, agreement: latestAgreement(turn) };
   if (hasText) return { mood: 'speaking', active, agreement: null };

@@ -7,8 +7,8 @@
   import { placeAbove } from '../lib/popover';
   import { prefs } from '../lib/prefs.svelte';
   import { AGENTS, type TurnMode } from '../lib/protocol';
-  import { LIMITS } from '../lib/settings';
-  import { estimateTokens, formatK, MODE_LABEL } from '../lib/text';
+  import { clamp, formatAmount, LIMITS, parseAmount } from '../lib/settings';
+  import { estimateTokens, formatK, MODE_DESCRIPTION, MODE_LABEL } from '../lib/text';
   import { viewer } from '../lib/viewer.svelte';
   import AgentIcon from './AgentIcon.svelte';
   import AttachmentCard from './AttachmentCard.svelte';
@@ -17,11 +17,15 @@
 
   const uid = $props.id();
   const popoverId = `${uid}-debate-options`;
-  const MODES: TurnMode[] = ['solo', 'duel', 'debate'];
+  const refinePopoverId = `${uid}-refine-options`;
+  const MODES: TurnMode[] = ['solo', 'duel', 'debate', 'refine'];
   const MAX_HEIGHT_RATIO = 0.4;
+  /** The word limit a refine turn gets when the owner turns the automatic one off. */
+  const DEFAULT_WORDS = 1000;
 
   let textarea: HTMLTextAreaElement | undefined = $state();
   let optionsButton: HTMLButtonElement | undefined = $state();
+  let refineButton: HTMLButtonElement | undefined = $state();
   let fileInput: HTMLInputElement | undefined = $state();
   /** Drag events carrying files over the composer, minus the ones that left it. */
   let dragDepth = $state(0);
@@ -159,6 +163,49 @@
     e.preventDefault();
     tray.add(images);
   }
+
+  // ------------------------------------------------------------ refine options
+
+  /** The last word limit the owner set, for when they turn the automatic one off again. */
+  let lastWords = $state(DEFAULT_WORDS);
+  const refineSummary = $derived(
+    [
+      `com a molt ${c.refineRounds} rondes`,
+      `pressupost de ${formatAmount(c.refineBudget)} €`,
+      c.refineWords == null ? 'límit de paraules automàtic' : `límit de ${c.refineWords} paraules`,
+      `edita ${AGENT_LABEL[c.refineEditor]}`,
+      c.refineConverge ? "s'atura sol quan convergeix" : "no s'atura sol",
+    ].join(', '),
+  );
+
+  /** The budget typed (a decimal comma or point), kept within the server's range; text that is not an amount changes nothing. */
+  function setBudget(e: Event & { currentTarget: HTMLInputElement }): void {
+    const amount = parseAmount(e.currentTarget.value);
+    if (amount != null && Number.isFinite(amount)) {
+      c.refineBudget = clamp(Math.round(amount * 100) / 100, LIMITS.refine_budget_eur.min, LIMITS.refine_budget_eur.max);
+    }
+    e.currentTarget.value = formatAmount(c.refineBudget);
+  }
+
+  /** The word limit typed, kept within the server's range; text that is not a number changes nothing. */
+  function setWords(e: Event & { currentTarget: HTMLInputElement }): void {
+    const words = Number.parseInt(e.currentTarget.value, 10);
+    if (Number.isFinite(words)) {
+      lastWords = clamp(words, LIMITS.refine_words.min, LIMITS.refine_words.max);
+      c.refineWords = lastWords;
+    }
+    e.currentTarget.value = String(c.refineWords ?? lastWords);
+  }
+
+  /** The automatic limit (null), or back to the last one the owner set. */
+  function setAutomaticWords(e: Event & { currentTarget: HTMLInputElement }): void {
+    if (e.currentTarget.checked) {
+      if (c.refineWords != null) lastWords = c.refineWords;
+      c.refineWords = null;
+    } else {
+      c.refineWords = lastWords;
+    }
+  }
 </script>
 
 <svelte:window ondragover={refuseDrop} ondrop={refuseDrop} />
@@ -235,7 +282,7 @@
       <fieldset class="segmented modes">
         <legend class="sr-only">Mode</legend>
         {#each MODES as mode (mode)}
-          <label title={MODE_LABEL[mode]}>
+          <label title="{MODE_LABEL[mode]}: {MODE_DESCRIPTION[mode].charAt(0).toLowerCase()}{MODE_DESCRIPTION[mode].slice(1)}">
             <input type="radio" name="{uid}-mode" value={mode} bind:group={c.mode} />
             <Icon name="mode-{mode}" size={15} />
             <span class="mode-name">{MODE_LABEL[mode]}</span>
@@ -266,15 +313,28 @@
           <Icon name="sliders" size={15} />
           <span>{c.rounds} {c.rounds === 1 ? 'ronda' : 'rondes'} · {c.threshold}</span>
         </button>
+      {:else if c.mode === 'refine'}
+        <button
+          type="button"
+          class="btn ghost options-btn refine-options-btn"
+          popovertarget={refinePopoverId}
+          bind:this={refineButton}
+          aria-label="Opcions de Perfecciona: {refineSummary}">
+          <Icon name="sliders" size={15} />
+          <span>{c.refineRounds} rondes · {formatAmount(c.refineBudget)} €</span>
+        </button>
       {/if}
 
       <ModelMenu />
 
-      <label class="cache" title="Reutilitza respostes idèntiques anteriors sense cridar cap model">
-        <input type="checkbox" class="switch" bind:checked={c.useCache} />
-        <Icon name="cache" size={15} />
-        <span>Memòria cau</span>
-      </label>
+      {#if c.mode !== 'refine'}
+        <!-- A refine turn never uses the turn cache: each round reviews a new version. -->
+        <label class="cache" title="Reutilitza respostes idèntiques anteriors sense cridar cap model">
+          <input type="checkbox" class="switch" bind:checked={c.useCache} />
+          <Icon name="cache" size={15} />
+          <span>Memòria cau</span>
+        </label>
+      {/if}
     </div>
 
     <div class="actions">
@@ -367,6 +427,88 @@
       {/each}
     </div>
   </fieldset>
+</div>
+
+<div class="popover glass refine-options" id={refinePopoverId} popover="auto" {@attach placeAbove(() => refineButton, 340)}>
+  <h3>Opcions de Perfecciona</h3>
+  <p class="hint">{MODE_DESCRIPTION.refine} L'última versió és la resposta final.</p>
+  <label class="field">
+    <span>Rondes màximes <b>{c.refineRounds}</b></span>
+    <input
+      type="range"
+      min={LIMITS.refine_rounds.min}
+      max={LIMITS.refine_rounds.max}
+      step="1"
+      bind:value={c.refineRounds} />
+    <small class="hint">La ronda 1 fusiona les respostes; cada ronda següent revisa i escriu una versió.</small>
+  </label>
+  <label class="field">
+    <span>Pressupost (€)</span>
+    <input
+      class="input amount"
+      type="text"
+      inputmode="decimal"
+      autocomplete="off"
+      spellcheck="false"
+      value={formatAmount(c.refineBudget)}
+      onchange={setBudget} />
+    <small class="hint">
+      Entre {formatAmount(LIMITS.refine_budget_eur.min)} i {formatAmount(LIMITS.refine_budget_eur.max)} €. En mode subscripció compta el
+      valor a preus d'API.
+    </small>
+  </label>
+  <div class="field words">
+    <label class="toggle">
+      <input type="checkbox" class="switch" checked={c.refineWords == null} onchange={setAutomaticWords} />
+      <span>Límit automàtic de paraules</span>
+    </label>
+    <label class="inline">
+      <span>Límit de paraules</span>
+      <input
+        class="input"
+        type="number"
+        inputmode="numeric"
+        min={LIMITS.refine_words.min}
+        max={LIMITS.refine_words.max}
+        step="50"
+        disabled={c.refineWords == null}
+        placeholder={c.refineWords == null ? 'Automàtic' : ''}
+        value={c.refineWords ?? ''}
+        onchange={setWords} />
+    </label>
+    <small class="hint">Automàtic: 1,2 vegades les paraules de la versió 1 (300 com a mínim).</small>
+  </div>
+  <fieldset class="field">
+    <legend class="field-label">Editor</legend>
+    <div class="segmented">
+      {#each AGENTS as agent (agent)}
+        <label>
+          <input type="radio" name="{uid}-editor" value={agent} bind:group={c.refineEditor} />
+          <AgentIcon {agent} size={15} />
+          <span>{AGENT_LABEL[agent]}</span>
+        </label>
+      {/each}
+    </div>
+    <small class="hint">Fusiona les respostes i escriu cada versió.</small>
+  </fieldset>
+  <label class="toggle">
+    <input type="checkbox" class="switch" bind:checked={c.refineConverge} />
+    <span>S'atura sol quan convergeix</span>
+  </label>
+  {#if c.refineConverge}
+    <label class="field">
+      <span>Llindar de convergència <b>{c.refineThreshold}</b></span>
+      <input
+        type="range"
+        min={LIMITS.refine_threshold.min}
+        max={LIMITS.refine_threshold.max}
+        step="1"
+        bind:value={c.refineThreshold} />
+      <small class="hint">Quan tots dos li donen aquesta puntuació o més, sense cap defecte, dues rondes seguides.</small>
+    </label>
+  {:else}
+    <small class="hint">Només s'atura quan l'aturis, quan cap dels dos hi troba res a canviar o en arribar a un límit.</small>
+  {/if}
 </div>
 
 <style>
@@ -699,6 +841,49 @@
   .popover fieldset {
     border: none;
     padding: 0;
+  }
+
+  /* More options than the debate's: it scrolls when the screen is short. */
+  .popover.refine-options {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .refine-options .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .refine-options .words {
+    gap: 0.45rem;
+  }
+
+  .refine-options .inline {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .refine-options .inline .input {
+    width: 7.5rem;
+    min-height: 2.1rem;
+    padding: 0.3rem 0.55rem;
+  }
+
+  .refine-options .input:disabled {
+    opacity: 0.5;
+  }
+
+  .refine-options .amount {
+    width: 7.5rem;
+    min-height: 2.1rem;
+    padding: 0.3rem 0.55rem;
   }
 
   /* The idle "Enter per enviar" hint gives way to the controls first. */

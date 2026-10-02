@@ -19,6 +19,9 @@ import type {
   PdfNotes,
   PdfReading,
   Phase,
+  RefineChange,
+  RefineOptions,
+  RefineStopReason,
   Savings,
   TurnEvent,
   TurnFailure,
@@ -26,12 +29,60 @@ import type {
   TurnOptions,
   Usage,
 } from './protocol';
+import { DEFAULT_SETTINGS } from './settings';
 
 export type StreamKind = Exclude<MessageKind, 'question'>;
 export type StreamStatus = 'streaming' | 'done' | 'failed' | 'interrupted';
 export type TurnStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 /** "api": real API cost; "equivalent": subscription call valued at API prices. */
 export type CostBasis = 'api' | 'equivalent';
+
+/**
+ * What a call of a refine turn is (docs/adr/0010-mode-perfecciona.md): a first answer, a
+ * review of the current version, a version of the editor (the merge of round 1, a later
+ * edit or its shortening) or the final version (the current one, stored without a call).
+ */
+export type RefineRole = 'answer' | 'review' | 'version' | 'final';
+
+/** A refine message's `meta.refine` (its stream.completed brings it live), as the view reads it. */
+export type RefineInfo =
+  | { role: 'review'; score: number | null; unchanged: boolean; changes: RefineChange[] }
+  | {
+      role: 'version';
+      version: number;
+      words: number | null;
+      budgetWords: number | null;
+      /** It became the current version. */
+      accepted: boolean;
+      /** Why it did not (Catalan). */
+      reason: string | null;
+      changelog: RefineChange[];
+      /** Version 1 stored without a call, copying this answer (nobody could merge). */
+      copiedFrom: number | null;
+    }
+  | { role: 'final'; version: number; words: number | null; budgetWords: number | null; stopReason: RefineStopReason | null };
+
+/**
+ * The end of a refine round, as `refine.round` says it (a stored turn rebuilds it from its
+ * messages). `version`: the current version after the round; `accepted`: the round wrote
+ * a new one; `proposals` and `scores`: null for an agent without a review.
+ */
+export interface RefineRoundView {
+  round: number;
+  version: number;
+  accepted: boolean;
+  reason: string | null;
+  words: number;
+  budgetWords: number;
+  changes: RefineChange[];
+  proposals: Record<Agent, number | null>;
+  scores: Record<Agent, number | null>;
+  converged: boolean;
+  /** What the round's calls billed (null when nothing says). */
+  usage: Usage | null;
+  /** What the turn had billed by its end. */
+  total: Usage | null;
+}
 
 export interface StreamView {
   id: string;
@@ -67,6 +118,10 @@ export interface StreamView {
    * the question (live event or stored message); empty otherwise.
    */
   pdfReading: PdfReading[];
+  /** Refine turns: what the call is (live, from the phase it started in until its meta says); null in other modes. */
+  refineRole: RefineRole | null;
+  /** Refine turns: the message's `meta.refine` (live, from its stream.completed); null until then and in other modes. */
+  refine: RefineInfo | null;
 }
 
 /**
@@ -136,6 +191,14 @@ export interface TurnView {
   compacted: boolean;
   /** True when built from WebSocket events in this session. */
   live: boolean;
+  /** Refine turns: the end of every round so far, in order (`refine.round`, or rebuilt from the stored messages). */
+  refineRounds: RefineRoundView[];
+  /** Refine turns: why it ended with its last version (turn.completed, the final message, or the outcome). */
+  stopReason: RefineStopReason | null;
+  /** Refine turns: the round after which it stops, as `turn.stopping` said (the owner's turn.stop). */
+  stoppingRound: number | null;
+  /** This tab sent turn.stop and the server has not answered turn.stopping yet. */
+  stopRequested: boolean;
 }
 
 export const DEFAULT_CONSENSUS_THRESHOLD = 85;
@@ -200,6 +263,10 @@ export function createLiveTurn(input: NewTurnInput): TurnView {
     finalMessageIds: [],
     compacted: false,
     live: true,
+    refineRounds: [],
+    stopReason: null,
+    stoppingRound: null,
+    stopRequested: false,
   };
 }
 
@@ -227,7 +294,20 @@ function newStream(id: string, agent: Agent, kind: StreamKind, round: number, mo
     unchangedNote: null,
     degraded: false,
     pdfReading: [],
+    refineRole: null,
+    refine: null,
   };
+}
+
+/**
+ * What a call of a live refine turn is, before its meta says: the first answers and the
+ * final version have their own kind, and a revision is a review or a version by the part
+ * of the round it started in (the phase event comes first).
+ */
+function liveRefineRole(kind: StreamKind, phase: Phase | null): RefineRole | null {
+  if (kind === 'answer') return 'answer';
+  if (kind === 'synthesis') return 'final';
+  return phase === 'review' ? 'review' : phase === 'edit' ? 'version' : null;
 }
 
 export const isTerminal = (status: TurnStatus): boolean =>
@@ -288,7 +368,9 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
     case 'stream.started': {
       if (turn.status === 'pending') turn.status = 'running';
       if (turn.streams.some((s) => s.id === ev.stream_id)) break;
-      turn.streams.push(newStream(ev.stream_id, ev.agent, ev.kind, ev.round, ev.model));
+      const stream = newStream(ev.stream_id, ev.agent, ev.kind, ev.round, ev.model);
+      if (turn.mode === 'refine') stream.refineRole = liveRefineRole(ev.kind, turn.phase);
+      turn.streams.push(stream);
       break;
     }
     case 'stream.delta': {
@@ -312,8 +394,23 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       s.finishReason = asText(ev.finish_reason);
       s.unchangedNote = s.unchanged ? asText(ev.unchanged_note) : null;
       s.pdfReading = asPdfReadings(ev.pdf_reading);
+      s.refine = asRefineInfo(ev.refine);
+      if (s.refine) s.refineRole = s.refine.role;
+      // The final version says why the turn ended (a cancelled one's event does not).
+      if (s.refine?.role === 'final') turn.stopReason ??= s.refine.stopReason;
       break;
     }
+    case 'refine.round': {
+      const round = asRoundView(ev);
+      const known = turn.refineRounds.findIndex((r) => r.round === round.round);
+      if (known >= 0) turn.refineRounds[known] = round;
+      else turn.refineRounds.push(round);
+      break;
+    }
+    case 'turn.stopping':
+      turn.stoppingRound = asNumber(ev.round) ?? turn.round;
+      turn.stopRequested = false;
+      break;
     case 'stream.failed': {
       const s = turn.streams.find((x) => x.id === ev.stream_id);
       if (!s) break;
@@ -332,6 +429,8 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       turn.savings = ev.savings;
       turn.consensus = ev.consensus;
       turn.cached = ev.cached;
+      turn.stopReason = asStopReason(ev.stop_reason) ?? turn.stopReason;
+      turn.stopRequested = false;
       stopOpenStreams(turn, 'done');
       stopOpenChecks(turn);
       if (ev.cached) for (const s of turn.streams) s.cached = true;
@@ -341,12 +440,14 @@ export function applyTurnEvent(turn: TurnView, ev: TurnEvent): boolean {
       turn.error = ev.error;
       // A turn that fails or is cancelled may have billed calls too: its total (N10).
       turn.usage = ev.usage ?? turn.usage;
+      turn.stopRequested = false;
       stopOpenStreams(turn, 'interrupted');
       stopOpenChecks(turn);
       break;
     case 'turn.cancelled':
       turn.status = 'cancelled';
       turn.usage = ev.usage ?? turn.usage;
+      turn.stopRequested = false;
       stopOpenStreams(turn, 'interrupted');
       stopOpenChecks(turn);
       break;
@@ -486,6 +587,22 @@ export function keptAnswers(turn: TurnView): Map<string, StreamView | null> {
   return kept;
 }
 
+/**
+ * How fit for the brief the latest reviews of a refine turn find the document: the
+ * average score of the latest round whose reviews gave any (null before the first).
+ */
+export function latestRefineScore(turn: TurnView): number | null {
+  let round = -1;
+  let scores: number[] = [];
+  for (const s of turn.streams) {
+    const score = s.refine?.role === 'review' ? s.refine.score : null;
+    if (score == null || s.round < round) continue;
+    if (s.round > round) [round, scores] = [s.round, []];
+    scores.push(score);
+  }
+  return scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+}
+
 /** Average agreement of the latest revision round that reported any (null if none). */
 export function latestAgreement(turn: TurnView): number | null {
   const rounds = revisionRounds(turn);
@@ -562,6 +679,89 @@ function asOptions(v: unknown): TurnOptions | null {
       synthesizer,
     },
     use_cache: v.use_cache !== false,
+  };
+}
+
+const asCount = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+
+const asScore = (v: unknown): number | null => {
+  const n = asCount(v);
+  return n != null && n <= 100 ? n : null;
+};
+
+const STOP_REASONS: readonly RefineStopReason[] = ['owner', 'converged', 'unchanged', 'max_rounds', 'budget', 'failed'];
+
+const asStopReason = (v: unknown): RefineStopReason | null =>
+  STOP_REASONS.find((reason) => reason === v) ?? null;
+
+/** The changes of a review or a version; entries without a kind or a text are left out. */
+const asChanges = (v: unknown): RefineChange[] =>
+  Array.isArray(v)
+    ? v.filter(isRecord).flatMap((c) =>
+        typeof c.kind === 'string' && typeof c.text === 'string' && c.text.trim() ? [{ kind: c.kind, text: c.text }] : [],
+      )
+    : [];
+
+/** A refine message's `meta.refine`, or null when it is not one. */
+function asRefineInfo(v: unknown): RefineInfo | null {
+  if (!isRecord(v)) return null;
+  if (v.role === 'review') {
+    return { role: 'review', score: asScore(v.score), unchanged: v.unchanged === true, changes: asChanges(v.changes) };
+  }
+  const version = asCount(v.version);
+  if (version == null) return null;
+  const words = asCount(v.words);
+  const budgetWords = asCount(v.budget_words);
+  if (v.role === 'version') {
+    return {
+      role: 'version',
+      version,
+      words,
+      budgetWords,
+      accepted: v.accepted === true,
+      reason: asText(v.reason),
+      changelog: asChanges(v.changelog),
+      copiedFrom: asCount(v.copied_from),
+    };
+  }
+  if (v.role === 'final') return { role: 'final', version, words, budgetWords, stopReason: asStopReason(v.stop_reason) };
+  return null;
+}
+
+/** A refine turn's options (the question's `meta.refine`), the missing ones as the defaults. */
+function asRefineOptions(v: unknown): RefineOptions | null {
+  if (!isRecord(v)) return null;
+  const d = DEFAULT_SETTINGS.refine;
+  return {
+    max_rounds: asCount(v.max_rounds) ?? d.max_rounds,
+    budget_eur: asNumber(v.budget_eur) ?? d.budget_eur,
+    max_words: asCount(v.max_words),
+    stop_on_convergence: typeof v.stop_on_convergence === 'boolean' ? v.stop_on_convergence : d.stop_on_convergence,
+    convergence_threshold: asScore(v.convergence_threshold) ?? d.convergence_threshold,
+    editor: v.editor === 'chatgpt' ? 'chatgpt' : v.editor === 'claude' ? 'claude' : d.editor,
+  };
+}
+
+const perAgent = (v: unknown, read: (x: unknown) => number | null): Record<Agent, number | null> => ({
+  claude: isRecord(v) ? read(v.claude) : null,
+  chatgpt: isRecord(v) ? read(v.chatgpt) : null,
+});
+
+function asRoundView(ev: Extract<TurnEvent, { type: 'refine.round' }>): RefineRoundView {
+  return {
+    round: asCount(ev.round) ?? 0,
+    version: asCount(ev.version) ?? 0,
+    accepted: ev.accepted === true,
+    reason: asText(ev.reason),
+    words: asCount(ev.words) ?? 0,
+    budgetWords: asCount(ev.budget_words) ?? 0,
+    changes: asChanges(ev.changes),
+    proposals: perAgent(ev.proposals, asCount),
+    scores: perAgent(ev.scores, asScore),
+    converged: ev.converged === true,
+    usage: asUsage(ev.usage),
+    total: asUsage(ev.total),
   };
 }
 
@@ -652,12 +852,12 @@ const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: 'Aquest t
 
 /**
  * Whether stored messages hold a finished turn, for turns stored without an outcome:
- * every finished debate stores a synthesis (real, degraded or replayed from the cache);
- * solo and duel turns store their answers.
+ * every finished debate stores a synthesis (real, degraded or replayed from the cache),
+ * and every refine turn its final version; solo and duel turns store their answers.
  */
 function storedTurnFinished(mode: TurnMode, streams: StreamView[]): boolean {
   if (!streams.length) return false;
-  return mode !== 'debate' || streams.some((s) => s.kind === 'synthesis');
+  return (mode !== 'debate' && mode !== 'refine') || streams.some((s) => s.kind === 'synthesis');
 }
 
 /** How a stored turn ended (`question.meta.outcome`, ADR 0007), as the view uses it. */
@@ -671,6 +871,7 @@ interface StoredOutcome {
   consensus: Consensus | null;
   finalMessageIds: number[] | null;
   cached: boolean;
+  stopReason: RefineStopReason | null;
 }
 
 function outcomeStatus(v: unknown): StoredOutcome['status'] | null {
@@ -717,6 +918,7 @@ function asOutcome(v: unknown): StoredOutcome | null {
     consensus: asConsensus(v.consensus),
     finalMessageIds: ids?.filter((id): id is number => id != null) ?? null,
     cached: v.cached === true,
+    stopReason: asStopReason(v.stop_reason),
   };
 }
 
@@ -757,6 +959,233 @@ function withFailures(streams: StreamView[], failures: TurnFailure[], mode: Turn
     .map(({ s }) => s);
 }
 
+/** Where a call of a refine round goes: its reviews, then the versions, then the final one. */
+const REFINE_ORDER: Record<RefineRole, number> = { answer: 0, review: 1, version: 2, final: 3 };
+
+/**
+ * The calls of a stored refine turn in the order they ran, with those that failed
+ * (`outcome.failures`, which stored no message) where they failed: a failure in round 0
+ * was a first answer, in round 1 a merge, and in a later round a review, unless the
+ * agent's review of that round is there (stored or failed before): then it was an edit.
+ *
+ * A round's parallel calls (the answers, the reviews) started Claude's first; its editor
+ * calls ran editor after editor (orchestrator/engine.py `_editors`): the turn's `editor`
+ * first, unless its merge or edit had failed in an earlier round and the other's had not;
+ * each editor's version, then its shortening, or its call that failed; and a version 1
+ * copied without a call came after them all.
+ */
+function withRefineFailures(streams: StreamView[], failures: TurnFailure[], editor: Agent): StreamView[] {
+  const reviewed = new Set(streams.filter((s) => s.refineRole === 'review').map((s) => `${s.agent} ${s.round}`));
+  const failed: StreamView[] = [];
+  failures.forEach((f, i) => {
+    if (f.round === 0 && streams.some((s) => s.agent === f.agent && s.kind === 'answer')) return; // retried: its answer counts
+    const call = `${f.agent} ${f.round}`;
+    const role: RefineRole = f.round === 0 ? 'answer' : f.round === 1 || reviewed.has(call) ? 'version' : 'review';
+    if (role === 'review') reviewed.add(call);
+    const s = newStream(`f${i}`, f.agent, role === 'answer' ? 'answer' : 'revision', f.round, '');
+    s.status = 'failed';
+    s.error = { kind: f.kind, message: f.message };
+    s.refineRole = role;
+    failed.push(s);
+  });
+  // The editors of each round, in the order they wrote: those whose edit failed before go last.
+  const editors = new Map<number, Agent[]>();
+  const failedBefore = new Set<Agent>();
+  for (const round of [...new Set(failed.map((s) => s.round))].sort((a, b) => a - b)) {
+    const order = [editor, ...AGENTS.filter((a) => a !== editor)];
+    editors.set(round, [...order.filter((a) => !failedBefore.has(a)), ...order.filter((a) => failedBefore.has(a))]);
+    for (const s of failed) if (s.round === round && s.refineRole === 'version') failedBefore.add(s.agent);
+  }
+  const editorRank = (s: StreamView): number => {
+    if (s.refine?.role === 'version' && s.refine.copiedFrom != null) return AGENTS.length * 2; // a copy, last
+    const order = editors.get(s.round) ?? [editor, ...AGENTS.filter((a) => a !== editor)];
+    return order.indexOf(s.agent) * 2 + (s.status === 'failed' ? 1 : 0);
+  };
+  const order = (s: StreamView) => REFINE_ORDER[s.refineRole ?? 'version'];
+  return [...streams, ...failed]
+    .map((s, i) => ({ s, i }))
+    .sort(
+      (a, b) =>
+        a.s.round - b.s.round ||
+        order(a.s) - order(b.s) ||
+        (a.s.refineRole === 'version'
+          ? editorRank(a.s) - editorRank(b.s)
+          : AGENTS.indexOf(a.s.agent) - AGENTS.indexOf(b.s.agent)) ||
+        a.i - b.i,
+    )
+    .map(({ s }) => s);
+}
+
+/**
+ * Why a round wrote no version, as `refine.round` says it (orchestrator/engine.py
+ * REFINE_*): a reload rebuilds the rounds with them (docs/PROTOCOL.md lists them).
+ */
+export const REFINE_ROUND_REASONS = {
+  unchanged: 'Cap dels dos hi ha trobat res a canviar.',
+  failed: 'Els models han fallat i la ronda no ha escrit cap versió.',
+  overBudget: 'La nova versió passava del límit de paraules.',
+} as const;
+
+const plus = (a: Usage | null, b: Usage | null): Usage | null => (a && b ? addUsage(a, b) : (a ?? b));
+
+/** Less than this is a rounding error of costs summed and subtracted, never a call (USD). */
+const ROUNDING_USD = 1e-9;
+
+/** What `a` has more than `b`, field by field (never below zero); null when that is nothing. */
+function minusUsage(a: Usage, b: Usage | null): Usage | null {
+  const left = (x: number, y: number | undefined) => Math.max(0, x - (y ?? 0));
+  const rest: Usage = {
+    input_tokens: left(a.input_tokens, b?.input_tokens),
+    output_tokens: left(a.output_tokens, b?.output_tokens),
+    cache_read_tokens: left(a.cache_read_tokens, b?.cache_read_tokens),
+    cache_write_tokens: left(a.cache_write_tokens, b?.cache_write_tokens),
+    reasoning_tokens: left(a.reasoning_tokens, b?.reasoning_tokens),
+    cost_usd: a.cost_usd == null ? null : left(a.cost_usd, b?.cost_usd ?? 0),
+  };
+  const tokens = rest.input_tokens + rest.output_tokens + rest.cache_read_tokens + rest.cache_write_tokens + rest.reasoning_tokens;
+  return tokens > 0 || (rest.cost_usd ?? 0) > ROUNDING_USD ? rest : null;
+}
+
+/** The billed attempts other models declined before a call was served (`meta.declined`), summed. */
+const asDeclined = (v: unknown): Usage | null =>
+  Array.isArray(v) ? v.filter(isRecord).reduce<Usage | null>((sum, a) => plus(sum, asUsage(a.usage)), null) : null;
+
+/** What a stored refine turn says of its calls, for `storedRefineRounds`. */
+interface StoredRefineCalls {
+  /** Its calls in the order they ran, those that failed included. */
+  calls: StreamView[];
+  /** The attempts other models declined before a call was served, by its stream id. */
+  declined: Map<string, Usage>;
+  compaction: Usage | null;
+  /** `unstored_usage` of its final message: the billed calls that stored no message. */
+  unstored: Usage | null;
+  outcome: StoredOutcome | null;
+  completed: boolean;
+  stopReason: RefineStopReason | null;
+}
+
+/**
+ * What each round of a stored refine turn billed besides its stored calls: what the turn's
+ * total (`outcome.usage`) has that no message says. Its failed calls billed what its final
+ * message's `unstored_usage` has besides the attempts declined (their messages say those);
+ * the rest (Claude's check of a PDF for ChatGPT) came before round 1. Without a final
+ * message, all of it goes to the failures. The outcome does not say what each failure
+ * billed: when they failed in more than one round, the last of them gets it all, so the
+ * totals from it on are exact, and those before it at most what they were.
+ */
+function unattributed(input: StoredRefineCalls, known: Usage | null): Map<number, Usage> {
+  const extra = new Map<number, Usage>();
+  const add = (round: number, usage: Usage | null) => {
+    const sum = plus(extra.get(round) ?? null, usage);
+    if (sum) extra.set(round, sum);
+  };
+  const total = input.outcome?.usage;
+  const rest = total ? minusUsage(total, known) : null;
+  if (!rest) return extra;
+  const rounds = input.outcome?.failures.map((f) => f.round) ?? [];
+  let failed: Usage | null = null;
+  if (rounds.length) {
+    if (!input.calls.some((s) => s.refineRole === 'final')) failed = rest;
+    else if (input.unstored) {
+      const declined = [...input.declined.values()].reduce<Usage | null>(plus, null);
+      failed = minusUsage(input.unstored, declined);
+      if (failed && (failed.cost_usd ?? 0) > (rest.cost_usd ?? 0) + ROUNDING_USD) failed = rest;
+    }
+  }
+  add(0, failed ? minusUsage(rest, failed) : rest);
+  if (failed) add(Math.max(...rounds), failed);
+  return extra;
+}
+
+/**
+ * Whether the last round of a refine turn that did not complete had ended when it stopped,
+ * by the engine's rules: round 1 ends with version 1 (merged or copied); a later round with
+ * an accepted version, or a version not accepted (over the word limit: once shortened, or
+ * once its shortening failed), or, without any, once every agent's review is there (stored
+ * or failed) and nobody proposed a change, or no review came back, or every edit failed.
+ */
+function roundEnded(round: number, own: StreamView[], active: readonly Agent[]): boolean {
+  const versions = own.filter((s) => s.refineRole === 'version' && s.status === 'done');
+  const meta = (s: StreamView) => (s.refine?.role === 'version' ? s.refine : null);
+  if (versions.some((s) => meta(s)?.accepted)) return true;
+  if (round <= 1) return false;
+  const editFailed = new Set(own.filter((s) => s.refineRole === 'version' && s.status === 'failed').map((s) => s.agent));
+  const last = versions.at(-1);
+  if (last) {
+    const shortened = versions.filter((s) => s.agent === last.agent).length > 1;
+    return meta(last)?.reason !== REFINE_ROUND_REASONS.overBudget || shortened || editFailed.has(last.agent);
+  }
+  const reviews = own.filter((s) => s.refineRole === 'review');
+  if (!active.every((agent) => reviews.some((s) => s.agent === agent))) return false;
+  const proposals = reviews.flatMap((s) => (s.status === 'done' && s.refine?.role === 'review' ? [s.refine] : []));
+  return !proposals.length || proposals.every((r) => r.unchanged) || active.every((agent) => editFailed.has(agent));
+}
+
+/**
+ * The end of every round of a stored refine turn, as its `refine.round` said it live,
+ * rebuilt from the messages: a round's current version is its last accepted one (else the
+ * one before), its changes that version's changelog, and its usage what its calls billed
+ * (the attempts declined before them included, and what the turn's total has that no
+ * message says: `unattributed`) on top of the calls before round 1 (compaction included).
+ * A round without a version ended when nobody found anything to change, or when the models
+ * failed; in a turn that did not complete, the last round may never have ended
+ * (`roundEnded`).
+ */
+function storedRefineRounds(input: StoredRefineCalls): RefineRoundView[] {
+  const { calls, completed, stopReason } = input;
+  const billedOf = (s: StreamView) => plus(s.usage, input.declined.get(s.id) ?? null);
+  const byRound = new Map<number, Usage | null>([[0, input.compaction]]);
+  for (const s of calls) byRound.set(s.round, plus(byRound.get(s.round) ?? null, billedOf(s)));
+  const extra = unattributed(input, [...byRound.values()].reduce<Usage | null>(plus, null));
+  const billed = (round: number) => plus(byRound.get(round) ?? null, extra.get(round) ?? null);
+
+  const active = AGENTS.filter((agent) => calls.some((s) => s.round === 0 && s.agent === agent && s.refineRole === 'answer' && s.status === 'done'));
+  const inRounds = calls.filter((s) => s.round >= 1 && (s.refineRole === 'review' || s.refineRole === 'version'));
+  const numbers = [...new Set(inRounds.map((s) => s.round))].sort((a, b) => a - b);
+  const rounds: RefineRoundView[] = [];
+  let current: Extract<RefineInfo, { role: 'version' }> | null = null;
+  let budget = 0;
+  let total = billed(0);
+  numbers.forEach((round, i) => {
+    const own = inRounds.filter((s) => s.round === round);
+    const reviews = new Map<Agent, Extract<RefineInfo, { role: 'review' }>>();
+    for (const s of own) if (s.refine?.role === 'review') reviews.set(s.agent, s.refine);
+    const versions = own.flatMap((s) => (s.refine?.role === 'version' ? [s.refine] : []));
+    const last = versions.at(-1) ?? null;
+    const unchanged = !last && reviews.size > 0 && [...reviews.values()].every((r) => r.unchanged);
+    const later = i < numbers.length - 1;
+    if (!later && !completed && !roundEnded(round, own, active)) return; // it never ended
+    if (last?.accepted) current = last;
+    budget = last?.budgetWords ?? current?.budgetWords ?? budget;
+    // As the engine reckons it: the turn's running total after the round, less the one before.
+    const spent = billed(round) ?? emptyUsage();
+    const usage = spent.cost_usd == null && total?.cost_usd != null ? { ...spent, cost_usd: 0 } : spent;
+    total = plus(total, usage);
+    const review = (agent: Agent) => reviews.get(agent);
+    rounds.push({
+      round,
+      version: current?.version ?? 0,
+      accepted: last?.accepted === true,
+      reason: last
+        ? last.accepted
+          ? null
+          : last.reason
+        : unchanged
+          ? REFINE_ROUND_REASONS.unchanged
+          : REFINE_ROUND_REASONS.failed,
+      words: current?.words ?? 0,
+      budgetWords: budget,
+      changes: last?.accepted ? last.changelog : [],
+      proposals: { claude: review('claude')?.changes.length ?? null, chatgpt: review('chatgpt')?.changes.length ?? null },
+      scores: { claude: review('claude')?.score ?? null, chatgpt: review('chatgpt')?.score ?? null },
+      converged: !later && stopReason === 'converged',
+      usage,
+      total,
+    });
+  });
+  return rounds;
+}
+
 /**
  * Map stored messages (oldest first) into turns.
  *
@@ -785,12 +1214,15 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
   for (const [turnId, group] of groups) {
     const question = group.find((m) => m.kind === 'question');
     const qmeta = question?.meta ?? {};
+    const declared = qmeta.mode;
     const streams: StreamView[] = [];
     let savings: Savings | null = null;
     let consensus: Consensus | null = null;
     let usage: Usage | null = null;
     let unstored: Usage | null = null;
     let unstoredId = -Infinity;
+    /** Refine turns: the attempts other models declined before each call was served, by stream id. */
+    const declined = new Map<string, Usage>();
 
     for (const m of group) {
       if (m.kind === 'question' || !m.agent) continue;
@@ -815,6 +1247,13 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       s.unchangedNote = s.unchanged ? asText(meta.unchanged_note) : null;
       s.degraded = meta.degraded === true;
       s.pdfReading = asPdfReadings(meta.pdf_reading);
+      if (declared === 'refine') {
+        s.refine = asRefineInfo(meta.refine);
+        s.refineRole =
+          s.refine?.role ?? (m.kind === 'answer' ? 'answer' : m.kind === 'synthesis' ? 'final' : m.round === 1 ? 'version' : null);
+        const attempts = asDeclined(meta.declined);
+        if (attempts) declined.set(s.id, attempts);
+      }
       streams.push(s);
       savings = asSavings(meta.savings) ?? savings;
       consensus = asConsensus(meta.consensus) ?? consensus;
@@ -829,16 +1268,32 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
     }
 
     const mode: TurnMode =
-      qmeta.mode === 'solo' || qmeta.mode === 'duel' || qmeta.mode === 'debate' ? qmeta.mode : inferMode(streams);
+      declared === 'solo' || declared === 'duel' || declared === 'debate' || declared === 'refine'
+        ? declared
+        : inferMode(streams);
     const target: Agent | null = qmeta.target === 'claude' || qmeta.target === 'chatgpt' ? qmeta.target : null;
     // How the turn ended, as its live terminal event said (ADR 0007). Null: it never ended.
     const ended = asOutcome(qmeta.outcome);
-    const calls = ended ? withFailures(streams, ended.failures, mode) : streams;
+    let options = asOptions(qmeta.options);
+    // A refine turn's options are the question's meta.refine (so a reloaded turn shows its limits).
+    const refine =
+      mode === 'refine' ? asRefineOptions(qmeta.refine ?? (isRecord(qmeta.options) ? qmeta.options.refine : undefined)) : null;
+    if (refine) options = { ...(options ?? { debate: { ...DEFAULT_SETTINGS.debate }, use_cache: true }), refine };
+    const calls =
+      mode === 'refine'
+        ? withRefineFailures(streams, ended?.failures ?? [], options?.refine?.editor ?? DEFAULT_SETTINGS.refine.editor)
+        : ended
+          ? withFailures(streams, ended.failures, mode)
+          : streams;
     const last = calls.at(-1);
     let status: TurnStatus = 'done';
     let error: ErrorInfo | null = null;
     if (ended) [status, error] = [ended.status, ended.error];
     else if (qmeta.outcome === null || !storedTurnFinished(mode, streams)) [status, error] = ['failed', incomplete()];
+
+    const finalVersion = streams.find((s) => s.refine?.role === 'final')?.refine;
+    const stopReason =
+      mode === 'refine' ? (ended?.stopReason ?? (finalVersion?.role === 'final' ? finalVersion.stopReason : null)) : null;
 
     const turn: TurnView = {
       key: `t${turnId}`,
@@ -847,7 +1302,7 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       turnId,
       mode,
       target,
-      options: asOptions(qmeta.options),
+      options,
       question: question?.content ?? '',
       attachments: asAttachments(qmeta.attachments),
       pdfChecks: [],
@@ -866,6 +1321,13 @@ export function turnsFromMessages(messages: Message[], conversationId: number | 
       finalMessageIds: ended?.finalMessageIds ?? group.filter((m) => m.final && m.kind !== 'question').map((m) => m.id),
       compacted: compaction != null,
       live: false,
+      refineRounds:
+        mode === 'refine'
+          ? storedRefineRounds({ calls, declined, compaction, unstored, outcome: ended, completed: status === 'done', stopReason })
+          : [],
+      stopReason,
+      stoppingRound: null,
+      stopRequested: false,
     };
     // A turn that ended has the consensus it had live (none, unless it completed a debate).
     if (mode === 'debate' && !turn.consensus && !ended) turn.consensus = deriveConsensus(turn);

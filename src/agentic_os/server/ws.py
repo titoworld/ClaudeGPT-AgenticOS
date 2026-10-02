@@ -19,6 +19,10 @@ session ended (logout, ``agentic-os reset-sessions``, expiry) is closed with
 actions (:data:`ACTIVITY_MESSAGES`) refresh the idle timeout; the handshake, pings,
 resubscriptions and the periodic check are read-only, so a tab left open (and
 reconnecting) never keeps an idle session alive.
+
+A refine turn (docs/adr/0010-mode-perfecciona.md) has its budget in euros; the engine
+counts in dollars, so ``turn.start`` converts it at the rate the app shows euros with,
+and ``turn.stop`` asks the turn to end after the round in course.
 """
 
 import asyncio
@@ -34,7 +38,8 @@ from starlette.websockets import WebSocketState
 
 from agentic_os import __version__
 from agentic_os.attachments import MAX_ATTACHMENTS
-from agentic_os.domain import AGENTS, AgentName, TurnMode, TurnOptions
+from agentic_os.domain import AGENTS, AgentName, RefineOptions, TurnMode, TurnOptions
+from agentic_os.fx import FxRate
 from agentic_os.orchestrator.events import Wire
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.security.sessions import hash_token
@@ -42,8 +47,8 @@ from agentic_os.server.deps import MAX_SQLITE_ID, AppState, app_state, has_inval
 from agentic_os.server.middleware import origin_allowed
 from agentic_os.server.status import status_to_wire
 from agentic_os.server.tasks import cancel_and_wait
-from agentic_os.server.turns import TurnRejectedError, dumps
-from agentic_os.storage import RuntimeSettings
+from agentic_os.server.turns import TurnNotStoppableError, TurnRejectedError, dumps
+from agentic_os.storage import RuntimeSettings, effective_fx
 from agentic_os.storage.models import TURN_MODES, optional_model_id
 
 logger = logging.getLogger(__name__)
@@ -66,7 +71,7 @@ can still be recovered (after a 1013 the client resumes from what it got)."""
 SESSION_CHECK_SECONDS: Final = 30.0
 """How often an open socket re-checks its session (read-only)."""
 MAX_REQUEST_ID_LENGTH: Final = 128
-ACTIVITY_MESSAGES: Final = frozenset({"turn.start", "turn.cancel"})
+ACTIVITY_MESSAGES: Final = frozenset({"turn.start", "turn.stop", "turn.cancel"})
 """Messages that are the owner's activity (they refresh the session's idle timeout).
 The others check the session read-only: ``ping`` and ``turn.subscribe`` are sent by
 the client by itself (heartbeats, resubscriptions after a reconnection)."""
@@ -123,18 +128,20 @@ def valid_request_id(data: Mapping[str, object]) -> str | None:
 
 def turn_options(options: object, runtime: RuntimeSettings) -> TurnOptions:
     """Client ``options`` over the owner's runtime settings (missing keys, or no
-    options at all, take the runtime values); validated like the settings."""
+    options at all, take the runtime values; ``debate`` and ``refine`` may be partial);
+    validated like the settings."""
     if options is None:
         return runtime.to_turn_options()
     if not isinstance(options, dict):
         raise ProtocolError("«options» ha de ser un objecte.")
-    debate = options.get("debate")
-    if debate is not None and not isinstance(debate, dict):
-        raise ProtocolError("«options.debate» ha de ser un objecte.")
     merged = runtime.to_wire()
-    base_debate = merged["debate"]
-    if debate and isinstance(base_debate, dict):
-        merged["debate"] = {**base_debate, **debate}
+    for name in ("debate", "refine"):
+        given = options.get(name)
+        if given is not None and not isinstance(given, dict):
+            raise ProtocolError(f"«options.{name}» ha de ser un objecte.")
+        base = merged[name]
+        if given and isinstance(base, dict):
+            merged[name] = {**base, **given}
     if "use_cache" in options:
         merged["use_cache"] = options["use_cache"]
     try:
@@ -184,11 +191,21 @@ def turn_attachments(value: object) -> tuple[int, ...]:
     return tuple(ids)
 
 
-def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> TurnRequest:
+def refine_budget_usd(options: RefineOptions, fx: FxRate) -> float:
+    """A refine turn's budget in dollars, which the engine counts in: its euros at
+    ``fx``, the rate the app shows euros with, so the turn stops when what the owner
+    sees it spend reaches the budget."""
+    return options.budget_eur / fx.eur_per_usd
+
+
+def parse_turn_start(
+    data: Mapping[str, object], runtime: RuntimeSettings, *, fx: FxRate
+) -> TurnRequest:
     """A ``turn.start`` message as a :class:`TurnRequest`; ``mode``, ``target``,
     ``options`` and ``models`` default to the runtime settings (summaries use the
     owner's ``fast_models``, and the revisions get the PDFs as the owner's
-    ``pdf_in_revisions`` says). The text itself (empty, too long) and whether the
+    ``pdf_in_revisions`` says). A refine turn gets its budget in dollars at ``fx``
+    (:func:`refine_budget_usd`). The text itself (empty, too long) and whether the
     attachments exist are validated by the engine, which answers with
     ``turn.failed``."""
     request_id = parse_request_id(data)
@@ -200,7 +217,9 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         mode: TurnMode = (
             runtime.default_mode
             if mode_value is None
-            else _choice(mode_value, TURN_MODES, "«mode» ha de ser «solo», «duel» o «debate».")
+            else _choice(
+                mode_value, TURN_MODES, "«mode» ha de ser «solo», «duel», «debate» o «refine»."
+            )
         )
         target_value = data.get("target")
         target: AgentName = (
@@ -229,6 +248,7 @@ def parse_turn_start(data: Mapping[str, object], runtime: RuntimeSettings) -> Tu
         models=models,
         fast_models=runtime.chosen_fast_models(),
         attachments=attachments,
+        refine_budget_usd=refine_budget_usd(options.refine, fx) if mode == "refine" else None,
         pdf_in_revisions=runtime.pdf_in_revisions,
     )
 
@@ -407,8 +427,11 @@ class ClientSession:
                 raise ProtocolError("«t» ha de ser un número.")
             self._connection.send_json({"type": "pong", "t": t})
         elif kind == "turn.start":
-            runtime = await self._state.store.get_runtime_settings()
-            request = parse_turn_start(data, runtime)
+            store = self._state.store
+            runtime = await store.get_runtime_settings()
+            # The rate the app shows euros with (hello, /api/pricing), with these settings.
+            fx = effective_fx(runtime, await store.get_ecb_rate(), self._state.clock())
+            request = parse_turn_start(data, runtime, fx=fx)
             try:
                 turns.start(
                     request,
@@ -421,6 +444,14 @@ class ClientSession:
         elif kind == "turn.cancel":
             request_id = parse_request_id(data)
             if not turns.cancel(request_id):
+                self._connection.send_json({"type": "turn.unknown", "request_id": request_id})
+        elif kind == "turn.stop":
+            request_id = parse_request_id(data)
+            try:
+                known = turns.stop(request_id)
+            except TurnNotStoppableError as exc:
+                raise ProtocolError(exc.message, request_id=request_id) from None
+            if not known:
                 self._connection.send_json({"type": "turn.unknown", "request_id": request_id})
         elif kind == "turn.subscribe":
             request_id = parse_request_id(data)

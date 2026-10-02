@@ -4,13 +4,22 @@
 import { processedTokens } from '../costs';
 import { AGENT_LABEL } from '../format';
 import { limitLevel } from '../limits';
-import { AGENTS, type Agent, type ProviderMode, type ProviderStatus, type SavingKind, type Stats, type TurnMode } from '../protocol';
+import {
+  AGENTS,
+  TURN_MODES,
+  type Agent,
+  type ProviderMode,
+  type ProviderStatus,
+  type SavingKind,
+  type Stats,
+  type TurnMode,
+} from '../protocol';
 import { axisDayLabel, dayRange, fullDayLabel, rangeEnd, utcDay } from './dates';
 import { positive } from './stack';
 import type { Datum, SeriesDef } from './types';
 
 export const SAVING_KINDS: readonly SavingKind[] = ['cache', 'compaction', 'early_stop', 'unchanged'];
-export const TURN_MODES: readonly TurnMode[] = ['solo', 'duel', 'debate'];
+export { TURN_MODES };
 
 export const SAVING_LABEL: Record<SavingKind, string> = {
   cache: 'Memòria cau',
@@ -19,7 +28,7 @@ export const SAVING_LABEL: Record<SavingKind, string> = {
   unchanged: 'Sense canvis',
 };
 
-export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Debat' };
+export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Debat', refine: 'Perfecciona' };
 
 /** Fixed categorical order (validated palette in tokens.css). */
 export const AGENT_SERIES: SeriesDef[] = AGENTS.map((a) => ({ key: a, label: AGENT_LABEL[a], color: `var(--${a})` }));

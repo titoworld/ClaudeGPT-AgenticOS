@@ -5,6 +5,7 @@
   web/vite.config.ts (tests/server/test_server_http.py).
 - Every ``AOS_*`` variable the docs or the interface name exists (N24: the dialog of a
   rejected origin named one that does not).
+- The messages the docs quote are the ones the code sends (the refine turns' reasons).
 - The README's deploy summary puts the Claude token where the app reads it (N25).
 - No stale statement comes back (N26): files that do not exist, a ``hello`` version
   that is not the package's, a login message the web never shows, a model list the
@@ -22,11 +23,27 @@ from pydantic import AliasChoices
 
 from agentic_os import __version__, attachments, pdf_facts
 from agentic_os.config import Settings
-from agentic_os.orchestrator import pdf_check
+from agentic_os.domain import (
+    REFINE_BUDGET_FACTOR,
+    REFINE_CHANGELOG_TAIL,
+    REFINE_CONVERGENCE_ROUNDS,
+    REFINE_MAX_CHANGES,
+    REFINE_MIN_BUDGET_WORDS,
+    RefineOptions,
+)
+from agentic_os.orchestrator import engine, pdf_check
 from agentic_os.orchestrator.types import EngineConfig
 from agentic_os.providers.claude_cli import CLAUDE_FAMILIES
 from agentic_os.server import middleware, turns, ws
-from agentic_os.storage import MAX_LIST_LIMIT, MAX_SEARCH_LENGTH
+from agentic_os.storage import MAX_LIST_LIMIT, MAX_SEARCH_LENGTH, RuntimeSettings
+from agentic_os.storage.models import (
+    DEFAULT_MODE_REFINE,
+    REFINE_BUDGET_EUR_RANGE,
+    REFINE_ROUNDS_RANGE,
+    REFINE_THRESHOLD_RANGE,
+    REFINE_WORDS_RANGE,
+    TURN_MODES,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -220,6 +237,163 @@ def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
     protocol = read(PROTOCOL)
     for limit in (middleware.MAX_BODY_BYTES, LOGIN_BODY, UPLOAD_MB * 1_000_000):
         assert f"`{middleware.too_large_detail(limit)}`" in protocol
+
+
+# -- the refine mode (docs/adr/0010-mode-perfecciona.md) ---------------------------------
+
+ADR_REFINE = "docs/adr/0010-mode-perfecciona.md"
+REFINE = RefineOptions()
+NUMBER_WORDS = {"dos": 2, "dues": 2, "tres": 3, "quatre": 4, "cinc": 5}
+
+
+def number(text: str) -> float:
+    """A number as the prose of the docs writes it: ``20.000`` (Catalan thousands),
+    ``0,1`` (Catalan decimals) or a word (``dues``)."""
+    if text in NUMBER_WORDS:
+        return NUMBER_WORDS[text]
+    assert re.fullmatch(r"\d+(?:\.\d{3})*(?:,\d+)?", text), text
+    return float(text.replace(".", "").replace(",", "."))
+
+
+DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
+    # The ranges and defaults of RefineOptions, as the server validates them.
+    (
+        PROTOCOL,
+        r"max_rounds: number;\s+// (\d+)\u2013(\d+), per defecte (\d+)",
+        (*REFINE_ROUNDS_RANGE, REFINE.max_rounds),
+    ),
+    (
+        PROTOCOL,
+        r"budget_eur: number;\s+// ([\d,]+)\u2013([\d,]+), per defecte ([\d,]+)",
+        (*REFINE_BUDGET_EUR_RANGE, REFINE.budget_eur),
+    ),
+    (PROTOCOL, r"de cada versió: ([\d.]+)\u2013([\d.]+)", REFINE_WORDS_RANGE),
+    (
+        PROTOCOL,
+        r"convergence_threshold: number;\s+// (\d+)\u2013(\d+), per defecte (\d+)",
+        (*REFINE_THRESHOLD_RANGE, REFINE.convergence_threshold),
+    ),
+    (
+        ARQUITECTURA,
+        r"màxim de rondes \((\d+) per defecte, de (\d+) a (\d+)\)",
+        (REFINE.max_rounds, *REFINE_ROUNDS_RANGE),
+    ),
+    (
+        ARQUITECTURA,
+        r"pressupost \(([\d,]+) € per defecte, de ([\d,]+) a ([\d,]+) €",
+        (REFINE.budget_eur, *REFINE_BUDGET_EUR_RANGE),
+    ),
+    (
+        ADR_REFINE,
+        r"màxim de rondes \((\d+) per defecte, fins a (\d+)\)",
+        (REFINE.max_rounds, REFINE_ROUNDS_RANGE[1]),
+    ),
+    (ADR_REFINE, r"pressupost en euros \(([\d,]+) € per defecte", (REFINE.budget_eur,)),
+    (ARQUITECTURA, r"el llindar \((\d+) per defecte\)", (REFINE.convergence_threshold,)),
+    (ADR_REFINE, r"llindar \((\d+) per defecte\)", (REFINE.convergence_threshold,)),
+    # The word budget when the owner gives no limit.
+    (
+        PROTOCOL,
+        r"([\d,]+) vegades les de la versió 1, i (\d+) com a mínim",
+        (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
+    ),
+    *(
+        (
+            document,
+            r"([\d,]+) vegades les paraules de la versió 1 \((\d+) com a mínim\)",
+            (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
+        )
+        for document in (ARQUITECTURA, ADR_REFINE)
+    ),
+    # The loop: changes a round, the changelog every prompt gets, when it stops by itself.
+    (
+        PROTOCOL,
+        r"els canvis que (?:proposa|ha aplicat) \(com a molt (\d+)\)",
+        (REFINE_MAX_CHANGES,),
+    ),
+    (ARQUITECTURA, r"com a molt (\d+) canvis", (REFINE_MAX_CHANGES,)),
+    (
+        ADR_REFINE,
+        r"Com a molt (\d+) canvis per ronda:\*\* (\d+) propostes per revisió i (\d+) canvis",
+        (REFINE_MAX_CHANGES,) * 3,
+    ),
+    (ARQUITECTURA, r"les (\d+) últimes línies del registre de canvis", (REFINE_CHANGELOG_TAIL,)),
+    (ADR_REFINE, r"les (\d+) últimes línies", (REFINE_CHANGELOG_TAIL,)),
+    *(
+        (document, r"(\w+) rondes seguides", (REFINE_CONVERGENCE_ROUNDS,))
+        for document in (PROTOCOL, ARQUITECTURA, ADR_REFINE)
+    ),
+    # Every version is one reply: what does not fit in its output is cut off.
+    *(
+        (document, r"com a molt ([\d.]+) tokens de sortida", (EngineConfig().max_output_tokens,))
+        for document in (PROTOCOL, ARQUITECTURA, ADR_REFINE)
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("document", "pattern", "expected"),
+    DOCUMENTED_REFINE_NUMBERS,
+    ids=[f"{Path(doc).stem}:{pattern[:40]}" for doc, pattern, _ in DOCUMENTED_REFINE_NUMBERS],
+)
+def test_every_number_the_docs_give_for_the_refine_mode_is_the_one_the_code_uses(
+    document: str, pattern: str, expected: tuple[float, ...]
+) -> None:
+    found: list[str | tuple[str, ...]] = re.findall(pattern, read(document))
+    assert found, f"{document} no longer says this ({pattern!r}): update this test"
+    for groups in found:
+        texts = groups if isinstance(groups, tuple) else (groups,)
+        assert tuple(number(text) for text in texts) == expected, groups
+
+
+def test_the_turn_modes_the_protocol_gives_are_the_servers() -> None:
+    protocol = read(PROTOCOL)
+    [modes] = re.findall(r"type TurnMode = ([^;]+);", protocol)
+    assert tuple(re.findall(r'"(\w+)"', modes)) == TURN_MODES
+    [counted] = re.findall(r"  turns: \{([^}]*)\}", protocol)  # Stats
+    assert tuple(re.findall(r"(\w+): number", counted)) == TURN_MODES
+
+
+def test_the_activity_messages_the_protocol_names_are_the_servers() -> None:
+    """``turn.stop`` is the owner's too: it refreshes the idle timeout."""
+    [named] = re.findall(
+        r"Només ((?:`[\w.]+`(?:, | i )?)+), que són accions del propietari", read(PROTOCOL)
+    )
+    assert set(re.findall(r"`([\w.]+)`", named)) == ws.ACTIVITY_MESSAGES
+
+
+def event_row(protocol: str, event: str) -> str:
+    """The row of an event in the protocol's table of events."""
+    rows: list[str] = re.findall(rf"^\| `{re.escape(event)}` \|.*$", protocol, re.M)
+    [row] = rows
+    return row
+
+
+def test_the_refine_reasons_the_protocol_quotes_are_the_engines() -> None:
+    """Why a round of a refine turn wrote no version (``refine.round``'s ``reason``) and
+    why a review failed, as the engine says them: the web rebuilds the rounds of a
+    reloaded turn from some of these strings."""
+    protocol = read(PROTOCOL)
+    reasons = (
+        engine.REFINE_OVER_BUDGET,
+        engine.REFINE_INCOMPLETE,
+        engine.REFINE_IDENTICAL,
+        engine.REFINE_NOTHING_TO_CHANGE,
+        engine.REFINE_FAILED_ROUND,
+    )
+    row = event_row(protocol, "refine.round")
+    for reason in reasons:
+        assert f"`{reason}`" in row, reason
+    assert f"`{engine.REFINE_NO_CHANGES}`" in event_row(protocol, "stream.failed")
+
+
+def test_the_refine_answers_the_protocol_quotes_are_the_servers() -> None:
+    protocol = read(PROTOCOL)
+    assert f"`{turns.STOP_ONLY_REFINE}`" in protocol
+    assert f"`{DEFAULT_MODE_REFINE}`" in protocol
+    with pytest.raises(ValueError) as refused:
+        RuntimeSettings.from_wire({"refine": {"max_rounds": REFINE_ROUNDS_RANGE[0] - 1}})
+    assert f"`{refused.value}`" in protocol
 
 
 # -- AOS_* variables (N24) -------------------------------------------------------------

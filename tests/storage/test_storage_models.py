@@ -4,10 +4,11 @@ from typing import Any
 
 import pytest
 
-from agentic_os.domain import DebateOptions, TurnOptions
+from agentic_os.domain import DebateOptions, RefineOptions, TurnOptions
 from agentic_os.fx import FxRate
 from agentic_os.pricing import ModelPrice
 from agentic_os.storage.models import (
+    TURN_MODES,
     FxSettings,
     RuntimeSettings,
     StoredFxRate,
@@ -21,6 +22,14 @@ VALID: dict[str, Any] = {
     "default_mode": "duel",
     "default_target": "chatgpt",
     "debate": {"rounds": 0, "consensus_threshold": 100, "synthesizer": "chatgpt"},
+    "refine": {
+        "max_rounds": 50,
+        "budget_eur": 0.1,
+        "max_words": 20_000,
+        "stop_on_convergence": False,
+        "convergence_threshold": 50,
+        "editor": "chatgpt",
+    },
     "use_cache": False,
     "compaction_threshold_tokens": 100_000,
     "models": {"claude": "opus", "chatgpt": None},
@@ -43,6 +52,14 @@ def test_defaults_match_the_protocol() -> None:
         "default_mode": "debate",
         "default_target": "claude",
         "debate": {"rounds": 2, "consensus_threshold": 85, "synthesizer": "claude"},
+        "refine": {
+            "max_rounds": 12,
+            "budget_eur": 3.0,
+            "max_words": None,
+            "stop_on_convergence": True,
+            "convergence_threshold": 90,
+            "editor": "claude",
+        },
         "use_cache": True,
         "compaction_threshold_tokens": 6000,
         "models": {"claude": None, "chatgpt": None},
@@ -64,6 +81,14 @@ def test_wire_roundtrip_and_turn_options() -> None:
     assert RuntimeSettings.from_wire(settings.to_wire()) == settings
     assert settings.to_turn_options() == TurnOptions(
         debate=DebateOptions(rounds=0, consensus_threshold=100, synthesizer="chatgpt"),
+        refine=RefineOptions(
+            max_rounds=50,
+            budget_eur=0.1,
+            max_words=20_000,
+            stop_on_convergence=False,
+            convergence_threshold=50,
+            editor="chatgpt",
+        ),
         use_cache=False,
     )
     assert settings.chosen_models() == {"claude": "opus"}
@@ -119,6 +144,28 @@ def test_model_ids_are_trimmed_and_empty_means_the_default() -> None:
         ({"debate": {"consensus_threshold": 101}}, "debate.consensus_threshold"),
         ({"debate": {"synthesizer": "user"}}, "debate.synthesizer"),
         ({"debate": []}, "debate"),
+        ({"refine": {"max_rounds": 1}}, "refine.max_rounds"),
+        ({"refine": {"max_rounds": 51}}, "refine.max_rounds"),
+        ({"refine": {"max_rounds": True}}, "refine.max_rounds"),
+        ({"refine": {"max_rounds": 12.0}}, "refine.max_rounds"),
+        ({"refine": {"budget_eur": 0.09}}, "refine.budget_eur"),
+        ({"refine": {"budget_eur": 100.01}}, "refine.budget_eur"),
+        ({"refine": {"budget_eur": "3"}}, "refine.budget_eur"),
+        ({"refine": {"budget_eur": float("nan")}}, "refine.budget_eur"),
+        ({"refine": {"budget_eur": 10**400}}, "refine.budget_eur"),
+        ({"refine": {"budget_eur": None}}, "refine.budget_eur"),
+        ({"refine": {"max_words": 99}}, "refine.max_words"),
+        ({"refine": {"max_words": 20_001}}, "refine.max_words"),
+        ({"refine": {"max_words": 500.0}}, "refine.max_words"),
+        ({"refine": {"max_words": False}}, "refine.max_words"),
+        ({"refine": {"max_words": "auto"}}, "refine.max_words"),
+        ({"refine": {"stop_on_convergence": 1}}, "refine.stop_on_convergence"),
+        ({"refine": {"stop_on_convergence": None}}, "refine.stop_on_convergence"),
+        ({"refine": {"convergence_threshold": 49}}, "refine.convergence_threshold"),
+        ({"refine": {"convergence_threshold": 101}}, "refine.convergence_threshold"),
+        ({"refine": {"editor": "user"}}, "refine.editor"),
+        ({"refine": []}, "refine"),
+        ({"refine": None}, "refine"),
         ({"use_cache": 1}, "use_cache"),
         ({"compaction_threshold_tokens": 999}, "compaction_threshold_tokens"),
         ({"compaction_threshold_tokens": 100_001}, "compaction_threshold_tokens"),
@@ -253,6 +300,81 @@ def test_direct_construction_is_validated() -> None:
         ValueError, match=re.escape("«pdf_in_revisions» ha de ser «full» o «text».")
     ):
         RuntimeSettings(pdf_in_revisions="pdf")  # type: ignore[arg-type]
+
+
+def test_the_four_turn_modes() -> None:
+    assert TURN_MODES == ("solo", "duel", "debate", "refine")
+    with pytest.raises(
+        ValueError,
+        match=re.escape("«default_mode» ha de ser «solo», «duel», «debate» o «refine»."),
+    ):
+        RuntimeSettings.from_wire({"default_mode": "trio"})
+
+
+def test_the_default_mode_is_never_refine() -> None:
+    """A refine turn runs until the owner stops it: never chosen without asking."""
+    message = "El mode per defecte no pot ser «refine»."
+    with pytest.raises(ValueError, match=re.escape(message)):
+        RuntimeSettings.from_wire({**VALID, "default_mode": "refine"})
+    with pytest.raises(ValueError, match=re.escape(message)):
+        RuntimeSettings(default_mode="refine")
+
+
+def test_the_refine_options() -> None:
+    assert RuntimeSettings().refine == RefineOptions()
+    # Settings saved before the refine mode existed take its defaults.
+    assert RuntimeSettings.from_wire({"default_mode": "solo"}).refine == RefineOptions()
+    # Partial objects: the missing keys take their defaults too.
+    partial = RuntimeSettings.from_wire({"refine": {"max_rounds": 20, "editor": "chatgpt"}})
+    assert partial.refine == RefineOptions(max_rounds=20, editor="chatgpt")
+    # No word limit (null): 1.2 times the first version's words, as the engine decides.
+    assert RuntimeSettings.from_wire({"refine": {"max_words": None}}).refine.max_words is None
+    for words in (100, 20_000):
+        settings = RuntimeSettings.from_wire({"refine": {"max_words": words}})
+        assert settings.refine.max_words == words
+    # A budget in whole euros is stored as a float.
+    budget = RuntimeSettings.from_wire({"refine": {"budget_eur": 100}}).refine.budget_eur
+    assert budget == 100.0 and isinstance(budget, float)
+    assert RuntimeSettings.from_wire({"refine": {"max_rounds": 2}}).refine.max_rounds == 2
+
+
+@pytest.mark.parametrize(
+    ("refine", "message"),
+    [
+        ({"max_rounds": 51}, "«refine.max_rounds» ha de ser un enter entre 2 i 50."),
+        ({"budget_eur": 0}, "«refine.budget_eur» ha de ser un nombre entre 0,1 i 100."),
+        (
+            {"max_words": 50},
+            "«refine.max_words» ha de ser null (automàtic) o un enter entre 100 i 20000.",
+        ),
+        (
+            {"convergence_threshold": 30},
+            "«refine.convergence_threshold» ha de ser un enter entre 50 i 100.",
+        ),
+        ({"stop_on_convergence": "sí"}, "«refine.stop_on_convergence» ha de ser un booleà"),
+        ({"editor": "gemini"}, "«refine.editor» ha de ser «claude» o «chatgpt»."),
+    ],
+)
+def test_the_refine_options_are_refused_in_catalan(refine: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        RuntimeSettings.from_wire({"refine": refine})
+    with pytest.raises(ValueError, match=re.escape("«refine» ha de ser un objecte.")):
+        RuntimeSettings.from_wire({"refine": "12 rondes"})
+
+
+def test_direct_construction_validates_the_refine_options() -> None:
+    with pytest.raises(ValueError, match=r"refine\.max_rounds"):
+        RuntimeSettings(refine=RefineOptions(max_rounds=1))
+    with pytest.raises(ValueError, match=r"refine\.budget_eur"):
+        RuntimeSettings(refine=RefineOptions(budget_eur=250.0))
+    with pytest.raises(ValueError, match=r"refine\.max_words"):
+        RuntimeSettings(refine=RefineOptions(max_words=20))
+    with pytest.raises(ValueError, match=r"refine\.convergence_threshold"):
+        RuntimeSettings(refine=RefineOptions(convergence_threshold=101))
+    with pytest.raises(ValueError, match=r"refine\.editor"):
+        RuntimeSettings(refine=RefineOptions(editor="gemini"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=re.escape("«refine» ha de ser un objecte.")):
+        RuntimeSettings(refine={"max_rounds": 3})  # type: ignore[arg-type]
 
 
 def test_revisions_get_the_pdfs_text_by_default() -> None:

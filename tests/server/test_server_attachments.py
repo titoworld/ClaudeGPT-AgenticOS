@@ -33,6 +33,7 @@ from starlette.testclient import TestClient
 from agentic_os import attachments
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName
+from agentic_os.fx import manual_rate
 from agentic_os.orchestrator.store import NewMessage
 from agentic_os.providers.base import Provider
 from agentic_os.providers.fake import FakeProvider
@@ -48,6 +49,7 @@ pytestmark = pytest.mark.filterwarnings("ignore:Using `httpx` with:DeprecationWa
 ORIGIN = "https://aos.example"
 ORIGIN_HEADERS = {"origin": ORIGIN}
 COOKIE = "__Host-aos_session"
+FX = manual_rate()
 T0 = datetime(2026, 9, 29, 12, 0, 0, tzinfo=UTC)
 UPLOAD = "/api/attachments"
 
@@ -527,11 +529,11 @@ async def test_the_pdf_setting_of_the_revisions(h: Harness) -> None:
 def test_parse_turn_start_takes_the_attachments_and_the_pdf_setting() -> None:
     runtime = RuntimeSettings(pdf_in_revisions="full")
     data: dict[str, object] = {"request_id": "r", "text": "Què hi diu?"}
-    request = parse_turn_start(data, RuntimeSettings())
+    request = parse_turn_start(data, RuntimeSettings(), fx=FX)
     assert (request.attachments, request.pdf_in_revisions) == ((), "text")
-    request = parse_turn_start({**data, "attachments": [3, 1, 2]}, runtime)
+    request = parse_turn_start({**data, "attachments": [3, 1, 2]}, runtime, fx=FX)
     assert (request.attachments, request.pdf_in_revisions) == ((3, 1, 2), "full")
-    assert parse_turn_start({**data, "attachments": None}, runtime).attachments == ()
+    assert parse_turn_start({**data, "attachments": None}, runtime, fx=FX).attachments == ()
     invalid = "«attachments» ha de ser una llista d'identificadors d'adjunt (enters positius)."
     for value, message in (
         (7, invalid),
@@ -546,7 +548,7 @@ def test_parse_turn_start_takes_the_attachments_and_the_pdf_setting() -> None:
         ([4, 4], "Un mateix adjunt no pot anar dues vegades al missatge."),
     ):
         with pytest.raises(ProtocolError) as refused:
-            parse_turn_start({**data, "attachments": value}, runtime)
+            parse_turn_start({**data, "attachments": value}, runtime, fx=FX)
         assert refused.value.message == message, value
         assert refused.value.request_id == "r"
 

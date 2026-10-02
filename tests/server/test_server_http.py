@@ -719,7 +719,7 @@ async def test_stats_shape(h: Harness) -> None:
     assert stats["costs"]["fx"] == {"eur_per_usd": 0.86, "as_of": None, "source": "manual"}
     assert stats["month"]["month"] == "2026-09"
     assert stats["savings"]["cost_usd"] is None
-    assert set(stats["turns"]) == {"solo", "duel", "debate"}
+    assert set(stats["turns"]) == {"solo", "duel", "debate", "refine"}
     for days in (0, 366):
         assert (await h.client.get("/api/stats", params={"days": days})).status_code == 422
 

@@ -88,7 +88,15 @@ export function formatK(n: number): string {
 /** Rough prompt size estimate used across the app: characters / 4. */
 export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
 
-export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Consell' };
+export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Consell', refine: 'Perfecciona' };
+
+/** What each mode does, in a sentence (the composer's tooltips, the empty state). */
+export const MODE_DESCRIPTION: Record<TurnMode, string> = {
+  solo: 'Respon una sola IA. El més ràpid i econòmic.',
+  duel: 'Claude i ChatGPT responen alhora, costat a costat.',
+  debate: 'Responen, es critiquen per rondes i sintetitzen la millor resposta. Si arriben a un consens, paren abans.',
+  refine: "Les dues IA milloren un sol document ronda rere ronda fins que l'aturis.",
+};
 
 export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = { cli: 'Subscripció', api: 'API', fake: 'Demo' };
 

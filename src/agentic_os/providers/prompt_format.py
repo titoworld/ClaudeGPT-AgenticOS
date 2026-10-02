@@ -48,7 +48,7 @@ PDF_WITHOUT_TEXT = "[No se n'ha pogut extreure el text d'aquest PDF.]"
 
 ChatRole = Literal["user", "assistant"]
 
-RESERVED_TAGS: frozenset[str] = frozenset(
+COMMON_TAGS: frozenset[str] = frozenset(
     {
         # render_transcript and to_chat_messages
         "conversation_summary",
@@ -67,6 +67,32 @@ RESERVED_TAGS: frozenset[str] = frozenset(
         "attachments",
     }
 )
+"""The tags of the transcript and of the solo, duel and debate prompts: every embedded
+text, anywhere, has them escaped (what :func:`neutralize_tags` escapes by default). They
+are part of the prompts the turn cache serves: changing them means a new
+``cache.CACHE_KEY_VERSION``."""
+
+REFINE_TAGS: frozenset[str] = frozenset(
+    {
+        # the refine turns' prompts and replies (docs/adr/0010-mode-perfecciona.md)
+        "brief",
+        "current_version",
+        "changelog_so_far",
+        "review",
+        "draft",
+        "draft_changelog",
+        "version",
+        "changelog",
+        "changes",
+        "score",
+    }
+)
+"""The tags only a refine turn's prompts use. They are common words of documents and code
+(a pom.xml's ``<version>``, a React ``<Review>``), so only the texts those prompts embed
+have them escaped (``neutralize_tags(text, RESERVED_TAGS)``, and the prompts say how to
+read it): any other prompt, a file's text and the history keep them as they were written."""
+
+RESERVED_TAGS: frozenset[str] = COMMON_TAGS | REFINE_TAGS
 """Every tag name the app's prompts use as a delimiter."""
 
 IGNORABLE_CHARS = (
@@ -88,21 +114,27 @@ _TAG_OPENING_RE = re.compile(
 )
 
 
-def _escape_reserved(match: re.Match[str]) -> str:
-    name = unicodedata.normalize("NFKC", _IGNORABLE_RE.sub("", match.group(1))).casefold()
-    return "&lt;" if name in RESERVED_TAGS else match.group(0)
+def _tag_name(match: re.Match[str]) -> str:
+    return unicodedata.normalize("NFKC", _IGNORABLE_RE.sub("", match.group(1))).casefold()
 
 
-def neutralize_tags(text: str) -> str:
+def neutralize_tags(text: str, reserved: frozenset[str] = COMMON_TAGS) -> str:
     """Escape the ``<`` of reserved tags in untrusted text (``</answer>`` becomes
     ``&lt;/answer>``): still readable, but it can no longer close or open a section.
 
-    Tag names are compared ignoring case, invisible characters (``IGNORABLE_CHARS``)
-    and compatibility forms (NFKC): a zero-width space inside ``claude_answer``, a
-    full-width ``<`` (U+FF1C) or full-width letters do not get past it. The text itself
-    is kept as is, other markup (``<div>``, ``a < b``) is left alone, and the result is
-    deterministic, so re-rendered history stays byte-identical for the prompt caches."""
-    return _TAG_OPENING_RE.sub(_escape_reserved, text)
+    ``reserved`` are the tags to escape: by default :data:`COMMON_TAGS`, which every
+    text embedded anywhere escapes; the refine prompts pass :data:`RESERVED_TAGS`, their
+    own tags too. Tag names are compared ignoring case, invisible characters
+    (``IGNORABLE_CHARS``) and compatibility forms (NFKC): a zero-width space inside
+    ``claude_answer``, a full-width ``<`` (U+FF1C) or full-width letters do not get past
+    it. The text itself is kept as is, other markup (``<div>``, ``a < b``) is left alone,
+    and the result is deterministic, so re-rendered history stays byte-identical for the
+    prompt caches."""
+
+    def escape(match: re.Match[str]) -> str:
+        return "&lt;" if _tag_name(match) in reserved else match.group(0)
+
+    return _TAG_OPENING_RE.sub(escape, text)
 
 
 def pages_label(pages: int) -> str:

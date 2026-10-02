@@ -23,8 +23,10 @@ Definitions:
   deleted). Turns stored before savings had a value fall back to
   ``meta.savings.cost_usd`` of their last final message (while it exists). ``None``
   when nothing in the window has a value.
-- ``turns``: question messages created in the window, by their ``meta.mode``.
-- ``consensus``: completed debates (a debate question with a synthesis message).
+- ``turns``: question messages created in the window, by their ``meta.mode`` (solo,
+  duel, debate and refine).
+- ``consensus``: completed debates (a debate question with a synthesis message). A
+  refine turn also ends with a synthesis (its last version), but it is no debate.
   When the synthesis has ``meta.consensus`` (``{"reached", "round", ...}``, as the
   engine writes it) that is used. Otherwise it is derived: the debate reached
   consensus when, in its last revision round, both agents reported
@@ -137,6 +139,7 @@ class TurnCounts(TypedDict):
     solo: int
     duel: int
     debate: int
+    refine: int
 
 
 class ConsensusStats(TypedDict):
@@ -529,7 +532,10 @@ async def compute_stats(
         savings_daily=savings_daily,
         latency=latency,
         turns=TurnCounts(
-            solo=mode_counts["solo"], duel=mode_counts["duel"], debate=mode_counts["debate"]
+            solo=mode_counts["solo"],
+            duel=mode_counts["duel"],
+            debate=mode_counts["debate"],
+            refine=mode_counts["refine"],
         ),
         consensus=ConsensusStats(
             debates=len(debates),

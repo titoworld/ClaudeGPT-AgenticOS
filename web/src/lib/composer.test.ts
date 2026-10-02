@@ -23,10 +23,56 @@ const options = (c: ComposerState) => ({
   useCache: c.useCache,
 });
 
+const refine = (c: ComposerState) => ({
+  refineRounds: c.refineRounds,
+  refineBudget: c.refineBudget,
+  refineWords: c.refineWords,
+  refineConverge: c.refineConverge,
+  refineThreshold: c.refineThreshold,
+  refineEditor: c.refineEditor,
+});
+
+describe('ComposerState: the refine options («Perfecciona»)', () => {
+  const REFINE = saved({
+    refine: { max_rounds: 20, budget_eur: 5.5, max_words: 800, stop_on_convergence: false, convergence_threshold: 75, editor: 'chatgpt' },
+  });
+
+  it('takes their saved defaults, and gives them as the options of a refine turn', () => {
+    const c = new ComposerState();
+    expect(refine(c)).toEqual({
+      refineRounds: 12, refineBudget: 3, refineWords: null, refineConverge: true, refineThreshold: 90, refineEditor: 'claude',
+    });
+    c.applyDefaults(REFINE);
+    expect(c.refineOptions()).toEqual(REFINE.refine);
+  });
+
+  it('remembers the ones the owner changed, like the other options', () => {
+    const c = new ComposerState();
+    c.refineRounds = 30;
+    c.refineWords = 1200;
+    expect(c.touched('refineRounds')).toBe(true);
+    expect(c.touched('refineBudget')).toBe(false);
+    c.applyDefaults(REFINE);
+    expect(c.refineOptions()).toEqual({ ...REFINE.refine, max_rounds: 30, max_words: 1200 });
+    c.refineWords = null; // back to the automatic limit, on purpose
+    c.applyDefaults(REFINE);
+    expect(c.refineOptions().max_words).toBeNull();
+  });
+
+  it('is never the mode chosen without the owner: saved settings never give it', () => {
+    const c = new ComposerState();
+    c.applyDefaults(saved({ default_mode: 'refine' as never }));
+    expect(c.mode).toBe('debate');
+    c.mode = 'refine'; // the owner's choice stays
+    c.applyDefaults(SOLO);
+    expect(c.mode).toBe('refine');
+  });
+});
+
 describe('ComposerState', () => {
   it('starts from the built-in defaults, with nothing chosen', () => {
     const c = new ComposerState();
-    expect(options(c)).toEqual(composerDefaults(DEFAULT_SETTINGS));
+    expect({ ...options(c), ...refine(c) }).toEqual(composerDefaults(DEFAULT_SETTINGS));
     expect(c.touched('mode')).toBe(false);
   });
 

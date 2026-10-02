@@ -52,7 +52,7 @@ function stats(overrides: Partial<Stats> = {}): Stats {
       claude: { p50_ms: 6200, p95_ms: 14800, ttft_p50_ms: 1150 },
       chatgpt: { p50_ms: null, p95_ms: null, ttft_p50_ms: null },
     },
-    turns: { solo: 2, duel: 1, debate: 4 },
+    turns: { solo: 2, duel: 1, debate: 4, refine: 3 },
     consensus: { debates: 4, reached: 3, avg_rounds: 1.5 },
     costs: {
       fx: FX,
@@ -129,6 +129,7 @@ describe('categorical series', () => {
       ['Solo', 2],
       ['Duel', 1],
       ['Debat', 4],
+      ['Perfecciona', 3],
     ]);
   });
 
@@ -159,7 +160,8 @@ describe('kpis', () => {
     expect(k.saved.total).toBe(1000);
     // The same kind of tokens on both sides: saved / (processed + saved).
     expect(k.saved.ratio).toBeCloseTo(1000 / 4050);
-    expect(k.turns.total).toBe(7);
+    expect(k.turns.total).toBe(10);
+    expect(k.turns.byMode).toEqual({ solo: 2, duel: 1, debate: 4, refine: 3 });
     expect(k.consensus).toEqual({ debates: 4, reached: 3, rate: 0.75, avgRounds: 1.5 });
     expect(k.latency.chatgpt).toEqual({ p50: null, p95: null, ttft: null });
   });

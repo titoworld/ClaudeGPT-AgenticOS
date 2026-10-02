@@ -1,11 +1,26 @@
 // RuntimeSettings defaults and validation, mirroring the server ranges (docs/PROTOCOL.md).
 
 import { validateModelId } from './models';
-import { AGENTS, type Agent, type ModelPrice, type PdfInRevisions, type RuntimeSettings } from './protocol';
+import {
+  AGENTS,
+  type Agent,
+  type DefaultMode,
+  type ModelPrice,
+  type PdfInRevisions,
+  type RuntimeSettings,
+} from './protocol';
 
 export const LIMITS = {
   rounds: { min: 0, max: 4 },
   consensus_threshold: { min: 50, max: 100 },
+  /** A refine turn's rounds that write a version, the merge included (RefineOptions.max_rounds). */
+  refine_rounds: { min: 2, max: 50 },
+  /** What a refine turn may spend, in euros. */
+  refine_budget_eur: { min: 0.1, max: 100 },
+  /** The owner's word limit of a refine turn's versions, when there is one. */
+  refine_words: { min: 100, max: 20_000 },
+  /** The score both agents must give a version for a refine turn to stop by convergence. */
+  refine_threshold: { min: 50, max: 100 },
   compaction_threshold_tokens: { min: 1000, max: 100_000 },
   eur_per_usd: { min: 0.2, max: 5 },
   /** Monthly budgets and plan prices, in euros. */
@@ -25,6 +40,14 @@ export const DEFAULT_SETTINGS: RuntimeSettings = {
   default_mode: 'debate',
   default_target: 'claude',
   debate: { rounds: 2, consensus_threshold: 85, synthesizer: 'claude' },
+  refine: {
+    max_rounds: 12,
+    budget_eur: 3,
+    max_words: null,
+    stop_on_convergence: true,
+    convergence_threshold: 90,
+    editor: 'claude',
+  },
   use_cache: true,
   compaction_threshold_tokens: 6000,
   models: perAgent(null),
@@ -41,6 +64,9 @@ const isRevision = (value: unknown): value is number =>
 
 const isPdfInRevisions = (value: unknown): value is PdfInRevisions => value === 'full' || value === 'text';
 
+/** Never "refine": a turn that runs until the owner stops it only starts when they choose it. */
+const isDefaultMode = (value: unknown): value is DefaultMode => value === 'solo' || value === 'duel' || value === 'debate';
+
 /**
  * Deep copy of plain settings with every key present (an older server may omit
  * the newer ones). Pass `$state.snapshot(...)` when the source is reactive.
@@ -51,9 +77,10 @@ export function normalizeSettings(s: Partial<RuntimeSettings>): RuntimeSettings 
   for (const [model, p] of Object.entries(s.prices ?? {})) prices[model] = { ...p };
   return {
     revision: isRevision(s.revision) ? s.revision : d.revision,
-    default_mode: s.default_mode ?? d.default_mode,
+    default_mode: isDefaultMode(s.default_mode) ? s.default_mode : d.default_mode,
     default_target: s.default_target ?? d.default_target,
     debate: { ...d.debate, ...s.debate },
+    refine: { ...d.refine, ...s.refine },
     use_cache: s.use_cache ?? d.use_cache,
     compaction_threshold_tokens: s.compaction_threshold_tokens ?? d.compaction_threshold_tokens,
     models: { ...d.models, ...s.models },
@@ -69,6 +96,10 @@ export function normalizeSettings(s: Partial<RuntimeSettings>): RuntimeSettings 
 export type SettingsField =
   | 'rounds'
   | 'consensus_threshold'
+  | 'refine.max_rounds'
+  | 'refine.budget_eur'
+  | 'refine.max_words'
+  | 'refine.convergence_threshold'
   | 'compaction_threshold_tokens'
   | 'eur_per_usd'
   | `models.${Agent}`
@@ -106,6 +137,13 @@ function checkEuros(value: unknown): string | null {
   return null;
 }
 
+/** A required amount in euros within `min`..`max` (typed as text: NaN is text that is not an amount). */
+function checkRequiredEuros(value: unknown, min: number, max: number): string | null {
+  if (value == null || value === '') return 'Cal un import.';
+  if (typeof value === 'number' && Number.isNaN(value)) return INVALID_AMOUNT;
+  return checkNumber(value, min, max);
+}
+
 /** Error for one price row, or null. */
 export function validatePrice(model: string, price: ModelPrice): string | null {
   const id = validateModelId(model);
@@ -128,6 +166,19 @@ export function validateSettings(s: RuntimeSettings): SettingsErrors {
   set(
     'consensus_threshold',
     checkInt(s.debate.consensus_threshold, LIMITS.consensus_threshold.min, LIMITS.consensus_threshold.max),
+  );
+  set('refine.max_rounds', checkInt(s.refine.max_rounds, LIMITS.refine_rounds.min, LIMITS.refine_rounds.max));
+  set(
+    'refine.budget_eur',
+    checkRequiredEuros(s.refine.budget_eur, LIMITS.refine_budget_eur.min, LIMITS.refine_budget_eur.max),
+  );
+  set(
+    'refine.max_words',
+    s.refine.max_words === null ? null : checkInt(s.refine.max_words, LIMITS.refine_words.min, LIMITS.refine_words.max),
+  );
+  set(
+    'refine.convergence_threshold',
+    checkInt(s.refine.convergence_threshold, LIMITS.refine_threshold.min, LIMITS.refine_threshold.max),
   );
   set(
     'compaction_threshold_tokens',
@@ -195,6 +246,8 @@ export function cleanSettings(s: RuntimeSettings): RuntimeSettings {
     out.models[agent] = out.models[agent]?.trim() || null;
     out.fast_models[agent] = out.fast_models[agent]?.trim() || null;
   }
+  // The automatic word limit is null on the wire (an empty input binds undefined).
+  out.refine.max_words = isNumber(out.refine.max_words) ? out.refine.max_words : null;
   return out;
 }
 

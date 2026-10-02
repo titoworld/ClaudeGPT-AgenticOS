@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { TURN_MODES } from '../lib/protocol';
+  import { MODE_DESCRIPTION, MODE_LABEL } from '../lib/text';
   import Icon, { type IconName } from './Icon.svelte';
 
   interface Props {
@@ -13,15 +15,11 @@
     'Quins riscos té guardar les sessions en JWT sense poder-les revocar, i com els mitigo?',
   ];
 
-  const MODES: { icon: IconName; name: string; text: string }[] = [
-    { icon: 'mode-solo', name: 'Solo', text: 'Respon una sola IA. El més ràpid i econòmic.' },
-    { icon: 'mode-duel', name: 'Duel', text: 'Claude i ChatGPT responen alhora, costat a costat.' },
-    {
-      icon: 'mode-debate',
-      name: 'Consell',
-      text: 'Responen, es critiquen per rondes i sintetitzen la millor resposta. Si arriben a un consens, paren abans.',
-    },
-  ];
+  const MODES: { icon: IconName; name: string; text: string }[] = TURN_MODES.map((mode) => ({
+    icon: `mode-${mode}`,
+    name: MODE_LABEL[mode],
+    text: MODE_DESCRIPTION[mode],
+  }));
 </script>
 
 <section class="empty" aria-labelledby="empty-title">
@@ -113,7 +111,7 @@
 
   .modes {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.75rem;
     margin: 0;
     padding: 0;

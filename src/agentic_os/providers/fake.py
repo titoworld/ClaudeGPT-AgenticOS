@@ -16,6 +16,16 @@ Claude's check of a PDF for ChatGPT (purpose "check", docs/adr/0009-adjunts.md) 
 with the test's ``check_replies`` in turn, or says every page is right (``{"end": true}``).
 A fake can report another ``mode``, so that a test has a ChatGPT that cannot open PDFs
 (mode "cli", like Codex) without any process.
+
+A refine turn (docs/adr/0010-mode-perfecciona.md; its prompts carry the owner's
+``<brief>``) runs its whole loop: the answers are the canned ones, the merge writes a
+first version, every edit applies the changes the reviews proposed (one more line each
+time, so no version repeats the previous one) and a shortening keeps the whole lines that
+fit the word budget. The reviews of each brief propose one change in the first two rounds
+(a defect, then a clarity change scored above the default convergence threshold) and then
+nothing (UNCHANGED), or are the test's ``refine_reviews`` in turn. Like a model that
+follows those prompts' note, it reads the «&lt;» they write before a tag as «<», and
+writes «<» in the document.
 """
 
 from __future__ import annotations
@@ -39,7 +49,7 @@ from agentic_os.providers.base import (
     RefusalError,
     TextDelta,
 )
-from agentic_os.providers.prompt_format import AGENT_LABELS, label_of
+from agentic_os.providers.prompt_format import AGENT_LABELS, RESERVED_TAGS, label_of
 
 DEFAULT_AGREEMENTS: tuple[int, ...] = (72, 90)
 UNCHANGED_FROM = 85
@@ -48,7 +58,11 @@ UNCHANGED_FROM = 85
 _TAGGED = {
     "question": re.compile(r"<question>\n(.*?)\n</question>", re.DOTALL),
     "user_message": re.compile(r"<user_message>\n(.*?)\n</user_message>", re.DOTALL),
+    "brief": re.compile(r"<brief>\n(.*?)\n</brief>", re.DOTALL),
     "previous": re.compile(r"<your_previous_answer>\n(.*?)\n</your_previous_answer>", re.DOTALL),
+    "current_version": re.compile(r"<current_version>\n(.*?)\n</current_version>", re.DOTALL),
+    "draft": re.compile(r"<draft>\n(.*?)\n</draft>", re.DOTALL),
+    "draft_changelog": re.compile(r"<draft_changelog>\n(.*?)\n</draft_changelog>", re.DOTALL),
 }
 _ATTACHMENTS_SECTION = re.compile(r"\A<attachments>\n.*?\n</attachments>\n+", re.DOTALL)
 """The list of attachments before a solo or duel question (the prompt's own section)."""
@@ -59,6 +73,33 @@ _CHARS_PER_TOKEN = 4
 REFUSAL_TEXT = "No puc ajudar amb aquesta petició."
 CHECK_REPLY = '{"end": true}'
 """The default reply of a check call: every page's extracted text is right."""
+_ESCAPED_TAG = re.compile(r"&lt;(?=\s*/?\s*([A-Za-z_]\w*))")
+"""Where a refine prompt quotes a tag of the prompts (``neutralize_tags``)."""
+_PROPOSED = re.compile(r"^- \[([a-z]+)\] (.+)$", re.MULTILINE)
+"""A change in the reviews of an edit prompt, or in the changelog of a shortening's."""
+_BUDGET = re.compile(r"must have at most (\d+) words")
+REFINE_PROPOSALS: dict[AgentName, tuple[str, ...]] = {
+    "claude": (
+        "- [defect] Pas 2: no diu com es mesura el resultat — sense una mesura no es pot validar.",
+        "- [clarity] Pas 1: «en una frase» és vague — posa-hi un exemple curt.",
+    ),
+    "chatgpt": (
+        "- [defect] Taula: la fila «Prototip» no diu amb quants casos n'hi ha prou — "
+        "l'encàrrec demana poder-ho comprovar.",
+        "- [clarity] Final: la nota de demostració distreu — deixa-la sola a l'última línia.",
+    ),
+}
+"""The change each agent's review proposes in the first rounds of a refine turn."""
+REFINE_SCORES: tuple[int, ...] = (78, 92, 95)
+"""The scores of those reviews and then of every UNCHANGED one."""
+
+
+def _as_written(text: str) -> str:
+    """A text a refine prompt quotes, with «<» where the prompt wrote «&lt;» before a tag
+    of the prompts, as the prompt asks the model to write it in the document."""
+    return _ESCAPED_TAG.sub(
+        lambda match: "<" if match.group(1).casefold() in RESERVED_TAGS else match.group(0), text
+    )
 
 
 def _estimate(text: str) -> int:
@@ -100,7 +141,9 @@ class FakeProvider:
 
     ``mode`` is the mode it reports (``"fake"`` by default). ``check_replies`` are the
     replies of its successive "check" calls (the last one repeats; by default
-    :data:`CHECK_REPLY`)."""
+    :data:`CHECK_REPLY`). ``refine_reviews`` are the replies of its successive reviews of
+    a refine turn, again from the first for a new brief (the last one repeats; by default
+    :data:`REFINE_PROPOSALS`, then UNCHANGED)."""
 
     def __init__(
         self,
@@ -114,6 +157,7 @@ class FakeProvider:
         refuse_after: int = 0,
         mode: ProviderMode = "fake",
         check_replies: Sequence[str] | None = None,
+        refine_reviews: Sequence[str] | None = None,
     ) -> None:
         self._agent: AgentName = agent
         self._chunk_delay = chunk_delay
@@ -127,6 +171,9 @@ class FakeProvider:
         self._checks = 0
         self._revisions = 0
         self._revision_question: str | None = None
+        self._refine_reviews = tuple(refine_reviews) if refine_reviews else None
+        self._reviews = 0
+        self._review_brief: str | None = None
         self.requests: list[GenerationRequest] = []
         self.prewarmed: list[GenerationRequest] = []
         self.attachments: list[tuple[Attachment, ...]] = []
@@ -243,6 +290,16 @@ class FakeProvider:
             reply = self._check_replies[min(self._checks, len(self._check_replies) - 1)]
             self._checks += 1
             return reply
+        brief = _TAGGED["brief"].search(request.prompt)
+        if (
+            brief is not None
+            and request.purpose in ("revision", "synthesis")
+            and not any(
+                _TAGGED[name].search(request.prompt) for name in ("question", "user_message")
+            )
+        ):
+            # A refine prompt: a debate's has its question (which may quote a brief).
+            return self._refine(request, _as_written(brief.group(1)))
         question = self._question(request.prompt)
         if request.purpose == "revision":
             return self._revision(request.prompt, question)
@@ -259,7 +316,7 @@ class FakeProvider:
 
     @staticmethod
     def _question(prompt: str) -> str:
-        for name in ("question", "user_message"):
+        for name in ("question", "user_message", "brief"):
             match = _TAGGED[name].search(prompt)
             if match:
                 return match.group(1)
@@ -349,6 +406,86 @@ class FakeProvider:
             "| Revisió | Els errors habituals estan descartats |\n\n"
             "*Síntesi de demostració generada sense cap model real.*"
         )
+
+    # -- refine turns ----------------------------------------------------------------
+
+    def _refine(self, request: GenerationRequest, brief: str) -> str:
+        """A review, an edit, a shortening or the merge of a refine turn, by its prompt."""
+        prompt = request.prompt
+        if request.purpose == "revision":
+            return self._refine_review(brief)
+        draft = _TAGGED["draft"].search(prompt)
+        if draft is not None:
+            return self._shorten(prompt, _as_written(draft.group(1)))
+        current = _TAGGED["current_version"].search(prompt)
+        if current is not None:
+            return self._edit(prompt, _as_written(current.group(1)))
+        return self._merge(brief, request.attachments)
+
+    def _refine_review(self, brief: str) -> str:
+        if brief != self._review_brief:
+            # A new refine turn: the reviews start again.
+            self._review_brief = brief
+            self._reviews = 0
+        count = self._reviews
+        self._reviews += 1
+        if self._refine_reviews is not None:
+            return self._refine_reviews[min(count, len(self._refine_reviews) - 1)]
+        proposals = REFINE_PROPOSALS[self._agent]
+        changes = proposals[count] if count < len(proposals) else "UNCHANGED"
+        score = REFINE_SCORES[min(count, len(REFINE_SCORES) - 1)]
+        return f"<changes>\n{changes}\n</changes>\n<score>{score}</score>"
+
+    def _merge(self, brief: str, attachments: Sequence[Attachment]) -> str:
+        document = (
+            f"## {_topic(brief)}\n\n"
+            "1. **Objectiu clar:** escriu en una frase què vols aconseguir.\n"
+            "2. **Iteracions curtes:** comença per la solució més senzilla i mesura-la.\n"
+            "3. **Validació:** prova els casos límit abans de donar-ho per bo.\n\n"
+            "| Pas | Com saber que està fet |\n"
+            "| --- | --- |\n"
+            "| Objectiu | Està escrit i és mesurable |\n"
+            "| Prototip | Funciona amb un cas real |\n"
+            "| Revisió | Els errors habituals estan descartats |\n\n"
+            "*Document de demostració escrit sense cap model real.*"
+        )
+        changelog = (
+            "- [merge] Els passos numerats vénen de la resposta de Claude.\n"
+            "- [merge] La taula de comprovació ve de la resposta de ChatGPT."
+        )
+        document += self._mention(attachments)
+        return f"<version>\n{document}\n</version>\n<changelog>\n{changelog}\n</changelog>"
+
+    @staticmethod
+    def _edit(prompt: str, current: str) -> str:
+        """The current version with one more line, from the first change the reviews
+        proposed; its changelog applies every one of them (at most five)."""
+        reviews = _as_written(prompt.split("</current_version>", 1)[-1])
+        proposed = _PROPOSED.findall(reviews)[:5] or [("clarity", "Revisió general.")]
+        number = current.count("**Canvi ") + 1
+        version = f"{current}\n\n**Canvi {number}:** {proposed[0][1]}"
+        changelog = "\n".join(f"- [{kind}] {text}" for kind, text in proposed)
+        return f"<version>\n{version}\n</version>\n<changelog>\n{changelog}\n</changelog>"
+
+    @staticmethod
+    def _shorten(prompt: str, draft: str) -> str:
+        """The draft's first whole lines that fit the budget, with its changelog."""
+        budgets = _BUDGET.findall(prompt)
+        budget = int(budgets[-1]) if budgets else 300
+        kept: list[str] = []
+        count = 0
+        for line in draft.splitlines():
+            count += len(line.split())
+            if count > budget:
+                break
+            kept.append(line)
+        version = "\n".join(kept).strip() or " ".join(draft.split()[:budget])
+        listed = _TAGGED["draft_changelog"].search(prompt)
+        changes = _PROPOSED.findall(_as_written(listed.group(1)) if listed else "")[:5]
+        changelog = "\n".join(f"- [{kind}] {text}" for kind, text in changes) or (
+            "- [simplification] Escurça el document fins al límit de paraules."
+        )
+        return f"<version>\n{version}\n</version>\n<changelog>\n{changelog}\n</changelog>"
 
     @staticmethod
     def _summary(request: GenerationRequest) -> str:

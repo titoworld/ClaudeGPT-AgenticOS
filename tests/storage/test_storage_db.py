@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agentic_os.orchestrator.store import NewMessage
 from agentic_os.storage import SqliteStore
 from agentic_os.storage.db import MIGRATIONS, SCHEMA_VERSION, Database, SchemaVersionError
 
@@ -91,7 +92,7 @@ async def test_version_1_databases_are_migrated(tmp_path: Path) -> None:
 
     db = await Database.open(path)
     try:
-        assert await db.schema_version() == SCHEMA_VERSION == 5
+        assert await db.schema_version() == SCHEMA_VERSION == 6
         async with db.transaction(write=False) as tx:
             rows = await tx.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
             row = await tx.fetchone("SELECT value FROM settings WHERE key = 'a'")
@@ -145,7 +146,7 @@ async def test_version_2_savings_get_their_value_from_the_turns_meta(tmp_path: P
 
     async with await SqliteStore.open(path) as store:
         async with store._db.transaction(write=False) as tx:
-            assert await tx.user_version() == SCHEMA_VERSION == 5
+            assert await tx.user_version() == SCHEMA_VERSION == 6
             rows = await tx.fetchall("SELECT turn_id, kind, cost_usd FROM savings ORDER BY id")
         assert [tuple(row) for row in rows] == [
             (1, "compaction", 0.004),
@@ -159,6 +160,65 @@ async def test_version_2_savings_get_their_value_from_the_turns_meta(tmp_path: P
         stats = await store.stats(1, now)
         assert stats["savings"]["cost_usd"] == 0.004  # kept with the savings history
         assert stats["savings"]["total"] == 42
+
+
+async def test_version_5_conversations_keep_their_last_mode_in_a_column_that_takes_refine(
+    tmp_path: Path,
+) -> None:
+    """Migration 6 (docs/adr/0010-mode-perfecciona.md): the ``CHECK`` of ``last_mode``
+    refuses the refine mode and cannot be altered in place (rebuilding the table would
+    cascade through its messages), so the last mode moves to ``last_turn_mode``, with
+    the values it had; ``last_mode`` stays, unused."""
+    path = tmp_path / "db.sqlite3"
+    ts = "2026-10-01T10:00:00.000Z"
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        for migration in MIGRATIONS[:5]:
+            for statement in migration:
+                conn.execute(statement)
+        for conversation_id, mode in ((1, "solo"), (2, "duel"), (3, "debate"), (4, None)):
+            conn.execute(
+                "INSERT INTO conversations (id, title, last_mode, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (conversation_id, f"Conversa {conversation_id}", mode, ts, ts),
+            )
+        conn.execute(
+            "INSERT INTO messages (conversation_id, turn_id, kind, content, meta, created_at) "
+            "VALUES (3, 1, 'question', 'Pregunta', '{\"mode\": \"debate\"}', ?)",
+            (ts,),
+        )
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+
+    async with await SqliteStore.open(path) as store:
+        async with store._db.transaction(write=False) as tx:
+            assert await tx.user_version() == SCHEMA_VERSION == 6
+            rows = await tx.fetchall(
+                "SELECT id, last_mode, last_turn_mode FROM conversations ORDER BY id"
+            )
+        assert [tuple(row) for row in rows] == [
+            (1, "solo", "solo"),
+            (2, "duel", "duel"),
+            (3, "debate", "debate"),
+            (4, None, None),
+        ]
+        listed = {summary.id: summary.last_mode for summary in await store.list_conversations()}
+        assert listed == {1: "solo", 2: "duel", 3: "debate", 4: None}
+        detail = await store.get_conversation(3)
+        assert detail is not None and detail.conversation.message_count == 1
+
+        # A refine turn is now a conversation's last mode; the CHECK still refuses the rest.
+        await store.add_message(
+            NewMessage(4, "question", "Perfecciona el pla", final=True, meta={"mode": "refine"})
+        )
+        refined = await store.get_conversation(4)
+        assert refined is not None and refined.conversation.last_mode == "refine"
+        async with store._db.transaction() as tx:
+            with pytest.raises(sqlite3.IntegrityError):
+                await tx.execute("UPDATE conversations SET last_turn_mode = 'trio' WHERE id = 1")
+            row = await tx.fetchone(
+                "SELECT last_mode, last_turn_mode FROM conversations WHERE id = 4"
+            )
+        assert row is not None and tuple(row) == (None, "refine")
 
 
 async def test_newer_schema_is_rejected(tmp_path: Path) -> None:

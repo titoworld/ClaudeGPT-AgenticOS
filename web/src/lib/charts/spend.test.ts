@@ -53,7 +53,7 @@ function stats(over: Partial<Stats> = {}): Stats {
     daily: [],
     savings_daily: [],
     latency: {} as Stats['latency'],
-    turns: { solo: 0, duel: 0, debate: 0 },
+    turns: { solo: 0, duel: 0, debate: 0, refine: 0 },
     consensus: { debates: 0, reached: 0, avg_rounds: null },
     costs: {
       fx: HALF,

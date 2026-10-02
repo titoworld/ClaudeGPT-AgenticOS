@@ -4,6 +4,7 @@
   import { approxEur, processedTokens, tokenBreakdown, turnCost, turnCostTitle } from '../lib/costs';
   import { AGENT_LABEL, formatInt, formatTime } from '../lib/format';
   import { AGENTS } from '../lib/protocol';
+  import { keptVersion } from '../lib/refine';
   import { MODE_LABEL } from '../lib/text';
   import {
     DEFAULT_CONSENSUS_THRESHOLD,
@@ -24,6 +25,7 @@
   import DebateStepper from './DebateStepper.svelte';
   import Icon from './Icon.svelte';
   import PdfChecks from './PdfChecks.svelte';
+  import RefineTurn from './RefineTurn.svelte';
   import RevisionRound from './RevisionRound.svelte';
   import SavingsChip from './SavingsChip.svelte';
 
@@ -60,6 +62,9 @@
   const showSynthesisSlot = $derived(
     !!synthesis || (active && turn.phase === 'synthesis'),
   );
+  // A refine turn stopped with «Atura ara» keeps its last accepted version, if it has one: its
+  // document says so. One stopped before any version was accepted keeps none.
+  const keptDocument = $derived(turn.mode === 'refine' && keptVersion(turn) != null);
   const consensusLabel = $derived.by(() => {
     const c = turn.consensus;
     if (!c) return null;
@@ -117,7 +122,9 @@
     <PdfChecks {checks} eurPerUsd={app.eurPerUsd} />
   {/if}
 
-  {#if turn.mode === 'solo'}
+  {#if turn.mode === 'refine'}
+    <RefineTurn {turn} />
+  {:else if turn.mode === 'solo'}
     <AnswerCard agent={soloAgent} stream={answers[soloAgent] ?? null} {active} />
   {:else}
     <div class="cols">
@@ -154,7 +161,7 @@
       <Icon name="alert" size={16} />
       <span><strong>El torn ha fallat.</strong> {turn.error?.message ?? ''}</span>
     </div>
-  {:else if turn.status === 'cancelled'}
+  {:else if turn.status === 'cancelled' && !keptDocument}
     <!-- The owner's stop or a server shutdown: neither the event nor the outcome says which. -->
     <div class="banner"><Icon name="x" size={16} /><span>Aquest torn s'ha aturat.</span></div>
   {/if}

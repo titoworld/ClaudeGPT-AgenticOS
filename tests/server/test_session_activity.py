@@ -4,7 +4,7 @@ The idle timeout must end a session nobody uses, even in a tab that stays open: 
 requests the SPA makes by itself (marked ``X-AOS-Background: 1``), the WebSocket
 handshake of a reconnection, pings and the resubscriptions after a reconnection
 check the session read-only. The owner's actions (opening a conversation, saving,
-``turn.start``, ``turn.cancel``...) keep refreshing it.
+``turn.start``, ``turn.stop``, ``turn.cancel``...) keep refreshing it.
 """
 
 import functools
@@ -225,8 +225,14 @@ def test_resubscribing_is_not_activity_but_the_owner_actions_are(tmp_path: Path)
         assert ws.receive_json() == {"type": "turn.unknown", "request_id": "old"}
         assert last_seen(client, state, token) == T0 + timedelta(minutes=10)
 
+        # «Atura en acabar la ronda» is the owner's too (docs/adr/0010-mode-perfecciona.md).
+        clock.now += timedelta(minutes=5)
+        ws.send_json({"type": "turn.stop", "request_id": "old"})
+        assert ws.receive_json() == {"type": "turn.unknown", "request_id": "old"}
+        assert last_seen(client, state, token) == T0 + timedelta(minutes=15)
+
         clock.now += timedelta(minutes=10)
         ws.send_json({"type": "turn.start", "request_id": "r1", "text": "Hola", "mode": "solo"})
         while ws.receive_json()["type"] != "turn.completed":
             pass
-        assert last_seen(client, state, token) == T0 + timedelta(minutes=20)
+        assert last_seen(client, state, token) == T0 + timedelta(minutes=25)

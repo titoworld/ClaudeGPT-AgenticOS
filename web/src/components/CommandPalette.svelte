@@ -2,7 +2,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { lightDismiss, syncDialog } from '../lib/dialog';
-  import { CONVERSATION_QUERY_MAX_LENGTH, type ConversationSummary, type TurnMode } from '../lib/protocol';
+  import { CONVERSATION_QUERY_MAX_LENGTH, TURN_MODES, type ConversationSummary, type TurnMode } from '../lib/protocol';
   import { router } from '../lib/router.svelte';
   import { fuzzyFilter, MODE_LABEL } from '../lib/text';
   import Icon, { type IconName } from './Icon.svelte';
@@ -41,13 +41,14 @@
 
   const actions: Command[] = [
     { id: 'new', label: 'Nova conversa', group: 'Accions', icon: 'plus', run: () => app.newConversation() },
-    ...(['solo', 'duel', 'debate'] as const).map(
+    // «Perfecciona» too: picking it here is the owner choosing it (it is never a default).
+    ...TURN_MODES.map(
       (mode): Command => ({
         id: `mode-${mode}`,
         label: `Canvia al mode ${MODE_LABEL[mode]}`,
         group: 'Accions',
         icon: `mode-${mode}`,
-        keywords: 'mode canviar',
+        keywords: mode === 'refine' ? 'mode canviar perfeccionar' : 'mode canviar',
         run: () => setMode(mode),
       }),
     ),

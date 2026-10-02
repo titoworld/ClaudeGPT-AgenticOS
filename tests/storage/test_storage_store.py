@@ -99,6 +99,42 @@ async def test_question_turn_id_is_its_own_id_and_updates_conversation(
     assert message.created_at == T0 + timedelta(seconds=60)
 
 
+async def test_a_refine_turn_is_the_last_mode_of_its_conversation(store: SqliteStore) -> None:
+    """The conversation keeps its last mode in ``last_turn_mode`` (migration 6), which
+    takes the refine mode; the old ``last_mode`` column is no longer written."""
+    conversation_id = await store.create_conversation("Pla de llançament")
+    await _question(store, conversation_id, mode="debate")
+    question_id = await _question(store, conversation_id, mode="refine")
+    await store.add_message(
+        NewMessage(
+            conversation_id=conversation_id,
+            kind="synthesis",
+            content="Versió 3 del pla",
+            turn_id=question_id,
+            agent="claude",
+            round=3,
+            final=True,
+        )
+    )
+    [summary] = await store.list_conversations()
+    assert summary.last_mode == "refine"
+    assert summary.to_wire()["last_mode"] == "refine"
+    detail = await store.get_conversation(conversation_id)
+    assert detail is not None and detail.conversation.last_mode == "refine"
+    renamed = await store.rename_conversation(conversation_id, "Pla final")
+    assert renamed is not None and renamed.last_mode == "refine"
+
+    await _question(store, conversation_id, mode="solo")
+    [summary] = await store.list_conversations()
+    assert summary.last_mode == "solo"
+    async with store._db.transaction(write=False) as tx:
+        row = await tx.fetchone(
+            "SELECT last_mode, last_turn_mode FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+    assert row is not None and tuple(row) == (None, "solo")
+
+
 async def test_empty_title_gets_default(store: SqliteStore) -> None:
     conversation_id = await store.create_conversation("   ")
     detail = await store.get_conversation(conversation_id)

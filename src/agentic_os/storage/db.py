@@ -249,7 +249,18 @@ _V5: Final[tuple[str, ...]] = (
     """,
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3, _V4, _V5)
+_V6: Final[tuple[str, ...]] = (
+    # The refine mode (docs/adr/0010-mode-perfecciona.md) is a turn mode that the CHECK of
+    # conversations.last_mode refuses. SQLite cannot alter a CHECK in place, and rebuilding
+    # the table would delete its messages (dropping it runs their ON DELETE CASCADE, and
+    # foreign keys cannot be turned off inside the migration's transaction), so the last
+    # mode moves to a new column with the old values. last_mode stays, no longer used.
+    "ALTER TABLE conversations ADD COLUMN last_turn_mode TEXT "
+    "CHECK (last_turn_mode IN ('solo', 'duel', 'debate', 'refine'))",
+    "UPDATE conversations SET last_turn_mode = last_mode",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_V1, _V2, _V3, _V4, _V5, _V6)
 """Statements of each schema version, oldest first. Append only."""
 
 SCHEMA_VERSION: Final = len(MIGRATIONS)

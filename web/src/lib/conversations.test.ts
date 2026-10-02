@@ -406,6 +406,7 @@ describe('the app when a turn ends (A13)', () => {
     default_mode: 'solo',
     default_target: 'claude',
     debate: { rounds: 1, consensus_threshold: 80, synthesizer: 'claude' },
+    refine: { max_rounds: 12, budget_eur: 3, max_words: null, stop_on_convergence: true, convergence_threshold: 90, editor: 'claude' },
     use_cache: false,
     compaction_threshold_tokens: 6000,
     models: { claude: null, chatgpt: null },

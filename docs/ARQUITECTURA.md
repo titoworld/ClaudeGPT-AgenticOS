@@ -14,7 +14,8 @@ Caddy (TLS automàtic, capçaleres de seguretat, compressió)
 Aplicació Python (FastAPI + uvicorn/uvloop)
    ├── server/       API REST, WebSocket, sessió, capçaleres de seguretat (CSP), fitxers estàtics del frontend
    ├── security/     contrasenya argon2id, TOTP, sessions, dispositius coneguts, límits d'intents
-   ├── orchestrator/ motor de torns: solo · duel · debat, compactació, memòria cau, comptabilitat
+   ├── orchestrator/ motor de torns: solo · duel · debat · perfecciona, compactació,
+   │                 memòria cau, comptabilitat
    ├── providers/    Claude i ChatGPT, cadascun en mode cli · api · fake
    ├── storage/      SQLite (WAL): converses, missatges, adjunts, ús, estalvis, memòria cau,
    │                 sessions; els fitxers adjunts, al costat, adreçats pel contingut
@@ -30,7 +31,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 
 | Mòdul | Contracte | Responsabilitat |
 | --- | --- | --- |
-| `domain.py` | tipus compartits | `AgentName`, `TurnMode`, `Usage`, opcions de debat |
+| `domain.py` | tipus compartits | `AgentName`, `TurnMode`, `Usage`, opcions de debat i de «Perfecciona» |
 | `providers/base.py` | `Provider`, `Attachment` | Converteix una `GenerationRequest` (amb els seus adjunts) en un flux de `TextDelta` + un `GenerationResult` |
 | `orchestrator/store.py` | `Store` | Persistència que necessita el motor (implementada per `storage`), també el resultat de cada torn i els adjunts de la pregunta |
 | `orchestrator/events.py` | esdeveniments, `TurnOutcome` | Missatges servidor → client d'un torn ([PROTOCOL.md](PROTOCOL.md)) i com va acabar |
@@ -41,6 +42,7 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
 | `attachments.py` | límits, `PdfReader` | Límits dels adjunts, tipus d'un fitxer pel contingut, dimensions d'una imatge, nom net, tokens estimats i lectura dels PDF en un procés a part: el text i l'anàlisi de cada pàgina |
 | `pdf_facts.py` | `PdfPage`, `PdfCheck` | Què ha trobat el lector a cada pàgina d'un PDF i els avisos que en surten; el contrast de Claude, llegit estrictament |
 | `orchestrator/pdf_check.py` | `check_pdf` | Contrast de Claude del text d'un PDF que llegeix ChatGPT amb la subscripció |
+| `orchestrator/refine.py` | `parse_review`, `parse_edit` | El mode «Perfecciona»: llegeix estrictament les revisions i les versions de l'editor, també mentre arriben |
 
 ## Modes de torn
 
@@ -51,6 +53,19 @@ Aplicació Python (FastAPI + uvicorn/uvloop)
   2. *Rondes de revisió* (per defecte fins a 2): cada agent rep la pregunta, la seva resposta i la de l'altre, i retorna una crítica breu, la seva resposta millorada (o `UNCHANGED`, amb una nota curta opcional, si no cal canviar-la) i un grau d'acord 0–100.
   3. *Parada per consens:* si tots dos superen el llindar (per defecte 85), no es fan més rondes.
   4. *Síntesi:* l'agent sintetitzador combina les dues respostes finals i els punts de desacord en la resposta definitiva.
+- **Perfecciona** (`refine`, [ADR 0010](adr/0010-mode-perfecciona.md)): les dues IA milloren **un sol document** (un pla, un text, un disseny, codi) ronda rere ronda, fins que el propietari l'atura. Només comença quan el propietari el tria: no pot ser el mode per defecte.
+  1. *Respostes inicials* (ronda 0) en paral·lel, com en un debat.
+  2. *Fusió* (ronda 1): l'editor (Claude per defecte) fusiona les dues respostes en la versió 1.
+  3. *Rondes de millora* (de la 2 endavant): totes dues revisen la versió vigent. Cada revisió proposa com a molt 5 canvis (corregir un defecte, guanyar claredat, simplificar o complir un requisit de l'encàrrec) i puntua de 0 a 100 com respon la versió a l'encàrrec; o bé diu `UNCHANGED`, si no hi canviaria res. Una revisió que no segueix aquest format (no hi proposa cap canvi amb el seu tipus ni hi diu `UNCHANGED`) falla, i aquell agent no compta en la ronda. Després l'editor escriu la versió següent, amb com a molt 5 canvis i una línia de registre per canvi. Si cap revisió no hi proposa res, no hi ha edició.
+  4. *Sense sobredimensionar-lo:* cada prompt torna a citar l'encàrrec, i un canvi ha de dir quin defecte corregeix o quin requisit compleix: els afegits que l'encàrrec no demana es rebutgen, i cada revisió ha de buscar també què es pot treure o simplificar. Els prompts porten la llargada de la versió, el límit de paraules i les 30 últimes línies del registre de canvis, perquè desfer un canvi anterior s'ha de justificar. El límit és el del propietari o, si no en fixa cap, 1,2 vegades les paraules de la versió 1 (300 com a mínim). El motor el comprova sense cap model: una versió que el passa té un intent per escurçar-se i, si encara el passa, la ronda es descarta i es manté la versió vigent. La versió 1, que no en té cap d'anterior, també té un intent per escurçar-se quan la fusió passa del límit del propietari, però si encara el passa (o si és la còpia d'una resposta) es queda igualment, i són les edicions següents les que l'han de fer cabre. Tampoc no s'accepta una resposta sense la versió completa ni una versió igual a la vigent. Totes es desen igualment, perquè el propietari les vegi. L'editor escriu cada versió sencera en una sola resposta, que té com a molt 16.000 tokens de sortida, el raonament inclòs: una versió que no hi cap es talla i no s'accepta. Per això el document no pot passar d'unes 10.000 paraules de prosa en anglès (en català o en codi, menys), encara que el límit de paraules n'admeti més.
+  5. *Aturada:* el torn s'acaba amb la versió vigent, que és la resposta final i la que veuen els torns següents:
+     - quan el propietari l'atura, en acabar la ronda (`turn.stop`) o de seguida (`turn.cancel`: les crides en curs es cancel·len, però la versió vigent es desa igualment com a resposta final, sense cap crida);
+     - quan cap de les dues no hi troba res a canviar 2 rondes seguides (sempre);
+     - quan totes dues li donen el llindar (90 per defecte) o més, sense proposar cap defecte, 2 rondes seguides (es pot desactivar, per fer-lo «infinit»);
+     - al màxim de rondes (12 per defecte, de 2 a 50), comptant-hi la fusió, o quan ha gastat el pressupost (3 € per defecte, de 0,1 a 100 €; en mode subscripció compta el valor a preus d'API, per no esgotar la quota). El motor compta en dòlars, així que el servidor li passa el pressupost convertit amb el tipus amb què l'aplicació mostra els euros. Les crides dels models sense preu no hi compten;
+     - quan les dues fallen en una ronda. Si només en falla una, l'altra continua sola.
+
+  Un torn «Perfecciona» no fa servir mai la memòria cau de torns.
 
 ## Estalvi de tokens
 
@@ -64,7 +79,7 @@ Tots els recomptes de tokens fan servir els **tokens processats** d'una crida: e
 | Compactació | Quan l'historial supera el llindar, els missatges antics es resumeixen amb el model ràpid i es conserven els últims | (tokens de l'historial original − tokens del context compactat) × crides facturades del torn que porten el context (les respostes i la síntesi) |
 | Parada per consens | S'ometen les rondes que queden | tokens processats mitjans d'una ronda × rondes omeses |
 | `UNCHANGED` | Un agent d'acord no reescriu la resposta (com a molt hi afegeix una nota curta) | longitud de la resposta no reescrita |
-| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau | tokens processats del torn original, amb els intents declinats abans d'un fallback; el valor, cada crida a les tarifes actuals del seu model |
+| Memòria cau de respostes | Una pregunta idèntica (mateix mode, agents, models i context) es respon sense cridar cap model. Si no se sap quin model respondrà (l'estat del proveïdor tarda, falla o diu que no està disponible), el torn no llegeix ni desa la memòria cau. Un torn «Perfecciona» no la fa servir mai | tokens processats del torn original, amb els intents declinats abans d'un fallback; el valor, cada crida a les tarifes actuals del seu model |
 | Memòria cau del proveïdor | Prefixos estables (prompt de sistema primer) perquè Anthropic i OpenAI reaprofitin el càlcul | `cache_read_tokens` |
 
 ## Proveïdors
@@ -106,6 +121,7 @@ Com acaba cada torn (completat, fallit o cancel·lat) es decideix una sola vegad
 - Un torn cancel·lat desa el resultat abans que la cancel·lació continuï, en una tasca pròpia protegida amb `asyncio.shield`. Un torn es cancel·la una sola vegada: un segon «Atura», o l'aturada del servidor, no interromp un torn que ja s'està aturant, i `turn.cancelled` arriba després del resultat desat, amb el mateix total. En aturar-se, el servidor espera que aquests torns acabin abans de tancar la base de dades.
 - Un torn cancel·lat just quan desava els estalvis (ja amb tots els missatges) els acaba d'escriure i el resultat els porta, com les files que compta el tauler. Qualsevol altre torn cancel·lat o fallit no en registra.
 - `turn.failed` i `turn.cancelled` porten el total del torn, com `turn.completed`, i `stream.failed` porta el cost de la crida fallida quan se sap.
+- Un torn «Perfecciona» hi afegeix per què s'ha acabat (`stop_reason`: l'ha aturat el propietari, cap dels dos no hi troba res a canviar, ha convergit, s'han acabat les rondes o el pressupost, o els dos models han fallat). Si es cancel·la quan ja té una versió, la desa abans com a resposta final, sense cap crida i amb la mateixa protecció, perquè no es perdi res del que ja s'ha pagat.
 
 ## Integritat de les respostes
 

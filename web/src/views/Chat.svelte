@@ -7,6 +7,7 @@
   import Turn from '../components/Turn.svelte';
   import { app } from '../lib/app.svelte';
   import { prefs } from '../lib/prefs.svelte';
+  import { stopBars } from '../lib/stop-bars.svelte';
 
   const STICK_THRESHOLD_PX = 80;
 
@@ -20,6 +21,14 @@
   const turns = $derived(app.viewTurns);
   const plannedRounds = $derived(app.settings.debate.rounds);
   const showEmpty = $derived(turns.length === 0 && convs.currentId == null);
+  /**
+   * While a refine turn's stop bar sticks to the bottom (RefineControls.svelte: its height,
+   * its offset and the room of «Baixa al final»), what gets the keyboard focus is brought into
+   * view above it, with a gap, never behind it (WCAG 2.2, 2.4.11).
+   */
+  const focusRoom = $derived(
+    stopBars.height ? `calc(${stopBars.height}px + 0.6rem + var(--pill-room, 0rem) + 0.75rem)` : null,
+  );
 
   function distanceFromBottom(el: HTMLElement): number {
     return el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -134,9 +143,12 @@
   }
 </script>
 
-<div class="chat">
+<!-- While «Baixa al final» shows, what sticks to the bottom of the conversation (a refine turn's
+     controls) leaves it room. -->
+<div class="chat" style:--pill-room={!stick && turns.length > 0 ? '2.9rem' : null}>
   <div
     class="scroller"
+    style:scroll-padding-bottom={focusRoom}
     bind:this={scroller}
     onscroll={onScroll}
     {@attach scrollIntent}>

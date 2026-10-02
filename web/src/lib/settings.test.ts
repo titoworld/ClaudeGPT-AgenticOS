@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS,
   formatAmount,
   INVALID_AMOUNT,
+  LIMITS,
   normalizeSettings,
   parseAmount,
   validatePrice,
@@ -186,5 +187,92 @@ describe('pdf_in_revisions: what the debate revisions get of an attached PDF', (
       expect(normalizeSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: value } as unknown as Partial<RuntimeSettings>).pdf_in_revisions).toBe('text');
     }
     expect(cleanSettings({ ...DEFAULT_SETTINGS, pdf_in_revisions: 'full' }).pdf_in_revisions).toBe('full');
+  });
+});
+
+/** docs/PROTOCOL.md, read from disk: Vite serves nothing from outside web/. */
+async function protocolDoc(): Promise<string> {
+  const module: string = 'node:fs'; // not a literal: the web code has no Node types
+  const fs = (await import(/* @vite-ignore */ module)) as { readFileSync(path: string, encoding: 'utf8'): string };
+  const here: string = import.meta.url;
+  return fs.readFileSync(decodeURIComponent(new URL('../../../docs/PROTOCOL.md', here).pathname), 'utf8');
+}
+
+describe('the refine defaults («Perfecciona», ADR 0010)', () => {
+  it('has the ranges and defaults the protocol gives, as the server validates them', async () => {
+    // tests/test_docs.py checks that these numbers are the server's.
+    const doc = await protocolDoc();
+    const range = (field: string) => {
+      const m = new RegExp(`${field}: [^;]+;\\s+// ([\\d,.]+)–([\\d,.]+)`).exec(doc);
+      return m ? [m[1]!, m[2]!].map((n) => Number(n.replaceAll('.', '').replace(',', '.'))) : null;
+    };
+    expect(range('max_rounds')).toEqual([LIMITS.refine_rounds.min, LIMITS.refine_rounds.max]);
+    expect(range('budget_eur')).toEqual([LIMITS.refine_budget_eur.min, LIMITS.refine_budget_eur.max]);
+    expect(range('convergence_threshold')).toEqual([LIMITS.refine_threshold.min, LIMITS.refine_threshold.max]);
+    const words = /de cada versió: ([\d.]+)–([\d.]+)/.exec(doc);
+    expect(words && [words[1], words[2]].map((n) => Number(n!.replaceAll('.', '')))).toEqual([
+      LIMITS.refine_words.min,
+      LIMITS.refine_words.max,
+    ]);
+    expect(DEFAULT_SETTINGS.refine).toEqual({
+      max_rounds: 12,
+      budget_eur: 3,
+      max_words: null,
+      stop_on_convergence: true,
+      convergence_threshold: 90,
+      editor: 'claude',
+    });
+    for (const [field, value] of [['max_rounds', 12], ['budget_eur', 3], ['convergence_threshold', 90]] as const) {
+      expect(new RegExp(`${field}: [^;]+;\\s+// [^\\n]*per defecte (\\d+)`).exec(doc)?.[1]).toBe(String(value));
+    }
+  });
+
+  it('fills them when an older server does not send them, and keeps the ones it sends', () => {
+    expect(normalizeSettings({ default_mode: 'solo' }).refine).toEqual(DEFAULT_SETTINGS.refine);
+    const saved = normalizeSettings({ ...DEFAULT_SETTINGS, refine: { ...DEFAULT_SETTINGS.refine, max_rounds: 20, max_words: 800 } });
+    expect(saved.refine).toMatchObject({ max_rounds: 20, max_words: 800, budget_eur: 3 });
+    // A deep copy, as the rest.
+    saved.refine.max_rounds = 4;
+    expect(DEFAULT_SETTINGS.refine.max_rounds).toBe(12);
+  });
+
+  it('never takes refine as the default mode: a refine turn runs until the owner stops it', () => {
+    for (const mode of ['refine', 'consell', null, 3]) {
+      const s = normalizeSettings({ ...DEFAULT_SETTINGS, default_mode: mode } as unknown as Partial<RuntimeSettings>);
+      expect(s.default_mode).toBe('debate');
+    }
+    expect(normalizeSettings({ ...DEFAULT_SETTINGS, default_mode: 'duel' }).default_mode).toBe('duel');
+  });
+
+  it('validates every refine field with its range', () => {
+    const s = valid();
+    s.refine = { ...s.refine, max_rounds: 1, budget_eur: 0.05, max_words: 99, convergence_threshold: 101 };
+    expect(validateSettings(s)).toEqual({
+      'refine.max_rounds': "Ha d'estar entre 2 i 50.",
+      'refine.budget_eur': "Ha d'estar entre 0,1 i 100.",
+      'refine.max_words': "Ha d'estar entre 100 i 20.000.",
+      'refine.convergence_threshold': "Ha d'estar entre 50 i 100.",
+    });
+    s.refine = { ...s.refine, max_rounds: 50, budget_eur: 100, max_words: 20_000, convergence_threshold: 50 };
+    expect(validateSettings(s)).toEqual({});
+    s.refine = { ...s.refine, max_rounds: 2, budget_eur: 0.1, max_words: null };
+    expect(validateSettings(s)).toEqual({});
+  });
+
+  it('reports an amount it cannot read, an empty one, and a word limit that is not a whole number', () => {
+    const s = valid();
+    s.refine = { ...s.refine, budget_eur: parseAmount('1.000') as number, max_words: Number.NaN };
+    expect(validateSettings(s)).toMatchObject({
+      'refine.budget_eur': INVALID_AMOUNT,
+      'refine.max_words': 'Cal un número.',
+    });
+    s.refine = { ...s.refine, budget_eur: parseAmount('') as unknown as number, max_words: 150.5 };
+    expect(validateSettings(s)).toMatchObject({
+      'refine.budget_eur': 'Cal un import.',
+      'refine.max_words': 'Ha de ser un nombre enter.',
+    });
+    s.refine = { ...s.refine, budget_eur: parseAmount('2,5') as number, max_words: 400 };
+    expect(validateSettings(s)).toEqual({});
+    expect(cleanSettings(s).refine).toMatchObject({ budget_eur: 2.5, max_words: 400 });
   });
 });

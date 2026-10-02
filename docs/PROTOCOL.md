@@ -5,7 +5,7 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 ## Autenticació i seguretat comuna
 
 - Sessió amb una cookie `__Host-aos_session` (HttpOnly, Secure, SameSite=Strict, Path=/). En desenvolupament sense HTTPS (`AOS_SECURE_COOKIES=false`) la cookie es diu `aos_session` i no és `Secure`. La sessió caduca després de `AOS_SESSION_IDLE_HOURS` sense activitat (72 h) i als `AOS_SESSION_MAX_DAYS` (30 dies).
-- Activitat: només les accions del propietari allarguen la caducitat per inactivitat (iniciar sessió, obrir una conversa, desar, esborrar, canviar un nom, `turn.start`, `turn.cancel`...). Les peticions REST que el client fa pel seu compte, sense cap acció del propietari (els refrescos després d'un `hello` o d'una reconnexió, els refrescos periòdics i els reintents), porten la capçalera `X-AOS-Background: 1`. Per a aquestes, el servidor comprova la sessió només en lectura, com un `ping`: respon igual (`401` si ja no és vàlida), però no allarga la caducitat. Així, una pestanya oberta sense ús no manté la sessió viva. El client també posa la capçalera a tots els `POST /api/auth/logout`, perquè un logout que falla no allargui la sessió (si funciona, la tanca igualment). Sense la capçalera, o amb un altre valor, la petició compta com a activitat. L'*handshake* del WebSocket també és només de lectura (vegeu [WebSocket](#websocket-apiws)).
+- Activitat: només les accions del propietari allarguen la caducitat per inactivitat (iniciar sessió, obrir una conversa, desar, esborrar, canviar un nom, `turn.start`, `turn.stop`, `turn.cancel`...). Les peticions REST que el client fa pel seu compte, sense cap acció del propietari (els refrescos després d'un `hello` o d'una reconnexió, els refrescos periòdics i els reintents), porten la capçalera `X-AOS-Background: 1`. Per a aquestes, el servidor comprova la sessió només en lectura, com un `ping`: respon igual (`401` si ja no és vàlida), però no allarga la caducitat. Així, una pestanya oberta sense ús no manté la sessió viva. El client també posa la capçalera a tots els `POST /api/auth/logout`, perquè un logout que falla no allargui la sessió (si funciona, la tanca igualment). Sense la capçalera, o amb un altre valor, la petició compta com a activitat. L'*handshake* del WebSocket també és només de lectura (vegeu [WebSocket](#websocket-apiws)).
 - Dispositiu conegut: cada inici de sessió correcte posa també una cookie `__Host-aos_device` (HttpOnly, Secure, SameSite=Strict, Path=/; sense HTTPS es diu `aos_device` i no és `Secure`) amb un testimoni aleatori que dura 1 any i se substitueix per un de nou a cada inici de sessió. El logout la conserva; `agentic-os init` i `agentic-os reset-sessions` obliden tots els dispositius. Un intent d'inici de sessió que la porta només es limita pel comptador d'errors d'aquell dispositiu (no pel de l'adreça ni pel global), de manera que ningú no pot bloquejar el propietari des d'un navegador on ja ha entrat.
 - Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
 - Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`: la d'`AOS_PUBLIC_ORIGIN` o una d'`AOS_EXTRA_ORIGINS`. Si no, la petició rep `403`. El WebSocket, en canvi, s'accepta i es tanca de seguida amb el codi `4403`, perquè el navegador en vegi el motiu: d'un *handshake* rebutjat no en veu cap.
@@ -44,7 +44,7 @@ Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). To
 
 ```ts
 type Agent = "claude" | "chatgpt";
-type TurnMode = "solo" | "duel" | "debate";
+type TurnMode = "solo" | "duel" | "debate" | "refine";   // refine: «Perfecciona» (ADR 0010)
 type MessageKind = "question" | "answer" | "revision" | "synthesis";
 
 interface Usage {
@@ -117,14 +117,33 @@ interface Pricing {
 // default: a una fila "custom" que substitueix un preu per defecte (la mateixa key),
 // aquell preu per defecte; null a les altres.
 
+interface RefineOptions {                 // opcions d'un torn «Perfecciona» (ADR 0010)
+  max_rounds: number;                     // 2–50, per defecte 12: les rondes que escriuen una
+                                          // versió, la fusió de la ronda 1 inclosa
+  budget_eur: number;                     // 0,1–100, per defecte 3: el que pot gastar el torn,
+                                          // en euros (en mode subscripció, el valor a preus d'API)
+  max_words: number | null;               // límit de paraules de cada versió: 100–20000, o
+                                          // null (per defecte) per al límit automàtic:
+                                          // 1,2 vegades les de la versió 1, i 300 com a mínim
+                                          // (cada versió ha de cabre en una sola resposta:
+                                          // vegeu «Metadades de missatge»)
+  stop_on_convergence: boolean;           // per defecte true: s'atura sol quan convergeix
+                                          // (stop_reason "converged")
+  convergence_threshold: number;          // 50–100, per defecte 90
+  editor: Agent;                          // per defecte "claude": fusiona les respostes i
+                                          // escriu cada versió
+}
+
 interface RuntimeSettings {
   revision: number;                       // desaments: 0 fins al primer, +1 a cada un
                                           // (vegeu «Desament de la configuració»)
-  default_mode: TurnMode;                 // per defecte "debate"
+  default_mode: TurnMode;                 // per defecte "debate"; mai "refine"
   default_target: Agent;                  // agent del mode solo
   debate: { rounds: number;               // 0–4, per defecte 2
             consensus_threshold: number;  // 50–100, per defecte 85
             synthesizer: Agent };         // per defecte "claude"
+  refine: RefineOptions;                  // les opcions dels torns «Perfecciona» que no
+                                          // porten les seves
   use_cache: boolean;                     // per defecte true
   compaction_threshold_tokens: number;    // 1000–100000, per defecte 6000
   models: Record<Agent, string | null>;       // model per defecte; null = el del proveïdor
@@ -218,8 +237,11 @@ interface Stats {
                            // només les crides que escriuen un missatge (respostes,
                            // revisions i síntesis): no els resums de l'historial ni el
                            // contrast dels PDF, que compten als tokens i als costos
-  turns: { solo: number; duel: number; debate: number };
+  turns: { solo: number; duel: number; debate: number; refine: number };
+                           // preguntes de la finestra, pel mode del torn
   consensus: { debates: number; reached: number; avg_rounds: number | null };
+                           // només els debats: la versió final d'un torn «Perfecciona»
+                           // també és una síntesi, però no hi compta
   costs: { fx: FxRate;
            by_agent: Record<Agent, { api_usd: number; equivalent_usd: number;
                                      unpriced_calls: number }> };
@@ -233,7 +255,7 @@ interface Stats {
 
 - `200`: la revisió és l'actual. La resposta és la configuració desada, amb `revision` + 1.
 - `409`: la revisió no és l'actual, normalment perquè s'ha desat des d'una altra pestanya o dispositiu. No es desa res. El cos és `{"detail": "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.", "settings": RuntimeSettings}`, amb la configuració actual tal com la dona `GET /api/settings`: el client la mostra i el propietari la revisa i la torna a desar.
-- `422`: falta `revision`, no és un enter ≥ 0 o algun altre camp no és vàlid. L'ordre és: el cos ha de ser un objecte JSON, després `revision` i després la resta de camps. La revisió es compara al final, de manera que una edició no vàlida dona `422` encara que es basi en una revisió antiga.
+- `422`: falta `revision`, no és un enter ≥ 0 o algun altre camp no és vàlid. `default_mode` no pot ser `refine` (`El mode per defecte no pot ser «refine».`): un torn «Perfecciona» dura fins que l'atures, així que només comença quan el tries. L'ordre és: el cos ha de ser un objecte JSON, després `revision` i després la resta de camps. La revisió es compara al final, de manera que una edició no vàlida dona `422` encara que es basi en una revisió antiga.
 - La comparació i l'escriptura són atòmiques (una sola transacció d'escriptura de SQLite): de dues peticions basades en la mateixa revisió, una rep `200` i l'altra `409`, encara que vinguin de processos diferents.
 
 ### Llista i cerca de converses
@@ -296,20 +318,59 @@ interface TurnOutcome {
   consensus: object | null;        // com el consensus de turn.completed: el d'un debat completat
   final_message_ids: number[];     // missatges finals desats (també en un torn cancel·lat)
   cached: boolean;                 // servit des de la memòria cau de torns
+  stop_reason?: "owner" | "converged" | "unchanged" | "max_rounds" | "budget" | "failed";
+                                   // només en un torn «Perfecciona» (vegeu més avall)
 }
 ```
 
 - La pregunta es crea amb `outcome: null`. Si el torn no acaba mai (una caiguda o un reinici del servidor), es queda `null`: el client el mostra com a no completat. Els torns desats abans de l'ADR 0007 no tenen la clau.
 - Un torn cancel·lat també el desa, abans del `turn.cancelled`. Un torn es cancel·la una sola vegada: un `turn.cancel` repetit, o l'aturada del servidor, mentre el torn s'atura no l'interromp, i el `turn.cancelled` arriba quan el torn s'ha aturat i ha desat el resultat, amb el mateix `usage`. Si l'escriptura falla, el torn no falla i la pregunta es queda amb `null`.
+- `stop_reason`, només en un torn «Perfecciona» ([ADR 0010](adr/0010-mode-perfecciona.md)), diu per què s'ha acabat amb l'última versió, que és la resposta final:
+  - `owner`: l'ha aturat el propietari, en acabar la ronda (`turn.stop`) o de seguida (`turn.cancel`);
+  - `unchanged`: cap dels dos models no hi ha trobat res a canviar 2 rondes seguides;
+  - `converged`: tots dos li han donat el llindar (`convergence_threshold`) o més, sense proposar cap defecte, 2 rondes seguides (només amb `stop_on_convergence`);
+  - `max_rounds`: ja ha fet les rondes de `max_rounds`;
+  - `budget`: ja ha gastat el pressupost (`budget_eur`);
+  - `failed`: els dos models han fallat en una ronda quan ja hi havia una versió. El torn es completa igualment, amb la versió vigent com a resposta final i les fallades a `failures`.
+- Un torn «Perfecciona» cancel·lat (`turn.cancel`) que ja té una versió la desa abans com a missatge final, sense cap crida, perquè no es perdi res del que ja s'ha pagat: `status` continua sent `cancelled`, `final_message_ids` la porta i `stop_reason` és `owner`.
 
 ### Metadades de missatge (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `attachments` (els adjunts de la pregunta, en ordre: `Attachment[]` tal com eren en començar el torn; només hi és si en porta), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut) i `outcome` (vegeu «Resultat del torn»).
+- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `attachments` (els adjunts de la pregunta, en ordre: `Attachment[]` tal com eren en començar el torn; només hi és si en porta), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut), `refine` (en un torn «Perfecciona», les seves `RefineOptions`: un torn recarregat en mostra els límits) i `outcome` (vegeu «Resultat del torn»).
 - Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`; només el de l'intent que ha respost), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
 - Resposta servida després d'un fallback (API de Claude): `declined`, `[{model, usage}]`, els intents facturats que altres models van declinar abans, cadascun amb el seu model i el seu cost. Són crides facturades a part (una fila d'ús per intent, amb `ok = false`) i compten al total del torn, però no a l'`usage` del missatge: els tokens de models diferents no se sumen mai ([ADR 0008](adr/0008-recompte-de-tokens.md)).
 - Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
 - Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`) i `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva, i `unchanged_note` (opcional) és la nota curta que el model va escriure després d'`UNCHANGED`, a la mateixa línia (com a molt 200 caràcters). `content` també conté la resposta anterior (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
 - Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
+- Missatges d'un torn «Perfecciona» ([ADR 0010](adr/0010-mode-perfecciona.md)): fan servir els tipus de sempre. Les respostes de la ronda 0 són `answer`. Les revisions, les versions i la resposta final porten `refine`, el mateix objecte que el `refine` del seu `stream.completed`:
+
+  ```ts
+  interface RefineChange { kind: string; text: string }
+  // kind: "defect" (un error), "clarity" (claredat), "simplification" (treure o simplificar)
+  // o "requirement" (un requisit de l'encàrrec); "merge" a les línies de la versió 1, que
+  // diuen què ha pres de cada resposta
+  type RefineMeta =
+    | { role: "review";              // una revisió (kind "revision", de la ronda 2 endavant)
+        score: number | null;        // 0–100: com respon la versió a l'encàrrec (null: no
+                                     // l'ha puntuada)
+        unchanged: boolean;          // no hi proposa cap canvi (UNCHANGED)
+        changes: RefineChange[] }    // els canvis que proposa (com a molt 5)
+    | { role: "version";             // una versió de l'editor (kind "revision", de la ronda 1
+                                     // endavant)
+        version: number;             // la vigent + 1: una que no s'accepta comparteix el
+                                     // número amb la següent que s'escriu
+        words: number; budget_words: number;   // les seves paraules i el límit del torn
+        accepted: boolean;           // ha passat a ser la versió vigent
+        reason: string | null;       // per què no (el reason del refine.round)
+        changelog: RefineChange[];   // els canvis que ha aplicat (com a molt 5)
+        copied_from?: number }       // una versió 1 desada sense cap crida (cap dels dos
+                                     // no l'ha pogut escriure): l'id de la resposta copiada
+    | { role: "final";               // la resposta final (kind "synthesis", final)
+        version: number; words: number; budget_words: number;
+        stop_reason: string };       // el del resultat del torn
+  ```
+
+  Es desen totes les versions que escriu l'editor, també les que no s'accepten (amb `accepted: false` i el motiu) i l'intent d'escurçar-ne una que passa del límit de paraules, perquè el propietari les pugui veure. La versió 1 no té cap versió anterior per mantenir: si la fusió passa del límit de paraules del propietari (`max_words`), es desa amb `accepted: false` i l'intent d'escurçar-la és la versió 1, amb `accepted: true` encara que el continuï passant (`words` més gran que `budget_words`), igual que una versió 1 copiada d'una resposta. Si el torn es cancel·la mentre s'escurça, la resposta final és la fusió. L'editor escriu cada versió sencera en una sola resposta, de com a molt 16.000 tokens de sortida, el raonament inclòs: una versió que no hi cap es talla i no s'accepta (`L'editor no ha escrit cap versió completa.`), així que un `max_words` de més d'unes 10.000 paraules (menys en català o en codi) no es pot complir. La resposta final és la versió vigent, desada sense cap crida (`usage` zero): l'agent que l'ha escrita, `round` de l'última ronda i `meta.copied_from`, l'`id` del missatge de la versió.
 - Missatges de ChatGPT (`answer`, `revision`, `synthesis`) d'una pregunta amb PDF quan no els pot obrir (la subscripció, vegeu «Contrast de Claude» a «Adjunts»): `pdf_reading`, com ha llegit cada PDF, en l'ordre dels adjunts:
 
   ```ts
@@ -339,7 +400,7 @@ Una sola connexió persistent per pestanya. El servidor tanca amb el codi:
 - `1013` si el client no rep prou ràpid: té 4096 missatges pendents d'enviar, o 200.000 esdeveniments o més (cada esdeveniment d'un reenviament de `turn.subscribe` compta; un sol reenviament pot ser més llarg, així que qualsevol torn es pot recuperar), quan n'arriba un altre. Ha de reconnectar i fer `turn.subscribe` des de l'últim `seq` que té.
 - `1011` si hi ha un error intern.
 
-L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Només `turn.start` i `turn.cancel`, que són accions del propietari, compten com a activitat. L'*handshake*, el `ping` i el `turn.subscribe` (que el client envia sol després de reconnectar) la comproven només en lectura: no allarguen la caducitat per inactivitat. Així, una pestanya oberta sense ús no manté la sessió viva, encara que es reconnecti.
+L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Només `turn.start`, `turn.stop` i `turn.cancel`, que són accions del propietari, compten com a activitat. L'*handshake*, el `ping` i el `turn.subscribe` (que el client envia sol després de reconnectar) la comproven només en lectura: no allarguen la caducitat per inactivitat. Així, una pestanya oberta sense ús no manté la sessió viva, encara que es reconnecti.
 
 ### Client → servidor
 
@@ -350,12 +411,21 @@ L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Nom�
              "use_cache": true},
  "models": {"claude": "opus", "chatgpt": "gpt-6-sol"},
  "attachments": [12, 13]}
+{"type": "turn.start", "request_id": "uuid", "text": "…", "mode": "refine",
+ "options": {"refine": {"max_rounds": 12, "budget_eur": 3, "max_words": null,
+                        "stop_on_convergence": true, "convergence_threshold": 90,
+                        "editor": "claude"}}}
+{"type": "turn.stop", "request_id": "uuid"}     // «Perfecciona»: atura'l en acabar la ronda
 {"type": "turn.cancel", "request_id": "uuid"}
 {"type": "turn.subscribe", "request_id": "uuid", "after_seq": 12}   // després d'una reconnexió
 {"type": "ping", "t": 1727450000000}
 ```
 
 `mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. A `models` (i als `RuntimeSettings`), `null` o `""` vol dir el model per defecte; els identificadors es netegen d'espais. Límit: 3 torns simultanis i un de sol per conversa.
+
+Un torn «Perfecciona» (`mode: "refine"`, [ADR 0010](adr/0010-mode-perfecciona.md)) pren les seves opcions d'`options.refine`, també parcials: les claus que hi falten prenen el valor dels `RuntimeSettings`, i `max_words: null` vol dir el límit automàtic. Es validen amb els intervals de `RefineOptions`; si no, `error` amb `code: "invalid"`, el `request_id` i el missatge de la configuració (com `«refine.max_rounds» ha de ser un enter entre 2 i 50.`), i el torn no comença. El motor compta en dòlars, així que el servidor li passa el pressupost (`budget_eur`) convertit amb el tipus amb què l'aplicació mostra els euros: el `fx` del `hello` i de `GET /api/pricing` (el del BCE en mode `auto` si és recent; si no, el manual). Així, el torn s'atura quan el que la interfície mostra que ha gastat arriba al pressupost.
+
+`turn.stop` («Atura en acabar la ronda») demana a un torn «Perfecciona» que s'aturi en acabar la ronda en curs: cap crida no es talla, la ronda acaba (les revisions i l'edició) i el torn es completa amb l'última versió i `stop_reason: "owner"`. El torn ho anuncia amb `turn.stopping` un sol cop, encara que es demani més d'una vegada. Per aturar-lo de seguida hi ha `turn.cancel` («Atura ara»), que també en desa l'última versió (vegeu «Resultat del torn»). Un `turn.stop` d'un torn que el servidor no té rep `turn.unknown`, com un `turn.cancel`; el d'un torn que ja ha acabat o que ja s'està cancel·lant no rep cap resposta. El d'un torn en curs d'un altre mode, que no té rondes per acabar, rep `error` amb `code: "invalid"`, el `request_id` i `Només un torn «Perfecciona» es pot aturar en acabar la ronda; per aturar-lo ara, cancel·la'l.`, i el torn continua.
 
 `attachments` (opcional) són els `id` dels adjunts pujats, en l'ordre en què van a la pregunta: com a molt 5, cadascun un sol cop, enters d'1 a 2^63 − 1. Si no, `error` amb `code: "invalid"` i el `request_id`, i el torn no comença. Un adjunt que no existeix, o uns adjunts que sumen més de 20 MB, donen `turn.failed` amb `kind: "invalid"` (`L'adjunt 12 no existeix.`), sense `turn.started`, i no es desa res. El mateix passa si un adjunt s'esborra mentre el torn es prepara (des d'una altra pestanya, o l'escombrada d'un adjunt no enviat de fa més de 24 h): la pregunta es desa amb els seus adjunts en una sola transacció, abans de `turn.started`, i una conversa nova que el torn acabava de crear s'esborra. Les respostes i la síntesi reben els adjunts sencers; les revisions d'un debat reben els PDF com diu `pdf_in_revisions` dels `RuntimeSettings` (el valor de quan comença el torn), excepte un PDF del qual no s'ha pogut extreure cap text (un d'escanejat), que hi va sencer.
 
@@ -367,22 +437,24 @@ Cap missatge del client no pot passar de 524.288 caràcters (512 × 1024). El se
 
 En connectar: `{"type": "hello", "version": string, "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null fins al turn.started d'una conversa nova), "last_seq"}]}`. `version` és la versió del paquet `agentic-os`, la mateixa que mostra `agentic-os --version`. `active_turns` només inclou els torns en curs, i no els d'una conversa esborrada.
 
-Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix, o la seva conversa s'ha esborrat, respon `{"type": "turn.unknown", "request_id"}`. Un `turn.cancel` d'un torn que el servidor no té (no ha existit mai, va acabar fa més de 5 minuts o era d'una conversa esborrada i ja ha acabat) també rep `turn.unknown`; el d'un torn que ja ha acabat, però que encara es guarda, no rep cap resposta. Una connexió rep cada torn una sola vegada: un `turn.subscribe` d'un torn que la connexió ja rep (perquè l'ha començat o ja s'hi ha subscrit) s'ignora, sense resposta, ja que ja té tots els esdeveniments des del primer `after_seq`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura.
+Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix, o la seva conversa s'ha esborrat, respon `{"type": "turn.unknown", "request_id"}`. Un `turn.cancel` d'un torn que el servidor no té (no ha existit mai, va acabar fa més de 5 minuts o era d'una conversa esborrada i ja ha acabat) també rep `turn.unknown`; el d'un torn que ja ha acabat, però que encara es guarda, no rep cap resposta. Una connexió rep cada torn una sola vegada: un `turn.subscribe` d'un torn que la connexió ja rep (perquè l'ha començat o ja s'hi ha subscrit) s'ignora, sense resposta, ja que ja té tots els esdeveniments des del primer `after_seq`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura (i `turn.stop`, en acabar la ronda, un torn «Perfecciona»).
 
 | `type` | Camps | Significat |
 | --- | --- | --- |
 | `turn.started` | `conversation_id`, `turn_id`, `mode`, `new_conversation` | Pregunta desada |
-| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`) |
+| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`, `review`, `edit`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`). `review` i `edit` són les dues parts d'una ronda d'un torn «Perfecciona»: les revisions de la versió vigent i la versió nova de l'editor |
 | `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
-| `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text |
+| `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text. En un torn «Perfecciona», `critique` són els canvis que proposa una revisió o el registre de canvis d'una versió, i `answer`, el text de la versió |
 | `pdf.check` | `attachment_id`, `name`, `state` (`checking`, `checked`, `unchecked`), `claude_pages`, `hidden_pages`, `unchecked_pages` (números de pàgina, com a `PdfReading`), `reused`, `usage` (`Usage` o `null`), `reason` (text o `null`) | Claude contrasta un PDF de la pregunta per a ChatGPT amb la subscripció (vegeu «Contrast de Claude» a «Adjunts»). `checking` quan Claude comença a contrastar-lo, abans de la primera crida de ChatGPT, que l'espera (no n'hi ha si el contrast ja estava desat, si no es pot fer o si el temps s'acaba abans que comenci: aleshores només arriba el final); després `checked` (almenys una pàgina contrastada) o `unchecked` (cap: la comprovació ha fallat, Claude no l'ha volgut fer, ha trigat massa, el PDF no s'ha pogut analitzar, no hi ha Claude o és el de demostració). `reused`: el contrast d'un torn anterior, sense cap crida en aquest. `usage`: el que han facturat les crides d'aquest torn per a aquest PDF, amb el cost (`null` mentre contrasta i si és reutilitzat). `reason`: per què queden pàgines sense contrastar, en català (`null` si no en queda cap). Si el torn es cancel·la o falla mentre Claude contrasta un PDF, no arriba cap `pdf.check` final per a aquell PDF: el client el dona per interromput. Forma part dels esdeveniments del torn (amb `seq` i reenviat per `turn.subscribe`) |
-| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason`, `unchanged_note` i `pdf_reading` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. `pdf_reading` (`PdfReading[]`) diu com ha llegit ChatGPT els PDF quan no els pot obrir. Tots valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
-| `stream.failed` | `stream_id`, `error: {kind, message}`; opcional: `usage` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa. `usage` és el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text); només hi és quan se'n sap una facturació |
-| `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached` | Torn acabat |
+| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason`, `unchanged_note`, `pdf_reading` i `refine` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. `pdf_reading` (`PdfReading[]`) diu com ha llegit ChatGPT els PDF quan no els pot obrir. `refine` és el `meta.refine` del missatge en un torn «Perfecciona»: una revisió, una versió (i si s'ha acceptat) o la resposta final. Tots valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
+| `stream.failed` | `stream_id`, `error: {kind, message}`; opcional: `usage` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa. `usage` és el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text); només hi és quan se'n sap una facturació. En un torn «Perfecciona», una revisió sense la llista de canvis que se li demanava (no té la secció de canvis, o no hi proposa cap canvi en el format demanat ni hi diu `UNCHANGED`) falla amb `kind: "invalid"` i `La revisió no té la llista de canvis que se li demanava.`: aquell agent no compta en la ronda |
+| `refine.round` | `round`, `version`, `accepted`, `reason`, `words`, `budget_words`, `changes`, `proposals`, `scores`, `converged`, `usage`, `total` | Final d'una ronda d'un torn «Perfecciona», de la 1 endavant. `version`: la versió vigent després de la ronda. `accepted`: la ronda n'ha escrit una de nova, que ara és la vigent. `reason`: per què no, en català (`La nova versió passava del límit de paraules.`, `L'editor no ha escrit cap versió completa.`, `La nova versió és igual a l'anterior.`, `Cap dels dos hi ha trobat res a canviar.` o, quan no ha tornat cap revisió o cap editor no ha pogut respondre, `Els models han fallat i la ronda no ha escrit cap versió.`, i el torn s'acaba amb `stop_reason: "failed"`), o `null`. `words`: les paraules de la versió vigent; `budget_words`: el límit del torn. `changes`: el registre de canvis de la versió nova (`[{kind, text}]`; buit si no n'hi ha cap). `proposals` i `scores` (`{"claude", "chatgpt"}`): quants canvis ha proposat la revisió de cada agent i quina puntuació 0–100 li ha donat (`null` sense revisió, i la puntuació també si no n'ha donat cap de vàlida; a la ronda 1, la fusió, sempre `null`). `converged`: la ronda compleix la regla de convergència i el torn s'atura. `usage`: el que han facturat les crides de la ronda; `total`: el del torn fins ara |
+| `turn.stopping` | `round` | El torn «Perfecciona» s'aturarà en acabar `round`: la ronda en curs, o la 1 si encara no n'ha acabat cap (la versió 1 sempre s'escriu). És la resposta a `turn.stop`, un sol cop |
+| `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached`; opcional: `stop_reason` (només en un torn «Perfecciona») | Torn acabat. `stop_reason` diu per què un torn «Perfecciona» s'ha acabat amb l'última versió (vegeu «Resultat del torn») |
 | `turn.failed` | `error: {kind, message}`, `usage` | Torn avortat. `usage` és el total del torn fins aleshores, el mateix d'`outcome.usage` (zero si ha fallat abans de cap crida) |
 | `turn.cancelled` | `usage` | Cancel·lat per l'usuari (o perquè el servidor s'atura). `usage` és el que el torn havia gastat, el mateix d'`outcome.usage`. Arriba quan el torn s'ha aturat i ha desat el resultat; un `turn.cancel` repetit mentrestant no fa res |
 
-Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start`). Un `conversation_id` fora de l'interval 1 – 2^63 − 1 dona `invalid`. Un missatge amb text que no es pot codificar en UTF-8 (un substitut solitari, `\ud800`, en qualsevol clau o valor) dona `invalid` amb `El missatge conté text que no és UTF-8 vàlid.` i el `request_id` si aquest és vàlid; no se n'usa res.
+Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start` o un `turn.stop`). Un `conversation_id` fora de l'interval 1 – 2^63 − 1 dona `invalid`. Un missatge amb text que no es pot codificar en UTF-8 (un substitut solitari, `\ud800`, en qualsevol clau o valor) dona `invalid` amb `El missatge conté text que no és UTF-8 vàlid.` i el `request_id` si aquest és vàlid; no se n'usa res.
 
 `savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens processats estimats estalviats i el seu valor aproximat: les respostes conservades al preu de sortida del seu model, la compactació al preu d'entrada de les crides que portaven el context, les rondes omeses al cost mitjà de les revisions del torn i un encert de memòria cau al cost del torn original sencer, cada crida i cada intent declinat abans d'un fallback a les tarifes actuals del seu model; `null` si no se'n pot posar preu a cap). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
 
@@ -392,3 +464,15 @@ Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "co
 2. Per a cada ronda `r`: `phase(revision, r)` → dos fluxos amb `section` `critique` i després `answer`; `stream.completed` porta `agreement`.
 3. Si tots dos arriben al llindar de consens, s'aturen les rondes (estalvi `early_stop`).
 4. `phase(synthesis, r)` → un flux de l'agent sintetitzador → `turn.completed`.
+
+### Ordre típic d'un torn «Perfecciona»
+
+Les dues IA milloren un sol document ronda rere ronda ([ADR 0010](adr/0010-mode-perfecciona.md); el bucle, a [ARQUITECTURA.md](ARQUITECTURA.md#modes-de-torn)):
+
+1. `turn.started` → `phase(answer, 0)` → les dues respostes a l'encàrrec, en paral·lel, com en un debat.
+2. `phase(edit, 1)` → l'editor (`editor`, o l'altre si l'editor ha fallat) fusiona les respostes en la versió 1: un flux amb `section` `answer` (la versió) i després `critique` (el registre de canvis), i el `stream.completed` amb `refine`. Si la fusió passa del límit de paraules del propietari, un altre flux de la mateixa ronda és l'intent d'escurçar-la, que és la versió 1 encara que el continuï passant → `refine.round` de la ronda 1.
+3. Per a cada ronda `k` de la 2 endavant: `phase(review, k)` → les revisions de la versió vigent (`stream.completed` amb `refine`, `role: "review"`). Si alguna hi proposa canvis, `phase(edit, k)` → la versió nova de l'editor (i, si passa del límit de paraules, un altre flux: l'intent d'escurçar-la) → `refine.round` de la ronda `k`. Si un dels dos models falla, l'altre continua sol.
+4. Abans de cada ronda de la 2 endavant, el torn s'acaba si el propietari ho ha demanat (`turn.stop`), si ja ha gastat el pressupost o si ja ha fet les rondes de `max_rounds`; i en acabar-ne una, si cap dels dos no hi ha trobat res a canviar 2 rondes seguides o si compleix la regla de convergència (vegeu `stop_reason` a «Resultat del torn»). El pressupost no compta les crides dels models sense preu.
+5. La resposta final, la versió vigent desada sense cap crida → `turn.completed` amb `stop_reason`.
+
+Si el propietari demana d'aturar-lo, `turn.stopping` arriba enmig, un sol cop. Un torn «Perfecciona» no fa servir mai la memòria cau de torns.

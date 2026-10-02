@@ -92,10 +92,12 @@ _MESSAGE_COLUMNS: Final = (
     "id, conversation_id, turn_id, kind, agent, round, final, content, meta, created_at"
 )
 _SUMMARY_SELECT: Final = """
-    SELECT c.id, c.title, c.summary, c.created_at, c.updated_at, c.last_mode,
+    SELECT c.id, c.title, c.summary, c.created_at, c.updated_at, c.last_turn_mode,
            (SELECT COUNT(*) FROM messages AS m WHERE m.conversation_id = c.id) AS message_count
     FROM conversations AS c
 """
+"""A conversation's last mode is ``last_turn_mode`` (migration 6), the column that takes
+the refine mode; the older ``last_mode`` is no longer read nor written."""
 _ATTACHMENT_COLUMNS: Final = (
     "id, sha256, kind, mime, name, size, pages, width, height, has_thumbnail, created_at, "
     "length(text) AS text_chars, pdf_pages"
@@ -172,7 +174,7 @@ def _row_to_summary(row: sqlite3.Row) -> ConversationSummary:
         title=str(row["title"]),
         created_at=parse_ts(str(row["created_at"])),
         updated_at=parse_ts(str(row["updated_at"])),
-        last_mode=_choice(row["last_mode"], TURN_MODES),
+        last_mode=_choice(row["last_turn_mode"], TURN_MODES),
         message_count=cast(int, row["message_count"]),
     )
 
@@ -414,10 +416,11 @@ class SqliteStore:
         """Store a message and return its id.
 
         A question starts a turn: it must have ``turn_id=None`` and its turn id
-        becomes its own id; it also sets the conversation's ``last_mode`` from
-        ``meta["mode"]``, and its ``attachments`` are linked in the same transaction
-        (as :meth:`link_attachments` does), so with one that does not exist nothing is
-        stored. Any other message must reference a question of the same conversation.
+        becomes its own id; it also sets the conversation's last mode
+        (``last_turn_mode``) from ``meta["mode"]``, and its ``attachments`` are linked in
+        the same transaction (as :meth:`link_attachments` does), so with one that does
+        not exist nothing is stored. Any other message must reference a question of the
+        same conversation.
         Every message bumps the conversation's ``updated_at``. Raises
         :class:`ConversationNotFoundError`, :class:`AttachmentNotFoundError` or
         :class:`ValueError`.
@@ -437,8 +440,8 @@ class SqliteStore:
         now = self._now()
         async with self._db.transaction() as tx:
             updated = await tx.execute(
-                "UPDATE conversations SET updated_at = ?, last_mode = COALESCE(?, last_mode) "
-                "WHERE id = ?",
+                "UPDATE conversations SET updated_at = ?, "
+                "last_turn_mode = COALESCE(?, last_turn_mode) WHERE id = ?",
                 (now, mode, message.conversation_id),
             )
             if updated == 0:

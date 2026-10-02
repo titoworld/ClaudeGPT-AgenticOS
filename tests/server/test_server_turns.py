@@ -35,7 +35,7 @@ from agentic_os.providers.base import (
 from agentic_os.providers.fake import FakeProvider
 from agentic_os.server.status import ProviderMonitor, status_to_wire
 from agentic_os.server.tasks import cancel_and_wait
-from agentic_os.server.turns import TurnManager, TurnRejectedError
+from agentic_os.server.turns import TurnManager, TurnNotStoppableError, TurnRejectedError
 from agentic_os.server.ws import ClientConnection
 
 
@@ -77,6 +77,8 @@ class ScriptedRunner:
         self.cancelled: list[str] = []
         self.thresholds: list[int | None] = []
         self.prices: list[Mapping[str, ModelPrice] | None] = []
+        self.stops: list[asyncio.Event | None] = []
+        """The stop event the manager gave each turn (``turn.stop``)."""
 
     async def run(
         self,
@@ -89,6 +91,7 @@ class ScriptedRunner:
     ) -> AsyncIterator[ServerEvent]:
         self.thresholds.append(compaction_threshold_tokens)
         self.prices.append(price_overrides)
+        self.stops.append(stop)
         rid = request.request_id
         yield TurnStarted(rid, 40 + len(self.thresholds), 7, request.mode, True)
         yield PhaseChanged(rid, "answer", 0)
@@ -110,6 +113,10 @@ def request(request_id: str, conversation_id: int | None = None) -> TurnRequest:
     return TurnRequest(
         request_id=request_id, text="Hola?", mode="solo", conversation_id=conversation_id
     )
+
+
+def refine(request_id: str) -> TurnRequest:
+    return TurnRequest(request_id=request_id, text="Perfecciona el pla", mode="refine")
 
 
 async def settle() -> None:
@@ -288,6 +295,7 @@ class SlowStopRunner:
         self.stopped = asyncio.Event()
         self.interrupted = 0
         """Cancellations that reached it while it was stopping."""
+        self.stops: list[asyncio.Event | None] = []
 
     async def run(
         self,
@@ -298,6 +306,7 @@ class SlowStopRunner:
         on_outcome: Callable[[TurnOutcome], None] | None = None,
         stop: asyncio.Event | None = None,
     ) -> AsyncIterator[ServerEvent]:
+        self.stops.append(stop)
         yield TurnStarted(request.request_id, 41, 7, request.mode, True)
         try:
             await asyncio.Event().wait()
@@ -480,6 +489,101 @@ async def test_stopping_an_engine_turn_again_still_announces_its_stored_outcome(
     assert isinstance(outcome, dict) and outcome["usage"] == cancelled["usage"]
     if closing is None:
         await turns.aclose()
+
+
+# -- turn.stop: a refine turn ends after the round in course (ADR 0010) -----------------
+
+STOP_ONLY_REFINE = (
+    "Només un torn «Perfecciona» es pot aturar en acabar la ronda; per aturar-lo ara, cancel·la'l."
+)
+
+
+async def test_stop_asks_a_running_refine_turn_to_end_after_its_round() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(refine("r1"), live)
+    await settle()
+    [stop] = runner.stops
+    assert stop is not None and not stop.is_set()
+
+    assert turns.stop("r1")
+    assert stop.is_set()
+    assert turns.stop("r1")  # pressed again: it stays asked (the engine says it once)
+    await settle()
+    # Not cancelled: the engine finishes the round and ends the turn with its last
+    # version; the manager adds no event of its own.
+    assert runner.cancelled == []
+    assert turns.is_running("r1")
+    assert live.types == ["turn.started", "phase"]
+    runner.gate.set()
+    await settle()
+    assert live.types == ["turn.started", "phase", "turn.completed"]
+    await turns.aclose()
+
+
+async def test_stop_of_an_unknown_turn_is_false() -> None:
+    runner = ScriptedRunner()
+    runner.gate.set()
+    turns = TurnManager(runner, retention_seconds=0.05)
+    assert not turns.stop("nope")
+    turns.start(refine("r1"))
+    await settle()
+    await asyncio.sleep(0.1)  # past the retention: forgotten
+    assert not turns.stop("r1")
+    await turns.aclose()
+
+
+async def test_only_a_refine_turn_can_stop_after_its_round() -> None:
+    runner = ScriptedRunner()
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(request("r1"), live)
+    await settle()
+    with pytest.raises(TurnNotStoppableError) as exc:
+        turns.stop("r1")
+    assert exc.value.message == str(exc.value) == STOP_ONLY_REFINE
+    [stop] = runner.stops
+    assert stop is not None and not stop.is_set()
+    assert turns.is_running("r1") and runner.cancelled == []
+    runner.gate.set()
+    await settle()
+    assert live.types == ["turn.started", "phase", "turn.completed"]
+    await turns.aclose()
+
+
+async def test_stop_of_a_turn_that_ended_is_ignored_whatever_its_mode() -> None:
+    runner = ScriptedRunner()
+    runner.gate.set()
+    turns = TurnManager(runner)
+    turns.start(request("solo"))
+    turns.start(refine("refine"))
+    await settle()
+    assert not turns.is_running("solo") and not turns.is_running("refine")
+    assert turns.stop("solo")  # no error: a finished turn has nothing to stop
+    assert turns.stop("refine")
+    assert all(stop is not None and not stop.is_set() for stop in runner.stops)
+    await turns.aclose()
+
+
+async def test_stop_of_a_turn_being_cancelled_is_ignored() -> None:
+    """``turn.cancel`` already stops it now: asking it to stop after its round changes
+    nothing, whatever its mode."""
+    runner = SlowStopRunner(Usage(input_tokens=10, output_tokens=5))
+    turns = TurnManager(runner)
+    live = Recorder()
+    turns.start(refine("r1"), live)
+    turns.start(request("r2"))
+    await settle()
+    for request_id in ("r1", "r2"):
+        assert turns.cancel(request_id)
+    await asyncio.wait_for(runner.stopping.wait(), 5)
+    assert turns.stop("r1")
+    assert turns.stop("r2")  # no error either: it is ending
+    assert all(stop is not None and not stop.is_set() for stop in runner.stops)
+    runner.stopped.set()
+    await until(lambda: "turn.cancelled" in live.types)
+    await turns.aclose()
 
 
 async def test_limits() -> None:

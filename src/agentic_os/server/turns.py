@@ -11,6 +11,10 @@ with ``turn.cancelled`` carrying what it spent, as the engine reported it (its
 outcome, docs/adr/0007-resultat-del-torn.md). A turn is cancelled only once: a
 repeated ``turn.cancel`` or a shutdown while it stops leaves the engine to finish
 stopping it, so ``turn.cancelled`` always follows its stored outcome.
+
+A refine turn can also be asked to stop after the round in course (``turn.stop``,
+docs/adr/0010-mode-perfecciona.md): that is no cancellation, only a signal the engine
+reads between its calls; it then ends the turn as completed, with its last version.
 """
 
 from __future__ import annotations
@@ -40,6 +44,9 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_TURNS: Final = 3
 RETENTION_SECONDS: Final = 300.0
 _TERMINAL_TYPES: Final = frozenset({"turn.completed", "turn.failed", "turn.cancelled"})
+STOP_ONLY_REFINE: Final = (
+    "Només un torn «Perfecciona» es pot aturar en acabar la ronda; per aturar-lo ara, cancel·la'l."
+)
 
 
 def dumps(message: Wire) -> str:
@@ -89,6 +96,16 @@ class TurnRejectedError(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+
+
+class TurnNotStoppableError(Exception):
+    """``turn.stop`` of a running turn that is not a refine one: only a refine turn has
+    rounds to end after; the others stop at once with ``turn.cancel``. The message is
+    Catalan, for the owner."""
+
+    def __init__(self) -> None:
+        super().__init__(STOP_ONLY_REFINE)
+        self.message = STOP_ONLY_REFINE
 
 
 @dataclass(slots=True, eq=False)
@@ -250,6 +267,24 @@ class TurnManager:
             return False
         if not turn.terminal:
             self._stop(turn)
+        return True
+
+    def stop(self, request_id: str) -> bool:
+        """Ask a running refine turn to end after the round in course (``turn.stop``):
+        its stop event is set, the engine finishes the round (its calls are never cut)
+        and ends the turn with its last version, announcing it once with
+        ``turn.stopping``; asking again changes nothing. A turn that has ended, or is
+        being cancelled, is left alone, whatever its mode. ``False`` if the turn is
+        unknown. Raises :class:`TurnNotStoppableError` for a running turn of another
+        mode, which has no round to end after."""
+        turn = self._turns.get(request_id)
+        if turn is None:
+            return False
+        if turn.terminal or turn.finished or turn.stopping:
+            return True
+        if turn.request.mode != "refine":
+            raise TurnNotStoppableError
+        turn.stop_event.set()
         return True
 
     def cancel_conversation(self, conversation_id: int) -> int:

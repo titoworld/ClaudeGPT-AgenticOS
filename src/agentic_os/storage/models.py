@@ -15,17 +15,34 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Final, Literal, TypeGuard
 
 from agentic_os.attachments import attachment_wire
-from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions
+from agentic_os.domain import (
+    AGENTS,
+    AgentName,
+    DebateOptions,
+    RefineOptions,
+    TurnMode,
+    TurnOptions,
+)
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.pdf_facts import PdfNotes
 from agentic_os.pricing import ModelPrice, normalize_model
 from agentic_os.providers.base import MODEL_ID_PATTERN, AttachmentKind, AttachmentMode
 
-TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate")
+TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate", "refine")
+DEFAULT_MODE_REFINE: Final = "El mode per defecte no pot ser «refine»."
+"""A refine turn runs until the owner stops it (docs/adr/0010-mode-perfecciona.md), so it
+is only ever chosen on purpose: never the mode a turn gets without asking."""
 
 ROUNDS_RANGE: Final = (0, 4)
 CONSENSUS_THRESHOLD_RANGE: Final = (50, 100)
+REFINE_ROUNDS_RANGE: Final = (2, 50)
+"""Rounds of a refine turn that write a version (``RefineOptions.max_rounds``)."""
+REFINE_BUDGET_EUR_RANGE: Final = (0.1, 100.0)
+REFINE_WORDS_RANGE: Final = (100, 20_000)
+"""The owner's word limit of every version, when there is one."""
+REFINE_THRESHOLD_RANGE: Final = (50, 100)
+"""Score both agents must give a version to stop by convergence."""
 COMPACTION_THRESHOLD_RANGE: Final = (1_000, 100_000)
 EUR_PER_USD_RANGE: Final = (0.2, 5.0)
 AMOUNT_EUR_RANGE: Final = (0.0, 100_000.0)
@@ -84,7 +101,14 @@ def _mode(value: object, name: str) -> TurnMode:
     for mode in TURN_MODES:
         if value == mode:
             return mode
-    raise ValueError(f"«{name}» ha de ser «solo», «duel» o «debate».")
+    raise ValueError(f"«{name}» ha de ser «solo», «duel», «debate» o «refine».")
+
+
+def _default_mode(value: object) -> TurnMode:
+    mode = _mode(value, "default_mode")
+    if mode == "refine":
+        raise ValueError(DEFAULT_MODE_REFINE)
+    return mode
 
 
 def _agent(value: object, name: str) -> AgentName:
@@ -166,6 +190,60 @@ def _optional_amount(value: object, name: str) -> float | None:
     if value is None:
         return None
     return _number_in_range(value, name, AMOUNT_EUR_RANGE)
+
+
+def _max_words(value: object) -> int | None:
+    """The owner's word limit of a refine turn's versions: ``None`` lets the engine
+    derive it from the first version."""
+    if value is None:
+        return None
+    low, high = REFINE_WORDS_RANGE
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(
+            f"«refine.max_words» ha de ser null (automàtic) o un enter entre {low} i {high}."
+        )
+    return value
+
+
+def _refine(value: object) -> RefineOptions:
+    """``refine`` of the settings or of a turn's options; missing keys take their
+    defaults."""
+    if not isinstance(value, Mapping):
+        raise ValueError("«refine» ha de ser un objecte.")
+    defaults = RefineOptions()
+    return RefineOptions(
+        max_rounds=_int_in_range(
+            value.get("max_rounds", defaults.max_rounds), "refine.max_rounds", REFINE_ROUNDS_RANGE
+        ),
+        budget_eur=_number_in_range(
+            value.get("budget_eur", defaults.budget_eur),
+            "refine.budget_eur",
+            REFINE_BUDGET_EUR_RANGE,
+        ),
+        max_words=_max_words(value.get("max_words", defaults.max_words)),
+        stop_on_convergence=_bool(
+            value.get("stop_on_convergence", defaults.stop_on_convergence),
+            "refine.stop_on_convergence",
+        ),
+        convergence_threshold=_int_in_range(
+            value.get("convergence_threshold", defaults.convergence_threshold),
+            "refine.convergence_threshold",
+            REFINE_THRESHOLD_RANGE,
+        ),
+        editor=_agent(value.get("editor", defaults.editor), "refine.editor"),
+    )
+
+
+def refine_to_wire(options: RefineOptions) -> Wire:
+    """``RefineOptions`` of PROTOCOL.md (``refine`` of the settings and of a turn)."""
+    return {
+        "max_rounds": options.max_rounds,
+        "budget_eur": options.budget_eur,
+        "max_words": options.max_words,
+        "stop_on_convergence": options.stop_on_convergence,
+        "convergence_threshold": options.convergence_threshold,
+        "editor": options.editor,
+    }
 
 
 def _agent_map[T](
@@ -278,9 +356,13 @@ class RuntimeSettings:
     """
 
     default_mode: TurnMode = "debate"
+    """Mode of a turn that does not choose one: never ``"refine"``."""
     default_target: AgentName = "claude"
     """Agent that answers in solo mode."""
     debate: DebateOptions = field(default_factory=DebateOptions)
+    refine: RefineOptions = field(default_factory=RefineOptions)
+    """The options of a refine turn that does not give its own
+    (docs/adr/0010-mode-perfecciona.md)."""
     use_cache: bool = True
     compaction_threshold_tokens: int = 6000
     models: Mapping[AgentName, str | None] = field(default_factory=_no_models)
@@ -305,7 +387,7 @@ class RuntimeSettings:
 
     def __post_init__(self) -> None:
         _revision(self.revision)
-        _mode(self.default_mode, "default_mode")
+        _default_mode(self.default_mode)
         _agent(self.default_target, "default_target")
         if not isinstance(self.debate, DebateOptions):
             raise ValueError("«debate» ha de ser un objecte.")
@@ -316,6 +398,9 @@ class RuntimeSettings:
             CONSENSUS_THRESHOLD_RANGE,
         )
         _agent(self.debate.synthesizer, "debate.synthesizer")
+        if not isinstance(self.refine, RefineOptions):
+            raise ValueError("«refine» ha de ser un objecte.")
+        _refine(refine_to_wire(self.refine))
         _bool(self.use_cache, "use_cache")
         _int_in_range(
             self.compaction_threshold_tokens,
@@ -364,12 +449,14 @@ class RuntimeSettings:
                 debate_raw.get("synthesizer", defaults.debate.synthesizer), "debate.synthesizer"
             ),
         )
+        refine = _refine(data.get("refine", {}))
         return cls(
-            default_mode=_mode(data.get("default_mode", defaults.default_mode), "default_mode"),
+            default_mode=_default_mode(data.get("default_mode", defaults.default_mode)),
             default_target=_agent(
                 data.get("default_target", defaults.default_target), "default_target"
             ),
             debate=debate,
+            refine=refine,
             use_cache=_bool(data.get("use_cache", defaults.use_cache), "use_cache"),
             compaction_threshold_tokens=_int_in_range(
                 data.get("compaction_threshold_tokens", defaults.compaction_threshold_tokens),
@@ -401,6 +488,7 @@ class RuntimeSettings:
                 "consensus_threshold": self.debate.consensus_threshold,
                 "synthesizer": self.debate.synthesizer,
             },
+            "refine": refine_to_wire(self.refine),
             "use_cache": self.use_cache,
             "compaction_threshold_tokens": self.compaction_threshold_tokens,
             "models": {agent: self.models.get(agent) for agent in AGENTS},
@@ -414,7 +502,7 @@ class RuntimeSettings:
 
     def to_turn_options(self) -> TurnOptions:
         """Default options for a turn that does not specify its own."""
-        return TurnOptions(debate=self.debate, use_cache=self.use_cache)
+        return TurnOptions(debate=self.debate, refine=self.refine, use_cache=self.use_cache)
 
     def chosen_models(self) -> dict[AgentName, str]:
         """``TurnRequest.models``: the agents with a default model chosen by the owner."""
