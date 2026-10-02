@@ -1,11 +1,22 @@
 [project]
 name = "agentic-os"
 version = "0.1.0"
-description = "ClaudeGPT Agentic OS: un sistema operativo agéntico que orquesta agentes de IA (Claude, GPT...)."
+description = "ClaudeGPT OS: consell privat de Claude i ChatGPT, autoallotjat."
 readme = "README.md"
 authors = [{ name = "titoworld" }]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "anthropic>=1.8.0",
+    "argon2-cffi>=25.1.0",
+    "fastapi>=0.141.1",
+    "openai>=3.19.2",
+    "pydantic-settings>=2.15.0",
+    "pyotp>=2.10.0",
+    "pypdf>=6.19.0",
+    "qrcode>=8.2",
+    "uvicorn[standard]>=0.54.0",
+]
 
 [project.scripts]
 agentic-os = "agentic_os.cli:main"
@@ -35,11 +46,17 @@ files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers"]
+# Shared test helpers (tests/portability.py) importable from every test module.
+pythonpath = ["tests"]
+addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.16.9",
 ]

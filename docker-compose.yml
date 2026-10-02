@@ -1,0 +1,183 @@
+# ClaudeGPT OS on a VPS: Caddy (HTTPS edge) in front of the app.
+# Step by step (in Catalan): docs/DESPLEGAMENT.md
+#
+#   cp .env.example .env && nano .env
+#   docker compose up -d --build
+#   docker compose exec -it app agentic-os init
+#
+# Only Caddy publishes ports. The app lives on an internal network that Caddy
+# alone can reach, plus an egress network for the model APIs. No service runs as
+# root, except caddy-init: a few seconds at each `up`, without network.
+
+name: claudegpt
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build:
+      context: .
+      # Always fetch the latest base images (security fixes of Debian, Python
+      # and Node) instead of reusing old local copies.
+      pull: true
+      args:
+        # Optional overrides from .env; unset means the Dockerfile pins.
+        - CLAUDE_CLI_VERSION
+        - CODEX_CLI_VERSION
+    image: claudegpt-os:latest
+    restart: unless-stopped
+    init: true # reaps the CLI subprocesses
+    env_file: .env
+    environment:
+      # Wiring that depends on this file; .env may override it.
+      AOS_PUBLIC_ORIGIN: ${AOS_PUBLIC_ORIGIN:-https://${DOMAIN:?Defineix DOMAIN al fitxer .env}}
+      AOS_SECURE_COOKIES: ${AOS_SECURE_COOKIES:-true}
+      AOS_TRUSTED_PROXIES: ${AOS_TRUSTED_PROXIES:-172.30.0.0/24} # the `proxy` network
+    # No `ports:` on purpose: reachable only through Caddy.
+    volumes:
+      - app_data:/data # SQLite: owner, sessions, conversations, statistics
+      - app_home:/home/app # Claude and Codex logins (~/.claude, ~/.codex)
+    read_only: true
+    tmpfs:
+      # exec: the CLIs may unpack and load helpers from /tmp; the HOME volume
+      # is writable and executable anyway, so noexec here would add little.
+      - /tmp:size=256m,mode=1777,exec
+      # Codex's SQLite state and logs, which record every prompt: in memory,
+      # private and outside the backed-up volumes (AOS_CODEX_STATE_DIR in the
+      # Dockerfile). The app deletes the logs before every Codex start, so a full
+      # tmpfs cannot keep Codex down; a container restart empties all of it.
+      - /run/codex-state:size=64m,mode=0700,uid=10001,gid=10001
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 1536m # Python + the CLIs of a debate; raise it on a 4 GB VPS if needed
+    # Leaves CPU for Caddy and SSH even if a CLI spins (Codex can run model-written
+    # code in its sandbox). APP_CPUS in .env; at most the number of vCPUs.
+    cpus: ${APP_CPUS:-1.5}
+    ulimits:
+      # Python keeps the soft limit it is given (1024 by default): every open
+      # connection and CLI pipe is a file descriptor.
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks:
+      - proxy
+      - egress
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+    logging: *logging
+
+  # One-shot: hands Caddy's volumes to its unprivileged user before it starts
+  # (Docker creates them owned by root, and older installs ran Caddy as root).
+  # Root, but only with the capabilities chown needs and without network; -h
+  # changes symlinks themselves, never what they point to.
+  caddy-init:
+    image: caddy:2.11.4-alpine
+    user: "0:0"
+    command: ["chown", "-R", "-h", "10002:10002", "/data", "/config"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *logging
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    # Unprivileged; the same UID owns caddy_data and caddy_config (caddy-init).
+    user: "10002:10002"
+    depends_on:
+      caddy-init:
+        condition: service_completed_successfully
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80" # HTTP: certificate challenge + redirect to HTTPS
+      - "443:443/tcp" # HTTPS (HTTP/1.1, HTTP/2)
+      - "443:443/udp" # HTTP/3 (QUIC)
+    environment:
+      DOMAIN: ${DOMAIN:?Defineix DOMAIN al fitxer .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Defineix ACME_EMAIL al fitxer .env}
+      # Empty or unset: everyone (an empty list inside Caddy would block all).
+      ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates and ACME account: must persist
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    # Not a privilege here: the image's caddy binary carries this file capability
+    # and the kernel refuses to run it unless it is in the bounding set. With
+    # no-new-privileges and a non-root user it grants nothing; the ports below
+    # 1024 can be bound thanks to the sysctl.
+    cap_add: [NET_BIND_SERVICE]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0 # Docker's default; explicit here
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    # Request bodies are streamed to the app, never buffered here (deploy/Caddyfile).
+    mem_limit: 256m
+    networks:
+      - edge
+      - proxy
+    healthcheck:
+      # Admin API, reachable only from inside the container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+networks:
+  # Internet <-> Caddy. IPv6 enabled so IPv6 visitors keep their real address
+  # (otherwise they show up as the bridge gateway and the allowlist and the
+  # login throttling see the wrong IP).
+  edge:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:c1a0:de::/64
+  # Caddy <-> app only, no route to the outside. AOS_TRUSTED_PROXIES matches it.
+  proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  # App -> model APIs (Anthropic, OpenAI).
+  egress: {}
+
+volumes:
+  # The app's data: .env can point them to other volumes, which is how
+  # deploy/restore.sh switches to restored data (and back) in a single step.
+  # Unset, they keep the names of project "claudegpt": the ones every existing
+  # install already has.
+  app_data:
+    name: ${APP_DATA_VOLUME:-claudegpt_app_data}
+  app_home:
+    name: ${APP_HOME_VOLUME:-claudegpt_app_home}
+  caddy_data: {}
+  caddy_config: {}

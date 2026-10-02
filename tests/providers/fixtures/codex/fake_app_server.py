@@ -1,0 +1,641 @@
+#!/usr/bin/env python3
+"""Fake ``codex app-server`` for the provider tests (JSON-RPC subset of Codex CLI 0.157.1).
+
+It speaks newline-delimited JSON-RPC on stdio with the method and field names of the
+0.157.1 schema. ``samples/*.jsonl`` are notification sequences recorded from the real
+0.157.1 binary (against a local mock model); ``{THREAD_ID}``/``{TURN_ID}`` are replaced
+on replay. The behaviour of a turn is chosen by a marker in its input text:
+
+  (none)          replay samples/stream_turn.jsonl
+  [echo]          stream the input text back, word by word
+  [usage-limit]   a 100 % rate-limit update, then replay samples/usage_limit_turn.jsonl
+  [approval]      send every server -> client request, record the answers, then finish
+  [crash]         send one delta and exit abruptly
+  [slow]          a delta every 50 ms until turn/interrupt (up to 20 s)
+  [interrupted]   finish the turn with status "interrupted" on its own
+  [retry-error]   a non-final error notification (willRetry: true) before the answer
+  [midstream-retry] part of an answer, then a stream error that Codex retries (willRetry:
+                  true) by sampling the whole answer again in a new item (as 0.157.1 does)
+  [orphan]        an item that streams but never completes, then the completed answer
+  [long]          a long answer, a word every 2 ms, until turn/interrupt (then the usage
+                  Codex reports and status "interrupted"; max 1000 words)
+  [commentary]    a commentary message before the final answer
+  [spawn]         like [echo], but the turn also starts a sub-agent thread (as Codex's
+                  collaboration.spawn_agent does) that works until turn/interrupt
+  [spawn-loop]    an injected spawn loop: a new sub-agent every 30 ms (each one works
+                  until turn/interrupt) until the turn itself is interrupted (max 12)
+  [followup-loop] one sub-agent, then a follow-up turn on its thread every 30 ms until
+                  the turn itself is interrupted (max 12)
+
+Options from ``$CODEX_HOME/fake.json``: ``account`` (account/read value, may be null),
+``requiresOpenaiAuth``, ``config_model``, ``config_error`` (a forced error on config/read),
+``rate_limits_delay`` (seconds before answering
+account/rateLimits/read), ``init_error``, ``spawn_child`` (start a ``sleep`` child to
+check process-group kills), ``models`` / ``page_size`` / ``model_list_error`` (the
+model/list catalog, its page size and a forced error), ``term_delay`` (seconds a SIGTERM
+or the end of stdin takes to stop the process, which logs ``{"exited": time}``),
+``wedge_after`` (a method: right after answering it, the first process stops reading its
+stdin for good, alive and with stdout open, like a process that is stopped or deadlocked;
+it logs ``{"wedged": time}`` and a marker file spares the processes that replace it). Every
+message received is appended to ``$CODEX_HOME/requests.jsonl`` with the pid (and the
+start time); the environment goes to ``env.json``. Like the real server, every turn input
+is logged to ``logs_2.sqlite`` (a plain-text stand-in) in ``-c sqlite_home=...``, or in
+``$CODEX_HOME`` without that override.
+
+A turn's ``input`` takes the ``UserInput`` items of 0.157.1 this client sends: ``text``
+(with ``text_elements``) and ``localImage`` (an absolute ``path``, and an optional
+``detail``); anything else is refused with -32602, as the real server refuses an unknown
+variant. Every turn logs its items as ``turn_input``, a ``localImage`` with the type its
+file name gives (as Codex's mime_guess does) and the SHA-256
+of the file this process read at its path (or the error it got), as Codex reads it.
+Standard library only.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import itertools
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import tomllib
+import uuid
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+HOME = Path(os.environ.get("CODEX_HOME") or ".")
+OPTIONS: dict[str, Any] = (
+    json.loads((HOME / "fake.json").read_text()) if (HOME / "fake.json").exists() else {}
+)
+PID = os.getpid()
+DEFAULT_ACCOUNT = {"type": "chatgpt", "email": "owner@example.com", "planType": "plus"}
+
+
+def sqlite_home() -> Path:
+    """Directory of Codex's SQLite state and logs: ``-c sqlite_home=...`` or CODEX_HOME."""
+    for flag, value in itertools.pairwise(sys.argv[1:]):
+        if flag == "-c" and value.startswith("sqlite_home="):
+            return Path(tomllib.loads(value)["sqlite_home"])
+    return HOME
+
+
+STATE = sqlite_home()
+
+
+def model_entry(
+    slug: str, name: str, *, default: bool = False, hidden: bool = False
+) -> dict[str, Any]:
+    return {
+        "id": slug,
+        "model": slug,
+        "displayName": name,
+        "description": f"{name} (vendor description).",
+        "hidden": hidden,
+        "isDefault": default,
+        "supportedReasoningEfforts": [],
+        "defaultReasoningEffort": "medium",
+    }
+
+
+DEFAULT_MODELS = [
+    model_entry("gpt-6-astra", "GPT-6-Astra", default=True),
+    model_entry("gpt-6-sol", "GPT-6-Sol"),
+    model_entry("codex-auto-review", "Codex Auto Review", hidden=True),
+    model_entry("gpt-7-nova", "GPT-7-Nova"),
+]
+
+_out_lock = threading.Lock()
+_log_lock = threading.Lock()
+_ids = itertools.count(1)
+_waiters: dict[str, tuple[threading.Event, list[dict[str, Any]]]] = {}
+_interrupts: dict[str, threading.Event] = {}
+
+
+def log(entry: dict[str, Any]) -> None:
+    with _log_lock, open(HOME / "requests.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"pid": PID, **entry}) + "\n")
+
+
+def send(message: dict[str, Any]) -> None:
+    with _out_lock:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
+
+
+def notify(method: str, params: dict[str, Any]) -> None:
+    send({"method": method, "params": params})
+
+
+def respond(request_id: Any, result: Any) -> None:
+    send({"id": request_id, "result": result})
+
+
+def fail(request_id: Any, code: int, message: str) -> None:
+    send({"id": request_id, "error": {"code": code, "message": message}})
+
+
+def ask(method: str, params: dict[str, Any], timeout: float = 5.0) -> dict[str, Any] | None:
+    """Send a server -> client request and wait for the client's answer."""
+    request_id = f"srv-{next(_ids)}"
+    event: threading.Event = threading.Event()
+    box: list[dict[str, Any]] = []
+    _waiters[request_id] = (event, box)
+    send({"id": request_id, "method": method, "params": params})
+    event.wait(timeout)
+    return box[0] if box else None
+
+
+def rate_limits(primary: float, secondary: float) -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "limitId": "codex",
+        "limitName": None,
+        "normalModelSlug": None,
+        "primary": {"usedPercent": primary, "windowDurationMins": 300, "resetsAt": now + 3600},
+        "secondary": {
+            "usedPercent": secondary,
+            "windowDurationMins": 10080,
+            "resetsAt": now + 86400,
+        },
+        "credits": None,
+        "individualLimit": None,
+        "spendControlReached": None,
+        "planType": "plus",
+        "rateLimitReachedType": None,
+    }
+
+
+def breakdown(inp: int, cached: int, written: int, out: int, reasoning: int) -> dict[str, int]:
+    return {
+        "totalTokens": inp + out,
+        "inputTokens": inp,
+        "cachedInputTokens": cached,
+        "cacheWriteInputTokens": written,
+        "outputTokens": out,
+        "reasoningOutputTokens": reasoning,
+    }
+
+
+class Turn:
+    """Builders for the notifications of one turn."""
+
+    def __init__(self, thread_id: str, turn_id: str) -> None:
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.items: list[dict[str, Any]] = []
+
+    def ids(self) -> dict[str, str]:
+        return {"threadId": self.thread_id, "turnId": self.turn_id}
+
+    def begin(self) -> None:
+        notify(
+            "thread/status/changed",
+            {"threadId": self.thread_id, "status": {"type": "active", "activeFlags": []}},
+        )
+        notify("turn/started", {"threadId": self.thread_id, "turn": self.turn("inProgress")})
+
+    def message(
+        self, item_id: str, chunks: list[str], *, phase: str | None = None, delay: float = 0.0
+    ) -> None:
+        item = {
+            "type": "agentMessage",
+            "id": item_id,
+            "text": "",
+            "phase": phase,
+            "memoryCitation": None,
+            "delivery": None,
+            "questions": None,
+        }
+        notify("item/started", {"item": item, **self.ids(), "startedAtMs": 0})
+        for chunk in chunks:
+            time.sleep(delay)
+            notify("item/agentMessage/delta", {**self.ids(), "itemId": item_id, "delta": chunk})
+        done = {**item, "text": "".join(chunks)}
+        self.items.append(done)
+        notify("item/completed", {"item": done, **self.ids(), "completedAtMs": 0})
+
+    def usage(self, last: dict[str, int], total: dict[str, int]) -> None:
+        notify(
+            "thread/tokenUsage/updated",
+            {
+                **self.ids(),
+                "tokenUsage": {"total": total, "last": last, "modelContextWindow": 258400},
+            },
+        )
+
+    def turn(self, status: str, error: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "id": self.turn_id,
+            "items": self.items,
+            "itemsView": "summary",
+            "status": status,
+            "error": error,
+            "startedAt": int(time.time()),
+            "completedAt": None if status == "inProgress" else int(time.time()),
+            "durationMs": None,
+        }
+
+    def finish(self, status: str = "completed") -> None:
+        notify("thread/status/changed", {"threadId": self.thread_id, "status": {"type": "idle"}})
+        notify("turn/completed", {"threadId": self.thread_id, "turn": self.turn(status)})
+
+
+def replay(sample: str, thread_id: str, turn_id: str) -> None:
+    for line in (HERE / "samples" / sample).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            send(json.loads(line.replace("{THREAD_ID}", thread_id).replace("{TURN_ID}", turn_id)))
+            time.sleep(0.002)
+
+
+SERVER_REQUESTS: list[tuple[str, dict[str, Any]]] = [
+    ("item/commandExecution/requestApproval", {"itemId": "call_1", "command": "rm -rf /"}),
+    ("item/fileChange/requestApproval", {"itemId": "call_2", "reason": None}),
+    ("item/permissions/requestApproval", {"itemId": "call_3", "permissions": {}}),
+    (
+        "item/tool/requestUserInput",
+        {
+            "itemId": "call_4",
+            "questions": [{"id": "q1", "header": "Q", "question": "Continue?", "options": None}],
+            "isBlocking": True,
+            "autoResolutionMs": None,
+        },
+    ),
+    ("mcpServer/elicitation/request", {"serverName": "x", "message": "Give me data"}),
+    ("item/tool/call", {"callId": "call_5", "tool": "lookup", "arguments": {}}),
+    ("applyPatchApproval", {"callId": "call_6", "fileChanges": {}}),
+    ("execCommandApproval", {"callId": "call_7", "command": ["ls"]}),
+    ("account/chatgptAuthTokens/refresh", {"reason": "unauthorized", "previousAccountId": None}),
+]
+
+
+MARKERS = (
+    "[echo]",
+    "[crash]",
+    "[approval]",
+    "[slow]",
+    "[interrupted]",
+    "[retry-error]",
+    "[midstream-retry]",
+    "[orphan]",
+    "[long]",
+    "[commentary]",
+    "[spawn]",
+    "[spawn-loop]",
+    "[followup-loop]",
+)
+
+
+def run_sub_agent(turn: Turn) -> None:
+    """A sub-agent nobody listens to: it works (and spends tokens) until interrupted."""
+    interrupted = _interrupts[turn.turn_id]
+    turn.begin()
+    for step in range(400):
+        if interrupted.wait(0.05):
+            log({"sub_agent": turn.thread_id, "interrupted_after": step})
+            turn.finish("interrupted")
+            return
+        turn.usage(breakdown(500, 0, 0, 50, 0), breakdown(500 * (step + 1), 0, 0, 50, 0))
+        notify("item/agentMessage/delta", {**turn.ids(), "itemId": "w1", "delta": "."})
+    log({"sub_agent": turn.thread_id, "interrupted_after": None})
+    turn.finish()
+
+
+def start_sub_agent(turn: Turn, call: int, kind: str, child: Turn) -> None:
+    """Run ``child`` as a sub-agent of ``turn``, which shows the item 0.157.1 emits for
+    collaboration.spawn_agent (kind "started") or followup_task ("interacted")."""
+    _interrupts[child.turn_id] = threading.Event()
+    activity = {
+        "type": "subAgentActivity",
+        "id": f"call_{call}",
+        "kind": kind,
+        "agentThreadId": child.thread_id,
+        "agentPath": "/root/worker",
+    }
+    notify("item/started", {"item": activity, **turn.ids(), "startedAtMs": 0})
+    notify("item/completed", {"item": activity, **turn.ids(), "completedAtMs": 0})
+    log({"sub_agent_run": call, "thread": child.thread_id})
+    threading.Thread(target=run_sub_agent, args=(child,), daemon=True).start()
+
+
+def run_loop(turn: Turn, interrupted: threading.Event, *, follow_up: bool) -> None:
+    """A root turn that keeps starting sub-agent runs until it is interrupted."""
+    thread_id = str(uuid.uuid4())
+    for call in range(1, 13):
+        child = Turn(thread_id if follow_up else str(uuid.uuid4()), str(uuid.uuid4()))
+        start_sub_agent(turn, call, "interacted" if follow_up and call > 1 else "started", child)
+        if interrupted.wait(0.03):
+            turn.finish("interrupted")
+            return
+    turn.message("m1", ["Fet."])
+    turn.finish()
+
+
+def run_turn(thread_id: str, turn_id: str, text: str) -> None:
+    turn = Turn(thread_id, turn_id)
+    interrupted = _interrupts[turn_id]
+    if "[usage-limit]" in text:
+        notify("account/rateLimits/updated", {"rateLimits": rate_limits(100, 64)})
+        replay("usage_limit_turn.jsonl", thread_id, turn_id)
+        return
+    if not any(marker in text for marker in MARKERS):
+        replay("stream_turn.jsonl", thread_id, turn_id)
+        return
+    turn.begin()
+    if "[crash]" in text:
+        notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m1", "delta": "Parcial"})
+        time.sleep(0.05)
+        os._exit(3)
+    if "[slow]" in text:
+        for _ in range(400):
+            if interrupted.wait(0.05):
+                turn.finish("interrupted")
+                return
+            notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m1", "delta": "."})
+        turn.finish()
+        return
+    if "[interrupted]" in text:
+        turn.finish("interrupted")
+        return
+    if "[approval]" in text:
+        answers: dict[str, dict[str, Any] | None] = {}
+        for method, params in SERVER_REQUESTS:
+            answers[method] = ask(method, {**turn.ids(), **params})
+        log({"answers": answers})
+        turn.usage(breakdown(100, 0, 0, 10, 5), breakdown(100, 0, 0, 10, 5))
+        turn.message("m2", ["Totes ", "declinades."])
+        turn.usage(breakdown(200, 50, 10, 20, 2), breakdown(300, 50, 10, 30, 7))
+        turn.finish()
+        return
+    if "[midstream-retry]" in text:
+        item = {
+            "type": "agentMessage",
+            "id": "msg_a",
+            "text": "",
+            "phase": None,
+            "memoryCitation": None,
+            "delivery": None,
+            "questions": None,
+        }
+        notify("item/started", {"item": item, **turn.ids(), "startedAtMs": 0})
+        for chunk in ["La resposta ", "completa comen"]:
+            notify("item/agentMessage/delta", {**turn.ids(), "itemId": "msg_a", "delta": chunk})
+        error = {
+            "message": "Reconnecting... 1/5",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+            "additionalDetails": None,
+            "misalignment": None,
+        }
+        notify("error", {"error": error, "willRetry": True, **turn.ids()})
+        turn.message("msg_b", ["La resposta ", "completa comença ", "aquí i acaba bé."])
+        turn.usage(breakdown(1000, 0, 0, 50, 0), breakdown(1000, 0, 0, 50, 0))
+        turn.finish()
+        return
+    if "[orphan]" in text:
+        notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m0", "delta": "Esborrany "})
+        turn.message("m1", ["Resposta ", "final."])
+        turn.usage(breakdown(100, 0, 0, 10, 0), breakdown(100, 0, 0, 10, 0))
+        turn.finish()
+        return
+    if "[long]" in text:
+        item = {
+            "type": "agentMessage",
+            "id": "m1",
+            "text": "",
+            "phase": None,
+            "memoryCitation": None,
+            "delivery": None,
+            "questions": None,
+        }
+        notify("item/started", {"item": item, **turn.ids(), "startedAtMs": 0})
+        for _ in range(1000):
+            if interrupted.wait(0.002):
+                log({"long_interrupted": True})
+                turn.usage(breakdown(700, 0, 0, 90, 60), breakdown(700, 0, 0, 90, 60))
+                turn.finish("interrupted")
+                return
+            notify("item/agentMessage/delta", {**turn.ids(), "itemId": "m1", "delta": "paraula "})
+        turn.finish()
+        return
+    if "[retry-error]" in text:
+        error = {
+            "message": "Reconnecting... 1/5",
+            "codexErrorInfo": None,
+            "additionalDetails": None,
+            "misalignment": None,
+        }
+        notify("error", {"error": error, "willRetry": True, **turn.ids()})
+    if "[spawn-loop]" in text or "[followup-loop]" in text:
+        run_loop(turn, interrupted, follow_up="[followup-loop]" in text)
+        return
+    if "[spawn]" in text:
+        start_sub_agent(turn, 1, "started", Turn(str(uuid.uuid4()), str(uuid.uuid4())))
+    if "[commentary]" in text:
+        turn.message("c1", ["Pensant", "..."], phase="commentary")
+        turn.message("m1", ["Primer."], phase="final_answer")
+        turn.message("m2", ["Segon."], phase="final_answer")
+    else:
+        words = text.replace("[echo]", "").replace("[spawn]", "").split()
+        turn.message("m1", [f"{word} " for word in words], delay=0.01)
+    turn.usage(breakdown(1000, 600, 0, 50, 10), breakdown(1000, 600, 0, 50, 10))
+    notify("account/rateLimits/updated", {"rateLimits": rate_limits(42.5, 7)})
+    turn.finish()
+
+
+IMAGE_TYPES_BY_EXTENSION = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+"""What Codex's mime_guess makes of a local image's extension ("image" without one)."""
+
+
+def input_item(item: object) -> dict[str, Any] | None:
+    """The log entry of a turn input item (None for an item 0.157.1 would refuse)."""
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("type")
+    if kind == "text" and set(item) == {"type", "text", "text_elements"}:
+        if isinstance(item["text"], str) and isinstance(item["text_elements"], list):
+            return {"type": "text", "text": item["text"]}
+        return None
+    if kind == "localImage" and set(item) <= {"type", "path", "detail"}:
+        path = item.get("path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            return None
+        # Like Codex (mime_guess): the type comes from the file name, never the bytes.
+        extension = os.path.splitext(path)[1].lower()
+        entry: dict[str, Any] = {
+            "type": "localImage",
+            "path": path,
+            "mime": IMAGE_TYPES_BY_EXTENSION.get(extension, "image"),
+        }
+        try:
+            entry["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError as exc:
+            entry["error"] = type(exc).__name__
+        return entry
+    return None
+
+
+def handle(request_id: Any, method: str, params: dict[str, Any]) -> None:
+    account = OPTIONS.get("account", DEFAULT_ACCOUNT)
+    if method == "initialize":
+        if OPTIONS.get("init_error"):
+            fail(request_id, -32603, "initialization failed on purpose")
+            return
+        name = params.get("clientInfo", {}).get("name", "client")
+        respond(
+            request_id,
+            {
+                "userAgent": f"{name}/0.157.1 (fake; x86_64) linux ({name}; 0.1)",
+                "codexHome": str(HOME),
+                "platformFamily": "unix",
+                "platformOs": "linux",
+            },
+        )
+        notify(
+            "configWarning",
+            {"summary": "Codex could not find bubblewrap on PATH.", "details": None},
+        )
+    elif method == "account/read":
+        respond(
+            request_id,
+            {"account": account, "requiresOpenaiAuth": OPTIONS.get("requiresOpenaiAuth", True)},
+        )
+    elif method == "account/rateLimits/read":
+        if account is None:
+            fail(request_id, -32600, "codex account authentication required to read rate limits")
+            return
+        answer = {
+            "ordinaryUsageAllowed": True,
+            "rateLimits": rate_limits(21, 3),
+            "rateLimitsByLimitId": None,
+            "rateLimitResetCredits": None,
+            "accountId": None,
+            "rateLimitUpsell": None,
+        }
+        delay = float(OPTIONS.get("rate_limits_delay", 0))
+        timer = threading.Timer(delay, respond, args=(request_id, answer))
+        timer.daemon = True
+        timer.start()
+    elif method == "config/read":
+        if OPTIONS.get("config_error"):
+            fail(request_id, -32603, "config unavailable")
+            return
+        respond(
+            request_id,
+            {"config": {"model": OPTIONS.get("config_model")}, "origins": {}, "layers": None},
+        )
+    elif method == "model/list":
+        if OPTIONS.get("model_list_error"):
+            fail(request_id, -32603, "model catalog unavailable")
+            return
+        # Hidden entries are returned too, so the client's own filter is exercised.
+        models = OPTIONS.get("models", DEFAULT_MODELS)
+        size = int(OPTIONS.get("page_size", 100))
+        start = int(params.get("cursor") or 0)
+        more = start + size < len(models)
+        page = {
+            "data": models[start : start + size],
+            "nextCursor": str(start + size) if more else None,
+        }
+        respond(request_id, page)
+    elif method == "thread/start":
+        thread_id = str(uuid.uuid4())
+        model = params.get("model") or OPTIONS.get("config_model") or "gpt-6-astra"
+        thread = {"id": thread_id, "ephemeral": bool(params.get("ephemeral")), "turns": []}
+        respond(
+            request_id,
+            {
+                "thread": thread,
+                "model": model,
+                "modelProvider": "openai",
+                "serviceTier": None,
+                "cwd": params.get("cwd"),
+                "approvalPolicy": params.get("approvalPolicy"),
+                "sandbox": {"type": "readOnly", "networkAccess": False},
+                "reasoningEffort": None,
+            },
+        )
+        notify("thread/started", {"thread": thread})
+    elif method == "turn/start":
+        items = [input_item(item) for item in params.get("input", [])]
+        if not items or any(item is None for item in items):
+            fail(request_id, -32602, "invalid params: unknown or malformed UserInput item")
+            return
+        log({"turn_input": items})
+        turn_id = str(uuid.uuid4())
+        _interrupts[turn_id] = threading.Event()
+        respond(request_id, {"turn": Turn(params["threadId"], turn_id).turn("inProgress")})
+        text = "".join(part.get("text", "") for part in params.get("input", []))
+        with _log_lock, open(STATE / "logs_2.sqlite", "a", encoding="utf-8") as handle:
+            handle.write(f"DEBUG Submission TurnInput {text!r}\n")
+        threading.Thread(
+            target=run_turn, args=(params["threadId"], turn_id, text), daemon=True
+        ).start()
+    elif method == "turn/interrupt":
+        event = _interrupts.get(params.get("turnId", ""))
+        if event is not None:
+            event.set()
+        respond(request_id, {})
+    elif method == "thread/unsubscribe":
+        respond(request_id, {"status": "unsubscribed"})
+    else:
+        fail(request_id, -32601, f"unknown method {method}")
+
+
+def wedge() -> None:
+    """The ``wedge_after`` option: never read stdin again (the client's writes pile up in
+    the pipe), but stay alive with stdout open. Only the first process of a test wedges."""
+    marker = HOME / "wedged.flag"
+    if marker.exists():
+        return
+    marker.write_text(str(PID), encoding="utf-8")
+    log({"wedged": time.time()})
+    while True:
+        time.sleep(3600)
+
+
+def slow_exit(signum: int, frame: Any) -> None:
+    """SIGTERM handler of the ``term_delay`` option: a process slow to shut down (the
+    real one flushes its SQLite databases)."""
+    time.sleep(float(OPTIONS["term_delay"]))
+    log({"exited": time.time()})
+    os._exit(0)
+
+
+def main() -> None:
+    if OPTIONS.get("term_delay"):
+        signal.signal(signal.SIGTERM, slow_exit)
+    log({"argv": sys.argv[1:], "cwd": os.getcwd(), "started": time.time()})
+    (HOME / "env.json").write_text(json.dumps(dict(os.environ)), encoding="utf-8")
+    if OPTIONS.get("spawn_child"):
+        child = subprocess.Popen(["sleep", "60"])
+        (HOME / "child.pid").write_text(str(child.pid), encoding="utf-8")
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        message = json.loads(line)
+        log({"msg": message})
+        if "method" not in message:
+            waiter = _waiters.pop(str(message.get("id")), None)
+            if waiter is not None:
+                waiter[1].append(message)
+                waiter[0].set()
+        elif "id" in message:
+            handle(message["id"], message["method"], message.get("params") or {})
+            if message["method"] == OPTIONS.get("wedge_after"):
+                wedge()
+    if OPTIONS.get("term_delay"):
+        slow_exit(signal.SIGTERM, None)  # stdin closed: shut down just as slowly
+
+
+if __name__ == "__main__":
+    main()

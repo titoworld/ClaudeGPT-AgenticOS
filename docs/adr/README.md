@@ -1,36 +1,45 @@
-# Registro de decisiones de arquitectura (ADR)
+# Registre de decisions d'arquitectura (ADR)
 
-Cada decisión importante se documenta en un fichero numerado `NNNN-titulo-corto.md`. Así cualquier sesión (humana o de Claude) sabe qué se decidió, por qué y qué alternativas se descartaron, sin reabrir el debate.
+Cada decisió important es documenta en un fitxer numerat `NNNN-titol-curt.md`. Així qualsevol sessió (humana o de Claude) sap què es va decidir, per què i quines alternatives es van descartar, sense reobrir el debat.
 
-Un ADR aceptado no se edita: si la decisión cambia, se escribe un ADR nuevo que lo sustituye y el antiguo pasa a estado "Sustituido por NNNN".
+Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el substitueix i l'antic passa a l'estat "Substituït per NNNN".
 
-## Índice
+## Índex
 
-| Nº   | Decisión                                               | Estado   |
-| ---- | ------------------------------------------------------ | -------- |
-| 0001 | [Python con uv como base del proyecto](0001-python-con-uv.md) | Aceptado |
+| Núm. | Decisió                                                                                   | Estat    |
+| ---- | ----------------------------------------------------------------------------------------- | -------- |
+| 0001 | [Python amb uv com a base del projecte](0001-python-con-uv.md) (en castellà)              | Acceptat |
+| 0002 | [Subscripcions via les CLI oficials, amb claus d'API com a alternativa](0002-subscripcions-via-cli-oficials.md) | Acceptat |
+| 0003 | [Mode Consell i estratègia d'estalvi de tokens](0003-consell-i-estalvi-de-tokens.md)      | Acceptat |
+| 0004 | [Interfície web i desplegament](0004-web-i-desplegament.md)                               | Acceptat |
+| 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-integritat-de-les-respostes.md) | Proposat |
+| 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
+| 0007 | [Resultat del torn desat a la pregunta](0007-resultat-del-torn.md)                        | Proposat |
+| 0008 | [Recompte de tokens i intents declinats](0008-recompte-de-tokens.md)                      | Proposat |
+| 0009 | [Adjunts: imatges, PDF i fitxers de text al xat](0009-adjunts.md)                         | Proposat |
+| 0010 | [Mode «Perfecciona»: un document que les dues IA milloren fins que l'aturis](0010-mode-perfecciona.md) | Proposat |
 
 ## Plantilla
 
 ```markdown
-# NNNN. Título
+# NNNN. Títol
 
-- Estado: Propuesto | Aceptado | Sustituido por NNNN
-- Fecha: AAAA-MM-DD
+- Estat: Proposat | Acceptat | Substituït per NNNN
+- Data: AAAA-MM-DD
 
-## Contexto
+## Context
 
-Qué problema hay que resolver y qué condiciona la decisión.
+Quin problema cal resoldre i què condiciona la decisió.
 
-## Decisión
+## Decisió
 
-Qué se decide.
+Què es decideix.
 
-## Alternativas consideradas
+## Alternatives considerades
 
-Qué otras opciones había y por qué se descartaron.
+Quines altres opcions hi havia i per què es van descartar.
 
-## Consecuencias
+## Conseqüències
 
-Qué implica la decisión, tanto lo bueno como lo malo.
+Què implica la decisió, tant el que és bo com el que no.
 ```

@@ -1,0 +1,130 @@
+# Caddy 2.11: HTTPS edge of ClaudeGPT OS (checked with caddy v2.11.4: validate + fmt).
+#
+# Environment (docker-compose.yml passes it from .env):
+#   DOMAIN       public host name, e.g. ia.example.com (automatic HTTPS)
+#   ACME_EMAIL   contact address for the certificate authority
+#   ALLOWED_IPS  optional allowlist, space-separated IPs/CIDRs (default: everyone)
+# {$VAR} is replaced before parsing, so ALLOWED_IPS may expand to several values.
+# Never leave ALLOWED_IPS set but empty here: an empty list blocks everyone
+# (docker-compose.yml turns an empty value into the default).
+{
+	email {$ACME_EMAIL}
+
+	# The admin API listens on localhost:2019 inside the container only
+	# (healthcheck and `caddy reload`); it is never published.
+
+	# Caddy's own log on stderr, errors included (a 502 names its request), keeps
+	# no query string: an upload's file name or a search never reaches the logs.
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp "\?.*" ""
+			}
+		}
+	}
+
+	servers {
+		# HTTP/3 over QUIC (UDP 443) is on by default; listed for clarity.
+		protocols h1 h2 h3
+		timeouts {
+			read_header 10s
+			idle 5m
+		}
+		# Caddy is the edge: no trusted_proxies, so client X-Forwarded-For is ignored.
+	}
+}
+
+{$DOMAIN} {
+	# ---- optional IP allowlist: anyone else gets the connection closed ----
+	@blocked not client_ip {$ALLOWED_IPS:0.0.0.0/0 ::/0}
+	abort @blocked
+
+	encode zstd gzip
+
+	header {
+		# Caddy terminates TLS, so it owns HSTS. No "preload" and no
+		# includeSubDomains: this site must not decide for other subdomains.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+		-Via
+		# Applied to the final response, replacing any upstream value.
+		defer
+	}
+	# CSP and the other security headers come from the app.
+
+	# Request bodies (the API's small JSON; prompts travel over the WebSocket)
+	# are capped like the app's (1 MiB) and must arrive within 30 s. Only for
+	# methods that carry a body: a WebSocket is a GET, or over HTTP/2 and HTTP/3
+	# a CONNECT whose body is the socket itself, which must be neither capped
+	# nor timed out. The upload of an attachment has its own limits (@upload):
+	# both limits must never match the same request.
+	@body {
+		method POST PUT PATCH DELETE
+		not {
+			method PUT
+			path /api/attachments
+		}
+	}
+	request_body @body {
+		max_size 1MiB
+		# Marked experimental in Caddy 2.11: check it when upgrading Caddy.
+		read_timeout 30s
+	}
+
+	# The upload of an attachment (PUT /api/attachments, which the app reads only
+	# with a session) is the file itself: up to 20 MB, the app's limit (each type
+	# is cut lower), within 150 s (the app answers 408 at 120 s, before this).
+	@upload {
+		method PUT
+		path /api/attachments
+	}
+	request_body @upload {
+		max_size 20MB
+		read_timeout 150s
+	}
+
+	# Bodies are streamed to the app, never buffered here (no request_buffers):
+	# buffering kept up to 1 MiB per request in this 256 MiB container, so 150
+	# stalled uploads got Caddy OOM-killed. The app bounds a slow or stalled
+	# body itself: 408 after 15 s (120 s for an upload), and the connection is
+	# closed.
+	# WebSockets are proxied automatically.
+	reverse_proxy app:8000 {
+		# Open WebSockets survive `caddy reload` for up to 5 minutes.
+		stream_close_delay 5m
+
+		# While the app restarts, wait for it instead of answering 502 at once.
+		# A failed connection is always retried (the body has not been sent
+		# yet); once a request has reached the app, only GET is retried.
+		lb_try_duration 10s
+		lb_try_interval 250ms
+
+		transport http {
+			dial_timeout 3s
+			# Must be shorter than uvicorn's keep-alive timeout (75 s): Caddy has
+			# to drop idle connections first, or reusing one the app just closed
+			# gives a sporadic 502.
+			keepalive 30s
+		}
+	}
+
+	# JSON access log on stdout (`docker compose logs caddy`), without cookies or
+	# query strings (an upload's file name, a search: only the path is kept).
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				resp_headers>Set-Cookie delete
+				request>uri regexp "\?.*" ""
+			}
+		}
+	}
+}
+
+# Requests by IP address or for an unknown host: close the connection.
+:80, :443 {
+	abort
+}

@@ -6,6 +6,9 @@ build/
 dist/
 .venv/
 
+# Frontend
+node_modules/
+
 # Herramientas
 .pytest_cache/
 .mypy_cache/
@@ -18,6 +21,10 @@ htmlcov/
 .env.*
 !.env.example
 .claude/settings.local.json
+/data/
+# Backups left in the clone (docs/DESPLEGAMENT.md writes them to /var/backups)
+/backups/
+/env-*
 
 # Editores y sistema operativo
 .vscode/
@@ -25,3 +32,9 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Estat local de proves (Codex, SQLite)
+strict-state/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

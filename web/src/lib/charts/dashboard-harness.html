@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ca">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="robots" content="noindex" />
+    <title>Tauler · banc de proves</title>
+  </head>
+  <body>
+    <!-- Development harness for views/Dashboard.svelte with mocked API data.
+         Not part of the production build. Open /src/lib/charts/dashboard-harness.html
+         with `npm run dev`. Parameters: ?api (both on API keys), ?mixed (Claude
+         subscription + ChatGPT API), ?noplan (no budgets / plan prices), ?manual
+         (manual exchange rate), ?noproviders, ?down, ?empty, ?error, ?slow -->
+    <div id="app"></div>
+    <script type="module" src="./dashboard-harness.ts"></script>
+  </body>
+</html>

@@ -1,6 +1,7 @@
-"""ClaudeGPT Agentic OS.
+"""ClaudeGPT OS: a private council of Claude and ChatGPT for a single owner.
 
-The architecture is not defined yet: see docs/VISION.md and docs/adr/.
+See docs/ARQUITECTURA.md (modules and contracts), docs/PROTOCOL.md (client-server
+protocol) and docs/adr/ (decisions).
 """
 
 from importlib.metadata import version

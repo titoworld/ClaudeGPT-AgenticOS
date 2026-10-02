@@ -1,0 +1,90 @@
+/* Styles for the development-only scene harness (scene-harness.html). */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font: 13px/1.4 var(--font-sans);
+  overflow: hidden;
+}
+
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: min(760px, calc(100% - 24px));
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--glass-strong);
+  backdrop-filter: blur(12px);
+}
+
+.panel fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 0;
+  padding: 4px 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.panel legend {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.panel button {
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel button[aria-pressed='true'] {
+  background: var(--surface-3);
+  border-color: var(--accent);
+}
+
+.panel output {
+  align-self: center;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.mock-column {
+  position: fixed;
+  top: 24px;
+  bottom: 24px;
+  left: max(24px, 50% - 520px);
+  width: min(620px, calc(100% - 48px));
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+}
+
+body.clean .panel {
+  display: none;
+}
