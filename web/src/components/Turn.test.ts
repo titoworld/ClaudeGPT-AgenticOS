@@ -1,10 +1,13 @@
 // Which synthesis a debate shows when the first attempt is not the result (audit A1), how
 // a turn ended, live and after a reload (A9, A14, N10), and the tokens of its totals (A7).
+import { flushSync } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { Attachment, Message, TurnEvent, TurnMode, TurnOptions, Usage } from '../lib/protocol';
 import {
   cancelledDuelEvents,
   cancelledDuelMessages,
+  debateEvents,
   degradedSynthesisEvents,
   failedRevisionEvents,
   failedRevisionMessages,
@@ -344,5 +347,79 @@ describe('Turn: the attachments of the question', () => {
     el.querySelectorAll<HTMLButtonElement>('.question .att button.body')[1]!.click();
     expect(viewer.current).toEqual(pdf);
     viewer.close();
+  });
+});
+
+describe('Turn in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  /** The two-round debate of the fixtures, live, which reaches a consensus in round 2. */
+  function debate(): TurnView {
+    const turn = createLiveTurn({
+      requestId: 'req-1',
+      question: 'Question?',
+      mode: 'debate',
+      options: { debate: { rounds: 2, consensus_threshold: 85, synthesizer: 'claude' }, use_cache: true },
+      conversationId: 7,
+    });
+    for (const ev of debateEvents()) applyTurnEvent(turn, ev);
+    return turn;
+  }
+
+  it("in English: a debate's stepper, the scores of each review, its consensus and its totals", () => {
+    i18n.set('en');
+    const root = render(Turn, { turn: debate(), plannedRounds: 2 });
+    expect(root.querySelector('article.turn')?.getAttribute('aria-label')).toBe('Turn: Question?');
+    expect(root.querySelector('.stepper ol')?.getAttribute('aria-label')).toBe('Council progress');
+    expect([...root.querySelectorAll('.stepper li')].map(textOf)).toEqual([
+      'Answers (done)',
+      'Review 1 (done)',
+      'Review 2 (done)',
+      'Synthesis (done)',
+    ]);
+    expect([...root.querySelectorAll('.cols .card .subtitle')].map(textOf)).toEqual(['Initial answer', 'Initial answer']);
+    const rounds = [...root.querySelectorAll('details.round > summary')];
+    expect(rounds.map((summary) => textOf(summary.querySelector('.title')))).toEqual(['Review 1', 'Review 2']);
+    const scores = (summary: Element) =>
+      [...summary.querySelectorAll('.score')].map((score) => [textOf(score.querySelector('b')), textOf(score.querySelector('.sr-only'))]);
+    expect(rounds.map(scores)).toEqual([
+      [['70', ''], ['90', '(no changes)']],
+      [['92', '(no changes)'], ['88', '(no changes)']],
+    ]);
+    const consensus = root.querySelector('.card.synthesis .chip.good')!;
+    expect(textOf(consensus)).toBe('Consensus in round 2 · 92/88');
+    expect(consensus.getAttribute('title')).toBe('Final agreement (threshold 85) — Claude: 92, ChatGPT: 88');
+    expect(textOf(root.querySelector('.card.synthesis .by'))).toBe('by Claude');
+    const used = root.querySelector('.totals .used')!;
+    expect(used.getAttribute('title')).toBe('1,250 input · 50 read from the cache · 161 output');
+    expect(textOf(used)).toMatch(/^Total 1,461 tokens/);
+    expect(textOf(used.querySelector('.sr-only'))).toBe('(1,250 input · 50 read from the cache · 161 output)');
+    expect(used.querySelector('b')?.textContent).toBe('1,461');
+    expect(textOf(root.querySelector('.totals button.savings'))).toBe('−3.2k tokens saved≈ €0.0034');
+    expect(textOf(root.querySelector('.totals .tip strong'))).toBe('Tokens saved in this turn');
+  });
+
+  it('in Spanish: how a turn ended', () => {
+    i18n.set('es');
+    const failed = parts(liveTurn(failedSoloEvents(), 'solo'));
+    // The error itself is the server's, in the language of the connection that ran the turn.
+    expect(failed.banner).toBe('El turno ha fallado. Claude no ha pogut respondre.');
+    expect(failed.claude).toContain('No ha podido responder.');
+    expect(failed.totals).toContain('Total 6300 tokens');
+    const cancelled = parts(storedTurn(cancelledDuelMessages()));
+    expect(cancelled.banner).toBe('Este turno se ha detenido.');
+    expect(cancelled.claude).toContain('No ha respondido.');
+  });
+
+  it('follows a change of language', () => {
+    const root = render(Turn, { turn: debate(), plannedRounds: 2 });
+    expect(textOf(root.querySelector('.stepper li'))).toBe('Respostes (fet)');
+    i18n.set('en');
+    flushSync();
+    expect(textOf(root.querySelector('.stepper li'))).toBe('Answers (done)');
+    i18n.set('es');
+    flushSync();
+    expect(textOf(root.querySelector('.card.synthesis .chip.good'))).toBe('Consenso en la ronda 2 · 92/88');
+    expect(textOf(root.querySelector('.totals .used b'))).toBe('1461');
   });
 });

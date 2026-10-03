@@ -3,6 +3,7 @@
   import { attachmentView } from '../lib/attachments';
   import { approxEur, processedTokens, tokenBreakdown, turnCost, turnCostTitle } from '../lib/costs';
   import { AGENT_LABEL, formatInt, formatTime } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { AGENTS } from '../lib/protocol';
   import { keptVersion } from '../lib/refine';
   import { MODE_LABEL } from '../lib/text';
@@ -27,6 +28,7 @@
   import PdfChecks from './PdfChecks.svelte';
   import RefineTurn from './RefineTurn.svelte';
   import RevisionRound from './RevisionRound.svelte';
+  import RichText from './RichText.svelte';
   import SavingsChip from './SavingsChip.svelte';
 
   interface Props {
@@ -37,6 +39,7 @@
 
   let { turn, plannedRounds }: Props = $props();
 
+  const t = $derived(i18n.m.turn);
   const active = $derived(!isTerminal(turn.status));
   const answers = $derived(streamsByAgent(turn, 'answer', 0));
   const rounds = $derived(revisionRounds(turn));
@@ -62,21 +65,21 @@
   const showSynthesisSlot = $derived(
     !!synthesis || (active && turn.phase === 'synthesis'),
   );
-  // A refine turn stopped with «Atura ara» keeps its last accepted version, if it has one: its
+  // A refine turn stopped with «Stop now» keeps its last accepted version, if it has one: its
   // document says so. One stopped before any version was accepted keeps none.
   const keptDocument = $derived(turn.mode === 'refine' && keptVersion(turn) != null);
   const consensusLabel = $derived.by(() => {
     const c = turn.consensus;
     if (!c) return null;
-    if (!c.reached) return 'Sense consens';
+    if (!c.reached) return t.consensus.none;
     const scores = AGENTS.map((a) => c.scores[a]).filter((v) => v != null);
-    return `Consens a la ronda ${c.round}${scores.length ? ` · ${scores.join('/')}` : ''}`;
+    return `${t.consensus.reached(c.round)}${scores.length ? ` · ${scores.join('/')}` : ''}`;
   });
   const consensusTitle = $derived.by(() => {
     const c = turn.consensus;
     if (!c) return '';
     const parts = AGENTS.filter((a) => c.scores[a] != null).map((a) => `${AGENT_LABEL[a]}: ${c.scores[a]}`);
-    return `Acord final (llindar ${threshold})${parts.length ? ` — ${parts.join(', ')}` : ''}`;
+    return `${t.consensus.title(threshold)}${parts.length ? ` — ${parts.join(', ')}` : ''}`;
   });
 </script>
 
@@ -88,10 +91,10 @@
   {/if}
 {/snippet}
 
-<article class="turn" aria-label="Torn: {turn.question.slice(0, 80)}">
+<article class="turn" aria-label={t.label(turn.question.slice(0, 80))}>
   <div class="question">
     {#if turn.attachments.length}
-      <ul class="attachments" aria-label="Adjunts">
+      <ul class="attachments" aria-label={t.attachments}>
         {#each turn.attachments as attachment (attachment.id)}
           <li><AttachmentCard view={attachmentView(attachment)} onopen={() => viewer.open(attachment)} /></li>
         {/each}
@@ -114,7 +117,7 @@
   {/if}
 
   {#if active && turn.phase === 'compaction'}
-    <p class="notice"><Icon name="refresh" size={14} />Compactant l'historial per estalviar tokens…</p>
+    <p class="notice"><Icon name="refresh" size={14} />{t.compacting}</p>
   {/if}
 
   <!-- In the page while the turn runs, even before any check comes: its live region announces the first one too. -->
@@ -133,7 +136,7 @@
           {agent}
           stream={answers[agent] ?? null}
           active={active && (turn.phase === null || turn.phase === 'answer' || turn.phase === 'compaction')}
-          title={turn.mode === 'debate' ? 'Resposta inicial' : undefined} />
+          title={turn.mode === 'debate' ? t.initialAnswer : undefined} />
       {/each}
     </div>
   {/if}
@@ -159,18 +162,18 @@
   {:else if turn.status === 'failed'}
     <div class="banner bad" role="alert">
       <Icon name="alert" size={16} />
-      <span><strong>El torn ha fallat.</strong> {turn.error?.message ?? ''}</span>
+      <span><strong>{t.failed}</strong> {turn.error?.message ?? ''}</span>
     </div>
   {:else if turn.status === 'cancelled' && !keptDocument}
     <!-- The owner's stop or a server shutdown: neither the event nor the outcome says which. -->
-    <div class="banner"><Icon name="x" size={16} /><span>Aquest torn s'ha aturat.</span></div>
+    <div class="banner"><Icon name="x" size={16} /><span>{t.stopped}</span></div>
   {/if}
 
   {#if showTotals}
     <footer class="totals">
       {#if usage && usedTokens > 0}
-        <span title={tokensTitle}>
-          Total <b>{formatInt(usedTokens)}</b> tokens<span class="sr-only"> ({tokensTitle})</span>
+        <span class="used" title={tokensTitle}>
+          <RichText text={t.total(formatInt(usedTokens))} /><span class="sr-only"> ({tokensTitle})</span>
         </span>
         {#if cost && costText}
           <span class="cost" title={turnCostTitle(cost, app.eurPerUsd)}>
@@ -179,7 +182,7 @@
         {/if}
       {/if}
       {#if turn.cached && turn.streams.length > 1}
-        <span class="chip cache"><Icon name="cache" size={12} />Tot des de la memòria cau</span>
+        <span class="chip cache"><Icon name="cache" size={12} />{t.allCached}</span>
       {/if}
       {#if turn.savings && turn.savings.total > 0}
         <SavingsChip savings={turn.savings} eurPerUsd={app.eurPerUsd} />
@@ -288,7 +291,8 @@
     text-shadow: 0 1px 6px rgb(0 0 0 / 0.9);
   }
 
-  .totals b,
+  /* The number of tokens comes in bold from RichText. */
+  .used :global(b),
   .totals .cost {
     color: var(--text-primary);
   }

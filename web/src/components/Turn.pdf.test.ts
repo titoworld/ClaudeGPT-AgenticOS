@@ -613,3 +613,77 @@ describe("the badge on a debate's revisions and synthesis by ChatGPT", () => {
     expect(env!.textOf(synthesis.querySelector('.pdf-reading button'))).toBe('PDF contrastat per Claude');
   });
 });
+
+describe('in Spanish', () => {
+  // The language of a page load: the owner's choice, kept in this browser.
+  beforeEach(() => localStorage.setItem('aos.lang', 'es'));
+
+  it("the check of a PDF, live, and the details of a finished one", async () => {
+    const { e, root, receive } = await liveDuel([storedPdf(7, 'informe.pdf')]);
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+      { type: 'phase', phase: 'answer', round: 0 },
+      { type: 'stream.started', stream_id: 'c', agent: 'claude', kind: 'answer', round: 0, model: 'claude-opus' },
+      check({ state: 'checking', claude_pages: [], hidden_pages: [], usage: null }),
+    );
+    expect(root.querySelector('.pdf-checks')?.getAttribute('aria-label')).toBe('Contraste de los PDF para ChatGPT');
+    let [item] = checks(root);
+    expect(e.textOf(item!.querySelector('.head'))).toBe('Claude contrasta «informe.pdf» para ChatGPT…');
+    expect(e.textOf(root.querySelector('article.card.chatgpt'))).toContain('Pensando…');
+
+    receive(check({}));
+    [item] = checks(root);
+    expect(e.textOf(item!.querySelector('.head'))).toBe('ChatGPT lee «informe.pdf» contrastado por Claude');
+    expect(details(item!).map((d) => plain(d).replace(/ \(.*\)$/, ''))).toEqual([
+      'páginas 2 y 5 leídas por Claude',
+      'texto oculto en la pág. 5: no se ha pasado',
+      '11.700 tokens',
+      '≈ 0,0111 €',
+    ]);
+    expect(item!.querySelector('.detail.tokens')!.getAttribute('title')).toBe('9000 de entrada · 2000 leídos de la caché · 700 de salida');
+    expect(item!.querySelector('.detail.cost')!.getAttribute('title')).toBe(
+      'Valor equivalente a precios de API — incluido en la suscripción (0,0123 $)',
+    );
+  });
+
+  it('a check that could not be made says why, in the words of the server', async () => {
+    const { e, root, receive } = await liveDuel([storedPdf(7, 'informe.pdf')]);
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+      check({ state: 'unchecked', claude_pages: [], hidden_pages: [], unchecked_pages: [1, 2, 3], usage: null, reason: 'La comprobación de Claude ha tardado demasiado.' }),
+    );
+    expect(e.textOf(checks(root)[0]!.querySelector('.head'))).toBe(
+      'ChatGPT lee el texto de «informe.pdf» sin contrastar: la comprobación de Claude ha tardado demasiado.',
+    );
+  });
+
+  it("the badge on ChatGPT's message", async () => {
+    const { root, receive } = await liveDuel([storedPdf(7, 'informe.pdf')]);
+    receive(...liveTurnEvents);
+    const shown = badge(root, 'chatgpt')!;
+    expect(shown.label).toBe('PDF contrastado por Claude');
+    expect(shown.tip).toBe(
+      'ChatGPT no puede abrir los PDF: ha leído el texto extraído, contrastado por Claude. informe.pdf ' +
+        'Leídas por Claude págs. 2, 5 Texto oculto, no pasado pág. 5',
+    );
+  });
+});
+
+describe('in English', () => {
+  beforeEach(() => localStorage.setItem('aos.lang', 'en'));
+
+  it('a check made in an earlier turn is reused', async () => {
+    const { root, receive } = await liveDuel([storedPdf(7, 'informe.pdf'), storedPdf(8, 'annex.pdf', 3)]);
+    receive(
+      { type: 'turn.started', conversation_id: 3, turn_id: 12, mode: 'duel', new_conversation: false },
+      check({ attachment_id: 8, name: 'annex.pdf', state: 'checking', claude_pages: [], hidden_pages: [], usage: null }),
+      check({ reused: true, usage: null }),
+    );
+    const items = checks(root);
+    expect(items.map((i) => env!.textOf(i.querySelector('.head')))).toEqual([
+      'ChatGPT reads “informe.pdf”, checked by Claude',
+      'Claude is checking “annex.pdf” for ChatGPT…',
+    ]);
+    expect(details(items[0]!)).toEqual(['pages 2 and 5 read by Claude', 'hidden text on p. 5: not passed on', 'already checked']);
+  });
+});

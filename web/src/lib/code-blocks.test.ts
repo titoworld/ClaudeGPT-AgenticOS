@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { enhanceCodeBlocks } from './code-blocks';
+import { i18n } from './i18n/index.svelte';
 import { renderMarkdown } from './markdown';
 
 const copied: string[] = [];
@@ -113,5 +114,34 @@ describe('styles of the hidden-character marks (K15)', () => {
       expect(marks).toMatch(/direction: ltr/);
       expect(rule(`${scope} .invisible-char.invisible-collapsed`)).toMatch(/white-space: normal/);
     }
+  });
+});
+
+describe('enhanceCodeBlocks in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('labels the bar and its button in the language in force', async () => {
+    i18n.set('en');
+    const root = mount(`${TROJAN}\n\n\`\`\`\nplain\n\`\`\``);
+    const [first, second] = root.querySelectorAll('.code-bar');
+    expect(first!.querySelector('.code-lang')?.textContent).toBe('bash');
+    expect(second!.querySelector('.code-lang')?.textContent).toBe('code');
+    const warning = first!.querySelector('.code-warning');
+    expect(warning?.textContent).toBe('Invisible characters');
+    expect(warning?.getAttribute('title')).toBe(
+      'This code contains invisible or direction-control characters that can hide what it does. They show as ⟨U+…⟩ and are copied as such.',
+    );
+    const button = first!.querySelector<HTMLButtonElement>('.code-copy')!;
+    expect([button.textContent, button.getAttribute('aria-label')]).toEqual(['Copy', 'Copy the code']);
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe('Copied'));
+  });
+
+  it('in Spanish', () => {
+    i18n.set('es');
+    const root = mount(TROJAN);
+    expect(root.querySelector('.code-warning')?.textContent).toBe('Caracteres invisibles');
+    const button = root.querySelector<HTMLButtonElement>('.code-copy')!;
+    expect([button.textContent, button.getAttribute('aria-label')]).toEqual(['Copiar', 'Copiar el código']);
   });
 });

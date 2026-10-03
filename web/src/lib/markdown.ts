@@ -16,6 +16,7 @@
 import createDOMPurify, { type Config, type DOMPurify } from 'dompurify';
 import { Marked } from 'marked';
 import { revealHiddenIn } from './hidden-chars';
+import { i18n } from './i18n/index.svelte';
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ESCAPES[c] ?? c);
@@ -29,7 +30,8 @@ md.use({
       return escapeHtml(text);
     },
     image({ href, text }) {
-      const label = text ? `Imatge: ${text}` : 'Imatge';
+      const texts = i18n.m.turn.markdown;
+      const label = text ? texts.imageNamed(text) : texts.image;
       return `<a href="${escapeHtml(href)}" class="md-image-link">${escapeHtml(label)}</a>`;
     },
   },
@@ -68,7 +70,7 @@ function getPurifier(): DOMPurify {
   return p;
 }
 
-/** Render untrusted markdown to safe HTML. */
+/** Render untrusted markdown to safe HTML (its few texts in the language in force). */
 export function renderMarkdown(src: string): string {
   if (!src) return '';
   const html = md.parse(src, { async: false });

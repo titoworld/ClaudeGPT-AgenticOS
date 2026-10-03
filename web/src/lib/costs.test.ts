@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   approxEur,
   budgetLevel,
@@ -15,6 +15,7 @@ import {
   turnCostTitle,
   type TurnCost,
 } from './costs';
+import { i18n } from './i18n/index.svelte';
 import type { Agent, AgentSpend, FxRate, Message, PdfReading, TurnMode } from './protocol';
 import { sequence, usage } from './test-fixtures';
 import {
@@ -438,5 +439,82 @@ describe('spendLine (sidebar month line)', () => {
 
   it('shows nothing for the demo provider', () => {
     expect(spendLine('fake', spend({}), one, '2026-09')).toBeNull();
+  });
+});
+
+describe('in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  const spend = (partial: Partial<AgentSpend>): AgentSpend => ({
+    api_usd: 0,
+    equivalent_usd: 0,
+    unpriced_calls: 0,
+    budget_eur: null,
+    budget_used: null,
+    plan_eur: null,
+    plan_value: null,
+    ...partial,
+  });
+  const one: FxRate = { eur_per_usd: 1, as_of: null, source: 'manual' };
+
+  it('amounts, the exchange rate and the month', () => {
+    i18n.set('en');
+    expect([formatMoney(50), formatMoney(12.3), formatMoney(1234.5), formatMoney(0.0456)]).toEqual(['€50', '€12.30', '€1,234.50', '€0.0456']);
+    expect(fxText(fx)).toBe('$1 = €0.86 · ECB, 25 Sept');
+    expect(fxText({ eur_per_usd: 0.912345, as_of: null, source: 'manual' })).toBe('$1 = €0.9123 · manual');
+    expect(monthName('2026-09')).toBe('September 2026');
+    i18n.set('es');
+    expect([formatMoney(50), formatMoney(12.3)].map(plain)).toEqual(['50 €', '12,30 €']);
+    expect(plain(fxText(fx))).toBe('1 $ = 0,86 € · BCE, 25 sept');
+    expect(monthName('2026-09')).toBe('septiembre de 2026');
+  });
+
+  it('the tokens a call processed, and what each cost is', () => {
+    const counts = { input_tokens: 3, output_tokens: 100, cache_read_tokens: 10_000, cache_write_tokens: 20_000, reasoning_tokens: 50 };
+    i18n.set('en');
+    expect(tokenBreakdown(counts)).toBe('3 input · 10,000 read from the cache · 20,000 written to the cache · 100 output (50 reasoning)');
+    expect(streamCost(stream({ usage: priced(0.0143), costBasis: 'api' }), 0.86)?.title).toBe('Real API cost ($0.0143)');
+    expect(streamCost(stream({ usage: priced(0.0143), costBasis: 'equivalent' }), 0.86)?.title).toBe(
+      'Equivalent value at API prices — included in the subscription ($0.0143)',
+    );
+    expect(streamCost(stream({ usage: priced(0.5) }), 0.86)?.title).toBe('Estimated cost at API prices ($0.5)');
+    i18n.set('es');
+    expect(tokenBreakdown(counts)).toBe('3 de entrada · 10.000 leídos de la caché · 20.000 escritos en la caché · 100 de salida (50 de razonamiento)');
+    expect(streamCost(stream({ usage: priced(0.0143), costBasis: 'api' }), 0.86)?.title).toBe('Coste real de la API (0,0143 $)');
+  });
+
+  it("the split of a turn's cost", () => {
+    const cost: TurnCost = { totalUsd: 1, apiUsd: 0.5, equivalentUsd: 0.25, otherUsd: 0.25 };
+    i18n.set('en');
+    expect(turnCostTitle(cost, 1)).toBe(
+      'Turn cost at API prices · real API cost: €0.50 · value included in the subscription: €0.25 · other calls: €0.25',
+    );
+    expect(turnCostTitle({ totalUsd: 1, apiUsd: 0, equivalentUsd: 0, otherUsd: 1 }, 1)).toBe('Turn cost at API prices');
+    i18n.set('es');
+    expect(plain(turnCostTitle(cost, 1))).toBe(
+      'Coste del turno a precios de API · coste real de API: 0,50 € · valor incluido en la suscripción: 0,25 € · otras llamadas: 0,25 €',
+    );
+  });
+
+  it("the sidebar's month line", () => {
+    i18n.set('en');
+    const budget = spendLine('api', spend({ api_usd: 12.3, budget_eur: 50, budget_used: 0.246, unpriced_calls: 1 }), one, '2026-09');
+    expect([budget?.label, budget?.amount, budget?.percent]).toEqual(['Spent', '€12.30 of €50', '25%']);
+    expect(budget?.title).toBe(
+      'September 2026: API spend of €12.30 against a budget of €50 (25%). 1 call with a model of unknown price is not counted.',
+    );
+    const plan = spendLine('cli', spend({ equivalent_usd: 34.2, plan_eur: 100, plan_value: 0.342 }), one, '2026-09');
+    expect([plan?.label, plan?.amount, plan?.percent]).toEqual(['Value used', '€34.20 · plan €100', '34%']);
+    expect(plan?.title).toBe('September 2026: €34.20 of value used at API prices, 34% of the €100 the plan costs.');
+    i18n.set('es');
+    const noBudget = spendLine('api', spend({ api_usd: 2, unpriced_calls: 3 }), { ...one, eur_per_usd: 0.86 }, '2026-09');
+    expect([noBudget?.label, plain(noBudget?.title)]).toEqual([
+      'Gastado',
+      'Septiembre de 2026: gasto de API de 1,72 €, sin presupuesto mensual definido. 3 llamadas con modelos sin precio conocido no cuentan.',
+    ]);
+    const withPlan = spendLine('cli', spend({ equivalent_usd: 34.2, plan_eur: 100, plan_value: 0.342 }), one, '2026-09');
+    expect(plain(`${withPlan?.label} ${withPlan?.amount} (${withPlan?.percent})`)).toBe('Valor aprovechado 34,20 € · plan 100 € (34 %)');
+    const noPlan = spendLine('cli', spend({ equivalent_usd: 34.2 }), one, '2026-09');
+    expect(plain(noPlan?.title)).toBe('Septiembre de 2026: valor aprovechado de 34,20 € a precios de API, incluido en la suscripción.');
   });
 });

@@ -2,6 +2,7 @@
   import { app } from '../lib/app.svelte';
   import { streamCost } from '../lib/costs';
   import { formatInt, formatMs } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { StreamView } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
   import PdfReadingBadge from './PdfReadingBadge.svelte';
@@ -13,26 +14,25 @@
   let { stream }: Props = $props();
   const usage = $derived(stream.usage);
   const cost = $derived(streamCost(stream, app.eurPerUsd));
+  const t = $derived(i18n.m.turn);
 </script>
 
 <footer class="meta">
   {#if stream.model}
-    <span class="model" title="Model">{stream.model}</span>
+    <span class="model" title={t.meta.model}>{stream.model}</span>
   {/if}
   {#if usage}
-    <span
-      class="item"
-      title="{formatInt(usage.input_tokens)} tokens d'entrada · {formatInt(usage.output_tokens)} de sortida">
-      {formatInt(usage.input_tokens)} → {formatInt(usage.output_tokens)} tokens
+    <span class="item" title={t.meta.tokensTitle(formatInt(usage.input_tokens), formatInt(usage.output_tokens))}>
+      {t.meta.tokens(formatInt(usage.input_tokens), formatInt(usage.output_tokens))}
     </span>
     {#if usage.cache_read_tokens > 0}
-      <span class="item" title="Tokens d'entrada reaprofitats de la memòria cau del proveïdor">
-        {formatInt(usage.cache_read_tokens)} llegits de la memòria cau
+      <span class="item" title={t.meta.cacheReadTitle}>
+        {t.tokens.cacheRead(formatInt(usage.cache_read_tokens))}
       </span>
     {/if}
     {#if usage.cache_write_tokens > 0}
-      <span class="item" title="Tokens d'entrada que el proveïdor ha desat a la seva memòria cau per reaprofitar-los">
-        {formatInt(usage.cache_write_tokens)} escrits a la memòria cau
+      <span class="item" title={t.meta.cacheWriteTitle}>
+        {t.tokens.cacheWrite(formatInt(usage.cache_write_tokens))}
       </span>
     {/if}
   {/if}
@@ -42,13 +42,13 @@
     </span>
   {/if}
   {#if stream.latencyMs != null}
-    <span class="item" title="Temps total de resposta"><Icon name="clock" size={12} />{formatMs(stream.latencyMs)}</span>
+    <span class="item" title={t.meta.latency}><Icon name="clock" size={12} />{formatMs(stream.latencyMs)}</span>
   {/if}
   {#if stream.ttftMs != null}
-    <span class="item" title="Temps fins al primer token">TTFT {formatMs(stream.ttftMs)}</span>
+    <span class="item" title={t.meta.ttft}>TTFT {formatMs(stream.ttftMs)}</span>
   {/if}
   {#if stream.cached}
-    <span class="chip cache"><Icon name="cache" size={12} />des de la memòria cau</span>
+    <span class="chip cache"><Icon name="cache" size={12} />{t.meta.cached}</span>
   {/if}
   {#if stream.pdfReading.length}
     <PdfReadingBadge readings={stream.pdfReading} />

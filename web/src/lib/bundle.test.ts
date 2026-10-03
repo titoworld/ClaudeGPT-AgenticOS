@@ -77,9 +77,14 @@ describe('entry chunk (login screen)', () => {
   });
 
   it('keeps the clipboard and hidden-character helpers free of imports', () => {
+    // The hidden characters' marks and copy notice are texts of the language in force: the
+    // texts module is part of the entry chunk anyway.
+    const allowed: Record<string, string[]> = { '/src/lib/hidden-chars.ts': ['./i18n/index.svelte'] };
     for (const file of ['/src/lib/clipboard.ts', '/src/lib/hidden-chars.ts']) {
-      expect([...(SOURCES[file] ?? '').matchAll(STATIC_IMPORT)], file).toEqual([]);
+      const imports = [...(SOURCES[file] ?? '').matchAll(STATIC_IMPORT)].map((m) => m[1]);
+      expect(imports, file).toEqual(allowed[file] ?? []);
     }
+    expect(entryGraph().modules).toContain('/src/lib/i18n/index.svelte.ts');
   });
 
   it('copies model text only through answerForClipboard (hidden characters revealed)', () => {

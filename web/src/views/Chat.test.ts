@@ -3,8 +3,10 @@
 // scroll padding of the scroller when they bring the focus into view.
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { app } from '../lib/app.svelte';
+import { i18n } from '../lib/i18n/index.svelte';
 import { stopBars } from '../lib/stop-bars.svelte';
-import { cleanup, render } from '../lib/test-render';
+import { cleanup, render, textOf } from '../lib/test-render';
 import Chat from './Chat.svelte';
 
 beforeEach(() => {
@@ -44,5 +46,30 @@ describe('the room of the stop bar', () => {
     stopBars.remove('other');
     flushSync();
     expect(scroller(root).style.scrollPaddingBottom).toBe('calc(57px + 0.6rem + var(--pill-room, 0rem) + 0.75rem)');
+  });
+});
+
+describe('a conversation in English and Spanish', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    app.convs.currentId = null;
+    app.convs.loading = false;
+    app.convs.loadError = null;
+  });
+
+  it('says that it loads, that it could not, and that it has no messages yet', () => {
+    i18n.set('en');
+    app.convs.currentId = 5;
+    app.convs.loading = true;
+    const root = render(Chat, {});
+    expect(textOf(root.querySelector('.loading'))).toBe('Loading the conversation…');
+    app.convs.loading = false;
+    app.convs.loadError = 'The conversation could not be loaded.';
+    flushSync();
+    expect(textOf(root.querySelector('.load-error'))).toBe('The conversation could not be loaded. Try again');
+    app.convs.loadError = null;
+    i18n.set('es');
+    flushSync();
+    expect(textOf(root.querySelector('.empty-conv'))).toBe('Esta conversación todavía no tiene mensajes.');
   });
 });

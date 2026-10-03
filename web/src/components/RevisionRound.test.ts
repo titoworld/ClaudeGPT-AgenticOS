@@ -1,5 +1,6 @@
 // A revision round after a reload: notes of unchanged answers and cut-off revisions.
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { Message, MessageMeta } from '../lib/protocol';
 import { debateMessages, keptRevisionEvents, keptRevisionMessages } from '../lib/test-fixtures';
 import { cleanup, render, textOf } from '../lib/test-render';
@@ -161,5 +162,51 @@ describe('RevisionRound: revisions that keep the previous answer', () => {
     const two = renderRound(turn, 2);
     expect(two.chatgpt).toContain("La resposta que es manté és incompleta: s'ha arribat al límit de sortida.");
     expect(two.claude).not.toContain('és incompleta');
+  });
+});
+
+describe('RevisionRound in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  /** Round 1 of `turn`, rendered as Turn.svelte does. */
+  function round(turn: TurnView): HTMLElement {
+    const group = revisionRounds(turn).find((g) => g.round === 1)!;
+    return render(RevisionRound, { round: 1, streams: group.streams, threshold: 85, active: false, kept: keptAnswers(turn) });
+  }
+
+  it('in English: the round, its scores, each review and the note of an unchanged answer', () => {
+    i18n.set('en');
+    const target = round(turnsFromMessages(withMeta(debateMessages(), { 44: { unchanged_note: 'already covered' } }))[0]!);
+    expect(textOf(target.querySelector('summary .title'))).toBe('Review 1');
+    expect(textOf(target.querySelector('.score.chatgpt .sr-only'))).toBe('(no changes)');
+    const chatgpt = target.querySelector(`section[aria-label="ChatGPT's review"]`)!;
+    expect(textOf(chatgpt.querySelector('.chip'))).toBe('No changes');
+    expect(textOf(chatgpt.querySelector('.unchanged-note'))).toBe('Note from the model: “already covered”');
+    const claude = target.querySelector(`section[aria-label="Claude's review"]`)!;
+    expect(textOf(claude.querySelector('.critique h4'))).toBe('Critique');
+    expect(textOf(claude.querySelector('details.revised summary'))).toBe('Revised answer');
+    const meter = claude.querySelector('[role="meter"]')!;
+    expect([meter.getAttribute('aria-label'), meter.getAttribute('aria-valuetext')]).toEqual([
+      "Claude's agreement",
+      '70 of 100 (threshold 85)',
+    ]);
+    expect(textOf(meter.querySelector('.label'))).toBe('Agreement');
+    expect(meter.querySelector('.mark')?.getAttribute('title')).toBe('Consensus threshold: 85');
+  });
+
+  it('in Spanish: a reply that brought no new answer keeps the previous one', () => {
+    i18n.set('es');
+    const messages = keptRevisionMessages().map((m) => {
+      if (m.id !== 83) return m;
+      const { truncated: _t, finish_reason: _f, ...meta } = m.meta;
+      return { ...m, meta: { ...meta, agreement: 70 } };
+    });
+    const target = round(turnsFromMessages(messages)[0]!);
+    expect(textOf(target.querySelector('summary .title'))).toBe('Revisión 1');
+    const claude = target.querySelector('section[aria-label="Revisión de Claude"]')!;
+    expect(textOf(claude.querySelector('.kept-note'))).toBe('Se mantiene la respuesta anterior.');
+    expect(textOf(claude.querySelector('[role="meter"] .label'))).toBe('Acuerdo');
+    const chatgpt = target.querySelector('section[aria-label="Revisión de ChatGPT"]')!;
+    expect(textOf(chatgpt.querySelector('.chip'))).toBe('Sin cambios');
   });
 });

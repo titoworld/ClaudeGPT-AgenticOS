@@ -3,8 +3,10 @@
 // check of its text for ChatGPT in the turn, and the badge on ChatGPT's messages that
 // says how it read it. ChatGPT with the subscription (Codex) cannot open a PDF: it reads
 // the text the server extracted, and Claude reads for it the pages where that text would
-// mislead it. Page lists are compact («pàg. 2–4, 9») so a long PDF still fits a card.
+// mislead it. Page lists are compact («pp. 2–4, 9») so a long PDF still fits a card. Every
+// text is in the language in force (lib/i18n/areas/pdf.ts).
 
+import { i18n } from './i18n/index.svelte';
 import type { PdfNotes, PdfReading } from './protocol';
 import type { PdfCheckStatus } from './turns.svelte';
 
@@ -24,7 +26,7 @@ function pageParts(pages: readonly number[]): { parts: string[]; count: number }
   return { parts, count: sorted.length };
 }
 
-/** A no-break space: «pàg.» never ends a line apart from its first number. */
+/** A no-break space: «pp.» never ends a line apart from its first number. */
 const NBSP = '\u00a0';
 
 /**
@@ -39,25 +41,36 @@ export const pageList = (pages: readonly number[]): string => pageParts(pages).p
  */
 export const pageRanges = (pages: readonly number[]): string[] => pageParts(pages).parts;
 
-/** The compact list with its abbreviation, for one page or several: «pàg. 2–4, 9». */
-export const pageRefs = (pages: readonly number[]): string => `pàg.${NBSP}${pageList(pages)}`;
+/** The compact list with its abbreviation, for one page or several: «p. 2», «pp. 2–4, 9». */
+export function pageRefs(pages: readonly number[]): string {
+  const { parts, count } = pageParts(pages);
+  return `${i18n.m.pdf.pages(count)}${NBSP}${parts.join(', ')}`;
+}
 
-/** The list in a sentence, the last part after «i»: "2–4 i 9"; and how many pages it names. */
+/** The conjunction lists of each language («2–4, 9 and 12»), made when first needed. */
+const conjunctions = new Map<string, Intl.ListFormat>();
+
+/** The list in a sentence, its last part after «and»: "2–4 and 9"; and how many pages it names. */
 function pagesInProse(pages: readonly number[]): { text: string; count: number } {
   const { parts, count } = pageParts(pages);
-  const text = parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} i ${parts.at(-1)}`;
-  return { text, count };
+  const tag = i18n.tag;
+  let list = conjunctions.get(tag);
+  if (!list) {
+    list = new Intl.ListFormat(tag, { style: 'long', type: 'conjunction' });
+    conjunctions.set(tag, list);
+  }
+  return { text: list.format(parts), count };
 }
 
 /** Names that keep their capital letter anywhere in a sentence. */
 const NAMES: ReadonlySet<string> = new Set(['Claude', 'ChatGPT', 'Codex']);
 
 /**
- * A sentence of its own, such as the server's reasons («La comprovació de Claude ha trigat
- * massa.»), as it goes after a colon, where Catalan starts with a lowercase letter: «…sense
- * contrastar: la comprovació de Claude ha trigat massa.». A name or an acronym keeps its
- * capital («Claude no l'ha volgut contrastar.», «PDF…»); a reason on a line of its own keeps
- * it too, so this is only for the text after a colon.
+ * A sentence of its own, such as the server's reasons («The server could not analyse its
+ * pages.»), as it goes after a colon, where English, Spanish and Catalan go on with a
+ * lowercase letter: «…unchecked: the server could not analyse its pages.». A name or an
+ * acronym keeps its capital («Claude's check took too long.», «PDF…»); a reason on a line of
+ * its own keeps it too, so this is only for the text after a colon.
  */
 export function afterColon(sentence: string): string {
   const word = /^\p{L}+/u.exec(sentence)?.[0];
@@ -71,46 +84,31 @@ export function afterColon(sentence: string): string {
 
 export type PdfNoteKind = keyof PdfNotes;
 
-/** A warning line on a PDF's card: «Sense text: pàg. 2–4, 9». */
+/** A warning line on a PDF's card: «No text: pp. 2–4, 9». */
 export interface PdfNoteLine {
   kind: PdfNoteKind;
-  /** «Sense text». */
+  /** «No text». */
   label: string;
+  /** The abbreviation before its pages, for how many they are: «p.», «pp.». */
+  abbreviation: string;
   /** The pages, as the parts of a compact list (:func:`pageRanges`): ["2–4", "9"]. */
   pages: string[];
   /** What it means, for its title and for screen readers. */
   description: string;
 }
 
-const NOTES: readonly { kind: PdfNoteKind; label: string; description: string }[] = [
-  {
-    kind: 'no_text',
-    label: 'Sense text',
-    description:
-      'Pàgines sense text extraïble: escanejades, o amb el text dibuixat com a imatge. Els models que obren el PDF les llegeixen com a imatge.',
-  },
-  {
-    kind: 'garbled',
-    label: 'Text il·legible',
-    description:
-      "El text extret d'aquestes pàgines té caràcters trencats (una font sense mapa de caràcters): no es pot llegir tal com és.",
-  },
-  {
-    kind: 'hidden',
-    label: 'Possible text ocult',
-    description:
-      'Aquestes pàgines poden tenir text que no es veu: invisible, massa petit o fora de la pàgina. Es diu als models que el tractin com a sospitós.',
-  },
-];
+const NOTE_KINDS: readonly PdfNoteKind[] = ['no_text', 'garbled', 'hidden'];
 
 /** The warning lines of a PDF's card, one per kind of warning it has (none without `notes`). */
 export function pdfNoteLines(notes: PdfNotes | null): PdfNoteLine[] {
   if (!notes) return [];
-  return NOTES.filter(({ kind }) => pageParts(notes[kind] ?? []).count > 0).map(({ kind, label, description }) => ({
+  const texts = i18n.m.pdf;
+  return NOTE_KINDS.filter((kind) => pageParts(notes[kind] ?? []).count > 0).map((kind) => ({
     kind,
-    label,
+    label: texts.notes[kind].label,
+    abbreviation: texts.pages(pageParts(notes[kind]).count),
     pages: pageRanges(notes[kind]),
-    description,
+    description: texts.notes[kind].description,
   }));
 }
 
@@ -126,28 +124,26 @@ export interface CheckFacts {
 }
 
 /**
- * What a finished check with pages checked adds to its headline («ChatGPT llegeix
- * «informe.pdf» contrastat per Claude»): the pages ChatGPT reads through Claude, the
- * hidden text it does not get, the pages left unchecked and why, or that Claude found
- * nothing to correct. Nothing while it runs, nor for a PDF nobody checked through it: its
- * headline says why.
+ * What a finished check with pages checked adds to its headline («ChatGPT reads
+ * “report.pdf”, checked by Claude»): the pages ChatGPT reads through Claude, the hidden
+ * text it does not get, the pages left unchecked and why, or that Claude found nothing to
+ * correct. Nothing while it runs, nor for a PDF nobody checked through it: its headline
+ * says why.
  */
 export function checkDetails(check: CheckFacts): string[] {
   if (check.state !== 'checked') return [];
+  const texts = i18n.m.pdf.details;
   const details: string[] = [];
   const read = pagesInProse(check.claudePages);
-  if (read.count === 1) details.push(`pàgina ${read.text} llegida per Claude`);
-  else if (read.count > 1) details.push(`pàgines ${read.text} llegides per Claude`);
+  if (read.count) details.push(texts.read(read.count, read.text));
   const hidden = pagesInProse(check.hiddenPages);
-  if (hidden.count) {
-    details.push(`text ocult a ${hidden.count === 1 ? 'la' : 'les'} pàg.${NBSP}${hidden.text}: no s'ha passat`);
-  }
+  if (hidden.count) details.push(texts.hidden(hidden.count, hidden.text));
   const unchecked = pagesInProse(check.uncheckedPages);
   if (unchecked.count) {
-    const pages = unchecked.count === 1 ? `pàgina ${unchecked.text}` : `pàgines ${unchecked.text}`;
-    details.push(check.reason ? `${pages} sense contrastar: ${afterColon(check.reason)}` : `${pages} sense contrastar`);
+    const pages = texts.unchecked(unchecked.count, unchecked.text);
+    details.push(check.reason ? `${pages}: ${afterColon(check.reason)}` : pages);
   }
-  if (!details.length) details.push('Claude no hi ha trobat cap diferència');
+  if (!details.length) details.push(texts.noDifference);
   return details;
 }
 
@@ -170,7 +166,7 @@ export interface ReadingDetail {
 /** A badge of a ChatGPT message: its PDFs that Claude checked, or those nobody did. */
 export interface ReadingGroup {
   checked: boolean;
-  /** «PDF contrastat per Claude», «PDF sense contrastar» (with the number, for several). */
+  /** «PDF checked by Claude», «Unchecked PDF» (with the number, for several). */
   label: string;
   /** The first line of its tooltip. */
   lead: string;
@@ -178,14 +174,15 @@ export interface ReadingGroup {
 }
 
 function readingDetail(reading: PdfReading): ReadingDetail {
+  const texts = i18n.m.pdf;
   const rows: ReadingRow[] = [];
   const add = (label: string, pages: readonly number[]) => {
     if (pageParts(pages).count) rows.push({ label, pages: pageRefs(pages) });
   };
-  add('Llegides per Claude', reading.claude_pages);
-  add('Text ocult, no passat', reading.hidden_pages);
-  add('Sense contrastar', reading.unchecked_pages);
-  const note = reading.reason ?? (reading.checked && !rows.length ? 'Claude no hi ha trobat cap diferència.' : null);
+  add(texts.reading.rows.claude, reading.claude_pages);
+  add(texts.reading.rows.hidden, reading.hidden_pages);
+  add(texts.reading.rows.unchecked, reading.unchecked_pages);
+  const note = reading.reason ?? (reading.checked && !rows.length ? `${texts.details.noDifference}.` : null);
   return { attachmentId: reading.attachment_id, name: reading.name, rows, note };
 }
 
@@ -196,17 +193,15 @@ function readingDetail(reading: PdfReading): ReadingDetail {
  * the hidden ones and the unchecked ones.
  */
 export function readingGroups(readings: readonly PdfReading[]): ReadingGroup[] {
+  const texts = i18n.m.pdf.reading;
   const groups: ReadingGroup[] = [];
   for (const checked of [true, false]) {
     const pdfs = readings.filter((r) => r.checked === checked);
     if (!pdfs.length) continue;
-    const several = pdfs.length > 1 ? `${pdfs.length} ` : '';
     groups.push({
       checked,
-      label: checked
-        ? `${several}PDF ${several ? 'contrastats' : 'contrastat'} per Claude`
-        : `${several}PDF sense contrastar`,
-      lead: `ChatGPT no pot obrir els PDF: n'ha llegit el text extret, ${checked ? 'contrastat per Claude' : 'sense contrastar'}.`,
+      label: checked ? texts.checked(pdfs.length) : texts.unchecked(pdfs.length),
+      lead: checked ? texts.leadChecked : texts.leadUnchecked,
       pdfs: pdfs.map(readingDetail),
     });
   }
