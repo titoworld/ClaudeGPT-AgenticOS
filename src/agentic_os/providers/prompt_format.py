@@ -45,6 +45,8 @@ TEXT_ONLY_NOTE = "només el text extret"
 """Label note of a PDF that a call gets as its extracted text instead of the document."""
 PDF_WITHOUT_TEXT = "[No se n'ha pogut extreure el text d'aquest PDF.]"
 """Body of a PDF sent as text when the server could not extract any."""
+CONVERSATION_CONTINUED: Final = "(continuation of the conversation)"
+"""The user message an api call starts with when its history starts with an answer."""
 
 ChatRole = Literal["user", "assistant"]
 
@@ -391,5 +393,5 @@ def to_chat_messages(request: GenerationRequest, agent: AgentName) -> list[tuple
         else:
             merged.append((role, content))
     if merged[0][0] == "assistant":
-        merged.insert(0, ("user", "(continuació de la conversa)"))
+        merged.insert(0, ("user", CONVERSATION_CONTINUED))
     return merged

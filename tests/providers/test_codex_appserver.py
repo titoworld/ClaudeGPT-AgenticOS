@@ -21,6 +21,7 @@ from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, rese
 from portability import exited, without_platform_variables
 
 import agentic_os.providers.codex_appserver as codex_appserver
+from agentic_os import i18n
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
 from agentic_os.orchestrator.tokens import estimate_tokens
@@ -465,7 +466,7 @@ async def test_a_sub_agent_loop_stops_the_call(
     with pytest.raises(ProviderError) as caught:
         await collect(provider, make_request(marker))
 
-    assert caught.value.message == SUB_AGENT_LIMIT_MESSAGE
+    assert caught.value.message == str(SUB_AGENT_LIMIT_MESSAGE)
     assert caught.value.kind == "invalid"
     assert not caught.value.retryable
     # The root turn is interrupted and the process replaced once idle: the loop stops
@@ -1005,7 +1006,7 @@ async def test_status_reports_the_plan_and_default_model(fake: FakeCodex) -> Non
     assert status.agent == "chatgpt"
     assert status.mode == "cli"
     assert status.available
-    assert status.detail == "Subscripció ChatGPT activa (Plus)"
+    assert str(status.detail) == "Subscripció ChatGPT activa (Plus)"
     assert status.model == "gpt-6-sol"
     assert again == status
     assert len(fake.received("account/read")) == 1
@@ -1030,7 +1031,7 @@ async def test_status_never_names_a_guessed_model(
     finally:
         await codex.aclose()
     assert status.available
-    assert status.detail == "Subscripció ChatGPT activa (Plus)"
+    assert str(status.detail) == "Subscripció ChatGPT activa (Plus)"
     assert status.model == ""
 
 
@@ -1048,7 +1049,7 @@ async def test_list_models_reads_the_visible_catalog(
         ("gpt-6-sol", "GPT-6-Sol", False),
         ("gpt-7-nova", "GPT-7-Nova", False),
     ]  # the hidden entry is left out
-    assert models[0].description == "El més capaç, per a la feina més exigent."
+    assert str(models[0].description) == "El més capaç, per a la feina més exigent."
     assert models[2].description == "GPT-7-Nova (vendor description)."
     assert all(p.get("includeHidden") is False for p in fake.params("model/list")[-4:])
     requests = len(fake.params("model/list"))
@@ -1104,7 +1105,7 @@ async def test_status_without_login_recycles_the_process(
     fake.options(account=None)
     status = await provider.status()
     assert not status.available
-    assert status.detail == "Sense sessió: executa «codex login --device-auth» al servidor"
+    assert str(status.detail) == "Sense sessió: executa «codex login --device-auth» al servidor"
     await wait_until(lambda: provider._conn is None)
 
     # The owner runs `codex login`: a fresh process sees the new credentials.
@@ -1112,7 +1113,7 @@ async def test_status_without_login_recycles_the_process(
     provider._status_cache = None
     status = await provider.status()
     assert status.available
-    assert status.detail == "Subscripció ChatGPT activa (Pro)"
+    assert str(status.detail) == "Subscripció ChatGPT activa (Pro)"
     assert len(set(fake.pids())) == 2
 
 
@@ -1125,8 +1126,28 @@ async def test_status_is_cached_before_the_slow_usage_read(
         await asyncio.wait_for(provider.status(), 0.5)
     status = await asyncio.wait_for(provider.status(), 0.5)
     assert status.available
-    assert status.detail == "Subscripció ChatGPT activa (Plus)"
+    assert str(status.detail) == "Subscripció ChatGPT activa (Plus)"
     assert len(fake.received("account/read")) == 1
+
+
+async def test_a_status_kept_from_an_error_speaks_the_language_of_whoever_reads_it(
+    provider: CodexAppServerProvider,
+) -> None:
+    """The status keeps the error's lazy text (``ProviderError.text``), not the message
+    made in the language of the client that asked first."""
+    provider._failures = 2  # two crashes in a row: wait 0.5 s before the next spawn
+    provider._last_failure = time.monotonic()
+    with i18n.use("es"):
+        status = await provider.status()
+    assert not status.available
+    details: dict[i18n.Lang, str] = {
+        "en": "Codex stopped; it will restart in 1 s.",
+        "es": "Codex se ha detenido; se reiniciará dentro de 1 s.",
+        "ca": "Codex s'ha aturat; es reiniciarà d'aquí a 1 s.",
+    }
+    for lang, detail in details.items():
+        with i18n.use(lang):
+            assert str(status.detail) == detail
 
 
 async def test_respawn_backoff(fake: FakeCodex, provider: CodexAppServerProvider) -> None:
@@ -1135,7 +1156,7 @@ async def test_respawn_backoff(fake: FakeCodex, provider: CodexAppServerProvider
 
     status = await provider.status()
     assert not status.available
-    assert status.detail == "Codex s'ha aturat; es reiniciarà d'aquí a 1 s."
+    assert str(status.detail) == "Codex s'ha aturat; es reiniciarà d'aquí a 1 s."
     assert not fake.pids()
 
     started = time.monotonic()
@@ -1174,7 +1195,7 @@ async def test_the_backoff_never_overflows(
     provider._last_failure = time.monotonic()
     status = await provider.status()
     assert not status.available
-    assert status.detail == "Codex s'ha aturat; es reiniciarà d'aquí a 30 s."
+    assert str(status.detail) == "Codex s'ha aturat; es reiniciarà d'aquí a 30 s."
     assert not fake.pids()
 
 
@@ -1187,7 +1208,7 @@ async def test_status_with_an_api_key_account(fake: FakeCodex) -> None:
         await codex.aclose()
     assert status.available
     assert status.model == "gpt-6-sol"
-    assert status.detail == "Codex amb clau d'API (es factura per ús)"
+    assert str(status.detail) == "Codex amb clau d'API (es factura per ús)"
 
 
 async def test_missing_cli(fake: FakeCodex, tmp_path: Path) -> None:
@@ -1196,11 +1217,34 @@ async def test_missing_cli(fake: FakeCodex, tmp_path: Path) -> None:
     try:
         status = await codex.status()
         assert not status.available
-        assert status.detail == f"CLI de Codex no trobada: {missing}"
+        assert str(status.detail) == f"CLI de Codex no trobada: {missing}"
         with pytest.raises(ProviderError) as caught:
             await collect(codex, make_request())
         assert caught.value.kind == "unavailable"
         await codex.prewarm(make_request())  # never raises
+    finally:
+        await codex.aclose()
+
+
+async def test_a_shared_start_fails_in_the_language_of_each_caller(
+    fake: FakeCodex, tmp_path: Path
+) -> None:
+    """The callers waiting for the same start of the app-server each get its error in
+    their own language, and the status keeps it as a lazy text."""
+    missing = str(tmp_path / "no-such-codex")
+    codex = CodexAppServerProvider(fake.settings(codex_cli_path=missing))
+    try:
+        with i18n.use("es"):
+            status = asyncio.create_task(codex.status())  # begins the start
+        with i18n.use("en"):
+            turn = asyncio.create_task(collect(codex, make_request()))  # waits for it
+        with pytest.raises(ProviderError) as caught:
+            await turn
+        assert caught.value.message == f"Codex CLI not found: {missing}"
+        detail = (await status).detail
+        assert str(detail) == f"CLI de Codex no trobada: {missing}"
+        with i18n.use("es"):
+            assert str(detail) == f"No se encuentra la CLI de Codex: {missing}"
     finally:
         await codex.aclose()
 

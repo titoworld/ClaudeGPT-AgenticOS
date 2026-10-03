@@ -164,7 +164,7 @@ async def test_fake_failures_status_and_prewarm() -> None:
         await run_fake(provider, GenerationRequest(system="s", prompt="p", purpose="synthesis"))
     assert error.value.kind == "unavailable" and not error.value.retryable
     status = await provider.status()
-    assert (status.mode, status.available, status.detail) == ("fake", True, "Mode demostració")
+    assert (status.mode, status.available, str(status.detail)) == ("fake", True, "Mode demostració")
     request = GenerationRequest(system="s", prompt="")
     await provider.prewarm(request)
     assert provider.prewarmed == [request]

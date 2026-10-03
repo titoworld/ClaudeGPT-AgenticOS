@@ -15,6 +15,7 @@ import openai
 import pytest
 from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 
+from agentic_os import i18n
 from agentic_os.config import Settings
 from agentic_os.domain import Usage
 from agentic_os.providers.base import (
@@ -346,9 +347,35 @@ async def test_an_output_limit_spent_on_reasoning_fails_with_its_billed_usage(
     provider = make_provider(tmp_path, lambda _: streaming(sse(event)))
     error = await failure(provider, make_request(max_output_tokens=16_000))
     assert error.kind == "invalid" and not error.retryable
-    assert "límit de sortida" in error.message and "16000" in error.message
+    assert "límit de sortida" in error.message and "16.000" in error.message
     assert error.usage == Usage(input_tokens=10, output_tokens=16_000, reasoning_tokens=16_000)
     assert error.model == "gpt-6-astra-2026-09-03"
+
+
+@pytest.mark.parametrize(
+    ("lang", "message"),
+    [
+        (
+            "en",
+            "ChatGPT used up its output limit of 16,000 tokens (reasoning included) "
+            "before writing any answer.",
+        ),
+        (
+            "es",
+            "ChatGPT ha agotado el límite de salida de 16.000 tokens (razonamiento incluido) "
+            "antes de escribir ninguna respuesta.",
+        ),
+    ],
+)
+async def test_an_error_is_told_in_the_language_of_the_turn(
+    tmp_path: Path, lang: i18n.Lang, message: str
+) -> None:
+    """Its numbers too are written as the web writes them in that language."""
+    event = incomplete("max_output_tokens", output_tokens=16_000, reasoning=16_000)
+    provider = make_provider(tmp_path, lambda _: streaming(sse(event)))
+    with i18n.use(lang):
+        error = await failure(provider, make_request(max_output_tokens=16_000))
+    assert error.message == message
 
 
 async def test_content_filter_before_any_text_fails(tmp_path: Path) -> None:
@@ -626,7 +653,7 @@ async def test_missing_key(tmp_path: Path) -> None:
     provider = OpenAIApiProvider(make_settings(tmp_path, openai_api_key=None))
     status = await provider.status()
     assert not status.available
-    assert status.detail == "Falta la clau d'API d'OpenAI (AOS_OPENAI_API_KEY)"
+    assert str(status.detail) == "Falta la clau d'API d'OpenAI (AOS_OPENAI_API_KEY)"
     error = await failure(provider, make_request())
     assert error.kind == "auth"
 
@@ -638,7 +665,7 @@ async def test_status_needs_no_network(tmp_path: Path) -> None:
     status = await make_provider(tmp_path, handler, chatgpt_model="gpt-6-sol").status()
     assert (status.agent, status.mode, status.available) == ("chatgpt", "api", True)
     assert status.model == "gpt-6-sol"
-    assert status.detail == "Clau d'API configurada"
+    assert str(status.detail) == "Clau d'API configurada"
     assert not status.limits
 
 
@@ -752,6 +779,38 @@ async def test_list_models_falls_back_without_raising(tmp_path: Path) -> None:
         assert all(m.description for m in models)
     no_key = OpenAIApiProvider(make_settings(tmp_path, openai_api_key=None))
     assert len(await no_key.list_models()) == 3 and not no_key.models_live
+
+
+async def test_the_cached_models_are_described_in_the_language_of_whoever_reads_them(
+    tmp_path: Path,
+) -> None:
+    """The listing is kept for every client (docs/adr/0011-internationalization.md): the
+    client that asks first does not choose the language of the others."""
+    provider = OpenAIApiProvider(make_settings(tmp_path, openai_api_key=None))
+    with i18n.use("es"):
+        models = await provider.list_models()  # the fallback list, cached
+    assert await provider.list_models() is models
+    described = {}
+    for lang in i18n.LANGS:
+        with i18n.use(lang):
+            described[lang] = [model.to_wire()["description"] for model in models]
+    assert described == {
+        "en": [
+            "The most capable, for the most demanding work.",
+            "Balanced, for everyday work.",
+            "Fast and cheap, for simple tasks.",
+        ],
+        "es": [
+            "El más capaz, para el trabajo más exigente.",
+            "Equilibrado, para el trabajo de cada día.",
+            "Rápido y económico, para tareas sencillas.",
+        ],
+        "ca": [
+            "El més capaç, per a la feina més exigent.",
+            "Equilibrat, per a la feina de cada dia.",
+            "Ràpid i econòmic, per a tasques senzilles.",
+        ],
+    }
 
 
 # -- attachments (docs/adr/0009-attachments.md) --------------------------------------------------

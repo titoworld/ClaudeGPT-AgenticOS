@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
-from agentic_os.i18n import Lazy
+from agentic_os.i18n import Lazy, number, t
 from agentic_os.pdf_facts import PdfCheck, PdfNotes, PdfPage, pdf_notes
 
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
@@ -107,12 +107,10 @@ class Attachment:
             data = self.path.read_bytes()
         except OSError:
             raise ProviderError(
-                f"No s'ha pogut llegir l'adjunt «{self.name}».", kind="internal"
+                t("providers.attachment_unreadable", name=self.name), kind="internal"
             ) from None
         if hashlib.sha256(data).hexdigest() != self.sha256:
-            raise ProviderError(
-                f"L'adjunt «{self.name}» ha canviat des que es va pujar.", kind="internal"
-            )
+            raise ProviderError(t("providers.attachment_changed", name=self.name), kind="internal")
         return data
 
 
@@ -199,11 +197,16 @@ class ProviderError(Exception):
     """A call that failed. ``usage`` and ``model`` say what its last attempt billed when
     the vendor reported it (a refusal, an output budget spent before any text...), so the
     engine records its cost; None when nothing is known to be billed. ``declined`` are the
-    billed attempts other models declined before it (see :class:`DeclinedAttempt`)."""
+    billed attempts other models declined before it (see :class:`DeclinedAttempt`).
+
+    ``message`` is made in the language in force when the error is raised (a turn's, the
+    language of the connection that started it). ``text`` is the message as it was given:
+    an error that an agent's status may show, kept for every client, gives it as a
+    :func:`~agentic_os.i18n.lazy` text, which ``str()`` makes in the reader's language."""
 
     def __init__(
         self,
-        message: str,
+        message: str | Lazy,
         *,
         kind: ProviderErrorKind,
         retryable: bool = False,
@@ -211,13 +214,23 @@ class ProviderError(Exception):
         model: str | None = None,
         declined: Sequence[DeclinedAttempt] = (),
     ) -> None:
-        super().__init__(message)
-        self.message = message
+        made = str(message)
+        super().__init__(made)
+        self.message = made
+        self.text: str | Lazy = message
         self.kind: ProviderErrorKind = kind
         self.retryable = retryable
         self.usage = usage
         self.model = model
         self.declined: tuple[DeclinedAttempt, ...] = tuple(declined)
+
+
+def seconds(value: float) -> str:
+    """A number of seconds as the texts write it: as ``{:g}`` would (``600``, ``0.5``, at
+    most three decimals), with the separators of the language in force
+    (:func:`~agentic_os.i18n.number`)."""
+    shown = f"{value:.3f}".rstrip("0").rstrip(".")
+    return number(value, len(shown.partition(".")[2]))
 
 
 def clean_refusal(text: str) -> str:
@@ -295,7 +308,8 @@ class ModelInfo:
 
     id: str
     """Value passed to the provider (API id, CLI alias such as "opus", Codex slug...)."""
-    label: str
+    label: str | Lazy
+    """The name shown: the vendor's, or a :func:`agentic_os.i18n.lazy` text (the demo's)."""
     description: str | Lazy = ""
     """What the model is for: a :func:`agentic_os.i18n.lazy` text, since listings are
     cached for every client."""
@@ -305,7 +319,7 @@ class ModelInfo:
     def to_wire(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "label": self.label,
+            "label": str(self.label),
             "description": str(self.description),
             "is_default": self.is_default,
             "context_window": self.context_window,

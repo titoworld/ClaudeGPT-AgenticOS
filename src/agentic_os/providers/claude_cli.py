@@ -59,6 +59,7 @@ from typing import Any, Literal, NamedTuple
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.i18n import Lazy, lazy, t
 from agentic_os.providers.base import (
     Attachment,
     DeclinedAttempt,
@@ -71,6 +72,7 @@ from agentic_os.providers.base import (
     RefusalError,
     TextDelta,
     UsageLimit,
+    seconds,
 )
 from agentic_os.providers.prompt_format import attachment_text, read_files, render_transcript
 
@@ -79,14 +81,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "opus"
 DEFAULT_FAST_MODEL = "haiku"
 
-CLAUDE_FAMILIES: tuple[tuple[str, str, str], ...] = (
-    ("opus", "Claude Opus", "Raonament profund i tasques llargues."),
-    ("sonnet", "Claude Sonnet", "Equilibri entre qualitat i velocitat."),
-    ("haiku", "Claude Haiku", "El més ràpid i econòmic; bo per als resums."),
-    ("fable", "Claude Fable", "El més capaç; pot no estar inclòs en tots els plans."),
+CLAUDE_FAMILIES: tuple[tuple[str, str, Lazy], ...] = (
+    ("opus", "Claude Opus", lazy("providers.claude.family.opus")),
+    ("sonnet", "Claude Sonnet", lazy("providers.claude.family.sonnet")),
+    ("haiku", "Claude Haiku", lazy("providers.claude.family.haiku")),
+    ("fable", "Claude Fable", lazy("providers.claude.family.fable")),
 )
-"""(CLI alias, label, Catalan description) per model family. The CLI aliases always
-point to the newest model of their family (verified on Claude Code 2.1.283)."""
+"""(CLI alias, label, description) per model family. The CLI aliases always point to the
+newest model of their family (verified on Claude Code 2.1.283)."""
 
 Effort = Literal["low", "medium", "high"]
 
@@ -121,10 +123,7 @@ STARTUP_EVENTS = frozenset({"active_goal", "autocompact_state"})
 starting, while it still waited on stdin (with no session it printed none): a warm
 process may have them in its pipe already. They come before the turn's
 ``system``/``init`` and carry nothing about the turn (they are ignored)."""
-LOGIN_HINT = (
-    "posa el token de «claude setup-token» a CLAUDE_CODE_OAUTH_TOKEN (.env) i fes "
-    "«docker compose up -d», o executa «claude auth login» al servidor"
-)
+LOGIN_HINT = lazy("providers.claude.login_hint")
 """How to log the CLI in (docs/DEPLOYMENT.md, step 6): ``setup-token`` only prints the
 token, which the app gets from .env."""
 
@@ -174,8 +173,8 @@ def is_haiku(model: str) -> bool:
     return "haiku" in model.lower()
 
 
-def family_description(model: str) -> str:
-    """Catalan description of a Claude model id or alias by its family ("" if unknown)."""
+def family_description(model: str) -> str | Lazy:
+    """Description of a Claude model id or alias by its family ("" if unknown)."""
     lowered = model.lower()
     return next((text for family, _, text in CLAUDE_FAMILIES if family in lowered), "")
 
@@ -194,9 +193,10 @@ def refusal_error(
     """The error of a Claude reply that stopped with ``stop_reason: "refusal"`` (shared
     with the api provider). ``usage`` is what the refusing attempt billed and
     ``declined`` the billed attempts other models declined before it (api fallbacks)."""
-    reason = f" (categoria: {category})" if category else ""
     return RefusalError(
-        f"Claude ha declinat respondre aquesta petició{reason}.",
+        t("providers.claude.refused_category", category=category)
+        if category
+        else t("providers.claude.refused"),
         usage=usage,
         model=model,
         category=category,
@@ -473,7 +473,7 @@ class ClaudeCliProvider:
         self._limits: dict[str, UsageLimit] = {}
         self._resolved: dict[str, str] = {}
         """Model each requested name (e.g. the alias "opus") resolved to in real calls."""
-        self._status_cache: tuple[float, bool, str] | None = None
+        self._status_cache: tuple[float, bool, str | Lazy] | None = None
         self._status_lock = asyncio.Lock()
         self._sandbox: Path | None = None
         self._closed = False
@@ -499,7 +499,7 @@ class ClaudeCliProvider:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         if self._closed:
-            raise ProviderError("El proveïdor de Claude s'està aturant.", kind="unavailable")
+            raise ProviderError(t("providers.claude.closing"), kind="unavailable")
         started = time.monotonic()
         deadline = asyncio.get_running_loop().time() + self._settings.provider_timeout_seconds
         key = self._key(request)
@@ -564,7 +564,7 @@ class ClaudeCliProvider:
             return
         result = turn.result
         if result is None:  # pragma: no cover - the loop only ends with a result
-            raise ProviderError("La CLI de Claude no ha enviat cap resultat.", kind="internal")
+            raise ProviderError(t("providers.claude.no_result"), kind="internal")
         if result.get("is_error"):
             raise self._result_error(result, turn)
         text = "".join(turn.chunks)
@@ -642,15 +642,17 @@ class ClaudeCliProvider:
                 ModelInfo(
                     id=default,
                     label=default,
-                    description=family_description(default) or "Model configurat al servidor.",
+                    description=family_description(default) or lazy("providers.model_configured"),
                     is_default=True,
                 )
             )
-        for alias, label, text in CLAUDE_FAMILIES:
+        for alias, label, family in CLAUDE_FAMILIES:
             resolved = self._resolved.get(alias)
-            description = f"Sempre la versió més nova. {text}"
-            if resolved:
-                description += f" Ara: {resolved}"
+            description = (
+                lazy("providers.claude.alias_now", family=family, model=resolved)
+                if resolved
+                else lazy("providers.claude.alias", family=family)
+            )
             is_default = alias == default
             models.append(ModelInfo(alias, label, description, is_default=is_default))
         return models
@@ -681,9 +683,7 @@ class ClaudeCliProvider:
             effort_args = ("--effort", EFFORT_BY_PURPOSE[request.purpose])
         system = request.system.replace("\x00", "")
         if len(system.encode("utf-8")) > MAX_SYSTEM_PROMPT_BYTES:
-            raise ProviderError(
-                "El prompt de sistema és massa llarg per a la CLI de Claude.", kind="invalid"
-            )
+            raise ProviderError(t("providers.claude.system_prompt_too_long"), kind="invalid")
         return _Key(model, effort_args, system, max(1, request.max_output_tokens))
 
     def _command(self, key: _Key) -> list[str]:
@@ -745,10 +745,9 @@ class ClaudeCliProvider:
                 path.mkdir(mode=0o700, parents=True, exist_ok=True)
                 path.chmod(0o700)
             except OSError as exc:
-                raise ProviderError(
-                    f"No s'ha pogut preparar el directori de treball de Claude ({exc.strerror}).",
-                    kind="internal",
-                ) from None
+                # Lazy: the status shows it to every client (_auth_status).
+                text = lazy("providers.claude.sandbox_failed", reason=exc.strerror)
+                raise ProviderError(text, kind="internal") from None
             self._sandbox = path
         return self._sandbox
 
@@ -766,12 +765,10 @@ class ClaudeCliProvider:
                 limit=STREAM_LIMIT,
             )
         except FileNotFoundError:
-            raise ProviderError(
-                "CLI de Claude no trobada: revisa AOS_CLAUDE_CLI_PATH.", kind="unavailable"
-            ) from None
+            raise ProviderError(t("providers.claude.cli_not_found"), kind="unavailable") from None
         except PermissionError:
             raise ProviderError(
-                "No es pot executar la CLI de Claude (permisos).", kind="unavailable"
+                t("providers.claude.cli_not_executable"), kind="unavailable"
             ) from None
         worker = _CliProcess(proc, key)
         self._processes.add(worker)
@@ -792,15 +789,13 @@ class ClaudeCliProvider:
             async with asyncio.timeout_at(deadline):
                 return await operation
         except TimeoutError:
-            seconds = self._settings.provider_timeout_seconds
+            limit = seconds(self._settings.provider_timeout_seconds)
             raise ProviderError(
-                f"Claude no ha respost a temps ({seconds:g} s).", kind="timeout"
+                t("providers.claude.timeout", seconds=limit), kind="timeout"
             ) from None
         except ValueError:
             # StreamReader.readline: one event exceeded STREAM_LIMIT.
-            raise ProviderError(
-                "La CLI de Claude ha enviat un esdeveniment massa gran.", kind="internal"
-            ) from None
+            raise ProviderError(t("providers.claude.event_too_large"), kind="internal") from None
 
     def _take_warm(self, key: _Key) -> _CliProcess | None:
         for worker in self._warm:
@@ -916,15 +911,18 @@ class ClaudeCliProvider:
         suffix = f" ({detail})" if detail else ""
         error = turn.assistant_error
         if status in (401, 403) or error == "authentication_failed" or "Not logged in" in detail:
-            return ProviderError(
-                f"La sessió de Claude no és vàlida: {LOGIN_HINT}.{suffix}", kind="auth"
-            )
+            message = t("providers.claude.session_invalid", hint=LOGIN_HINT)
+            return ProviderError(f"{message}{suffix}", kind="auth")
         if status == 429 or turn.rate_limited or error == "rate_limit":
-            when = ""
-            if turn.rate_resets_at is not None:
-                when = f" Es restableix el {turn.rate_resets_at:%d/%m a les %H:%M} UTC."
+            resets = turn.rate_resets_at
             return ProviderError(
-                f"S'ha arribat al límit d'ús de la subscripció de Claude.{when}",
+                t("providers.claude.usage_limit")
+                if resets is None
+                else t(
+                    "providers.claude.usage_limit_resets",
+                    date=f"{resets:%d/%m}",
+                    time=f"{resets:%H:%M}",
+                ),
                 kind="rate_limit",
             )
         if (
@@ -933,11 +931,11 @@ class ClaudeCliProvider:
             or "overloaded" in detail.lower()
         ):
             return ProviderError(
-                f"Claude no està disponible ara mateix.{suffix}", kind="unavailable", retryable=True
+                f"{t('providers.claude.unavailable')}{suffix}", kind="unavailable", retryable=True
             )
         if result.get("terminal_reason") == "prompt_too_long":
-            return ProviderError("La conversa és massa llarga per a Claude.", kind="invalid")
-        return ProviderError(f"La CLI de Claude ha retornat un error.{suffix}", kind="internal")
+            return ProviderError(t("providers.claude.conversation_too_long"), kind="invalid")
+        return ProviderError(f"{t('providers.claude.cli_error')}{suffix}", kind="internal")
 
     @staticmethod
     async def _crash_error(worker: _CliProcess) -> ProviderError:
@@ -945,19 +943,23 @@ class ClaudeCliProvider:
             await asyncio.wait_for(worker.proc.wait(), KILL_GRACE_SECONDS)
         code = worker.proc.returncode
         tail = worker.stderr_tail()
-        message = "La CLI de Claude s'ha aturat sense respondre"
-        message += f" (codi {code})" if code is not None else ""
+        message = (
+            t("providers.claude.stopped_code", code=code)
+            if code is not None
+            else t("providers.claude.stopped")
+        )
         message += f": {tail}" if tail else "."
         return ProviderError(message, kind="unavailable", retryable=True)
 
     # -- status ----------------------------------------------------------------------
 
-    async def _auth_status(self) -> tuple[bool, str]:
-        """Run ``claude auth status --json`` (it exits 1 when not logged in)."""
+    async def _auth_status(self) -> tuple[bool, str | Lazy]:
+        """Run ``claude auth status --json`` (it exits 1 when not logged in). The detail
+        is a lazy text: the status is kept for every client."""
         try:
             cwd = self._sandbox_dir()
         except ProviderError as exc:
-            return False, exc.message
+            return False, exc.text
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._settings.claude_cli_path,
@@ -972,11 +974,11 @@ class ClaudeCliProvider:
                 start_new_session=True,
             )
         except (FileNotFoundError, PermissionError):
-            return False, "CLI de Claude no trobada"
+            return False, lazy("providers.claude.status.cli_not_found")
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), STATUS_TIMEOUT_SECONDS)
         except TimeoutError:
-            return False, "La CLI de Claude no respon"
+            return False, lazy("providers.claude.status.not_responding")
         finally:
             if proc.returncode is None:
                 _signal_group(proc.pid, signal.SIGKILL)
@@ -984,18 +986,18 @@ class ClaudeCliProvider:
         try:
             data = json.loads(stdout)
         except ValueError:
-            return False, "No s'ha pogut llegir l'estat de la sessió de la CLI de Claude"
+            return False, lazy("providers.claude.status.unreadable")
         info = _obj(data)
         if not info.get("loggedIn"):
-            return False, f"Sense sessió: {LOGIN_HINT}"
+            return False, lazy("providers.no_session", hint=LOGIN_HINT)
         method = info.get("authMethod")
         if method == "claude.ai":
             plan = info.get("subscriptionType")
-            return True, f"Subscripció activa ({plan})" if isinstance(plan, str) and plan else (
-                "Subscripció activa"
-            )
+            if isinstance(plan, str) and plan:
+                return True, lazy("providers.claude.status.subscription_plan", plan=plan)
+            return True, lazy("providers.claude.status.subscription")
         if method == "oauth_token":
-            return True, "Subscripció activa (token OAuth)"
+            return True, lazy("providers.claude.status.subscription_token")
         if method in ("api_key", "api_key_helper"):
-            return True, "Sessió amb clau d'API: es factura per ús, no amb la subscripció"
-        return True, "Sessió activa"
+            return True, lazy("providers.claude.status.api_key")
+        return True, lazy("providers.claude.status.session")

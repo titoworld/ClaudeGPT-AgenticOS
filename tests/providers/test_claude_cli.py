@@ -23,6 +23,7 @@ import pytest
 from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 from portability import alive, reaped, without_platform_variables
 
+from agentic_os import i18n
 from agentic_os.config import Settings
 from agentic_os.domain import DebateOptions, Purpose, TurnOptions, Usage
 from agentic_os.orchestrator.engine import Engine
@@ -260,7 +261,7 @@ async def test_list_models_with_a_configured_full_id(tmp_path: Path, fake: FakeC
         ("claude-opus-5-5", True),
         ("opus", False),
     ]
-    assert models[0].description == "Raonament profund i tasques llargues."
+    assert str(models[0].description) == "Raonament profund i tasques llargues."
 
 
 async def test_environment_is_allow_listed(
@@ -325,6 +326,35 @@ async def test_rejected_rate_limit(fake: FakeCli, provider: ClaudeCliProvider) -
     limits = {limit.window: limit for limit in (await provider.status()).limits}
     assert limits["5h"].status == "rejected" and limits["5h"].used_percent == 100.0
     assert limits["7d"].status == "allowed"
+
+
+@pytest.mark.parametrize(
+    ("lang", "message"),
+    [
+        (
+            "en",
+            "The Claude subscription has reached its usage limit. It resets on 27/09 at 19:48 UTC.",
+        ),
+        (
+            "es",
+            "Se ha alcanzado el límite de uso de la suscripción de Claude. "
+            "Se restablece el 27/09 a las 19:48 UTC.",
+        ),
+        (
+            "ca",
+            "S'ha arribat al límit d'ús de la subscripció de Claude. "
+            "Es restableix el 27/09 a les 19:48 UTC.",
+        ),
+    ],
+)
+async def test_the_usage_limit_is_told_in_the_language_of_the_turn(
+    lang: i18n.Lang, message: str, fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    """The turn's task carries the language of the connection that started it."""
+    fake.scenario(stream="stream_rate_limited.jsonl")
+    with i18n.use(lang):
+        error = await expect_error(provider, request())
+    assert (error.kind, error.message) == ("rate_limit", message)
 
 
 async def test_overloaded_is_retryable(fake: FakeCli, provider: ClaudeCliProvider) -> None:
@@ -425,7 +455,7 @@ async def test_missing_cli(tmp_path: Path, fake: FakeCli) -> None:
     assert error.kind == "unavailable" and "no trobada" in error.message
     await provider.prewarm(request())  # never raises
     status = await provider.status()
-    assert not status.available and status.detail == "CLI de Claude no trobada"
+    assert not status.available and str(status.detail) == "CLI de Claude no trobada"
     await provider.aclose()
 
 
@@ -696,9 +726,49 @@ async def test_status(
     fake.scenario(status={"json": status, "exit_code": 0 if status["loggedIn"] else 1})
     result = await provider.status()
     assert (result.agent, result.mode, result.model) == ("claude", "cli", "opus")
-    assert (result.available, result.detail) == (available, detail)
+    assert (result.available, str(result.detail)) == (available, detail)
     assert result.limits == ()
     await provider.status()  # cached
+    assert len([c for c in fake.calls() if c["phase"] == "status"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "english", "spanish"),
+    [
+        (
+            {"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"},
+            "Subscription active (max)",
+            "Suscripción activa (max)",
+        ),
+        (
+            {"loggedIn": False, "authMethod": "none"},
+            "Not logged in: put the token from “claude setup-token” in "
+            "CLAUDE_CODE_OAUTH_TOKEN (.env) and run “docker compose up -d”, or run "
+            "“claude auth login” on the server",
+            "Sin sesión: pon el token de «claude setup-token» en CLAUDE_CODE_OAUTH_TOKEN "
+            "(.env) y ejecuta «docker compose up -d», o ejecuta «claude auth login» en el "
+            "servidor",
+        ),
+    ],
+)
+async def test_the_cached_status_speaks_the_language_of_whoever_reads_it(
+    fake: FakeCli,
+    provider: ClaudeCliProvider,
+    status: dict[str, Any],
+    english: str,
+    spanish: str,
+) -> None:
+    """The status is kept for every client (docs/adr/0011-internationalization.md): the
+    client that asks first does not choose the language of the others."""
+    fake.scenario(status={"json": status, "exit_code": 0 if status["loggedIn"] else 1})
+    with i18n.use("es"):
+        first = await provider.status()
+    with i18n.use("en"):
+        second = await provider.status()  # cached
+        assert str(second.detail) == english
+    assert second.detail is first.detail
+    with i18n.use("es"):
+        assert str(first.detail) == spanish
     assert len([c for c in fake.calls() if c["phase"] == "status"]) == 1
 
 
@@ -708,7 +778,7 @@ async def test_status_times_out(
     monkeypatch.setattr(claude_cli, "STATUS_TIMEOUT_SECONDS", 0.3)
     fake.scenario(status={"json": {"loggedIn": True}, "delay": 5})
     result = await provider.status()
-    assert not result.available and result.detail == "La CLI de Claude no respon"
+    assert not result.available and str(result.detail) == "La CLI de Claude no respon"
 
 
 # -- helpers ----------------------------------------------------------------------------------

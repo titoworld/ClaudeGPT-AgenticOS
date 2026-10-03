@@ -15,6 +15,7 @@ import httpx2
 import pytest
 from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 
+from agentic_os import i18n
 from agentic_os.config import Settings
 from agentic_os.domain import Purpose, Usage
 from agentic_os.orchestrator.engine import Engine
@@ -32,6 +33,7 @@ from agentic_os.providers.base import (
     ProviderError,
     RefusalError,
     TextDelta,
+    seconds,
 )
 from agentic_os.providers.claude_api import (
     FALLBACK_BETA,
@@ -495,7 +497,7 @@ async def test_max_tokens_spent_thinking_fails_with_its_billed_usage(tmp_path: P
         MockApi(replying(body)), request(max_output_tokens=2000), make_settings(tmp_path)
     )
     assert error.kind == "invalid" and not error.retryable
-    assert "límit de sortida" in error.message and "2000" in error.message
+    assert "límit de sortida" in error.message and "2.000" in error.message
     assert error.usage is not None and error.usage.output_tokens == 2000
     assert error.model == "claude-opus-5"
 
@@ -1072,11 +1074,44 @@ async def test_overall_timeout(tmp_path: Path) -> None:
     assert exc.kind == "timeout"
 
 
+@pytest.mark.parametrize(
+    ("lang", "message"),
+    [
+        ("en", "Claude did not answer in time (0.2 s)."),
+        ("es", "Claude no ha respondido a tiempo (0,2 s)."),
+        ("ca", "Claude no ha respost a temps (0,2 s)."),
+    ],
+)
+async def test_the_timeout_is_told_in_the_language_of_the_turn(
+    tmp_path: Path, lang: i18n.Lang, message: str
+) -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(5)
+        return ok(answer("claude-opus-5", ["tard"]))
+
+    settings = make_settings(tmp_path, provider_timeout_seconds=0.2)
+    with i18n.use(lang):
+        exc = await run_error(MockApi(handler), request(), settings)
+    assert (exc.kind, exc.message) == ("timeout", message)
+
+
+def test_seconds_are_written_as_the_web_writes_numbers() -> None:
+    written = {}
+    for lang in i18n.LANGS:
+        with i18n.use(lang):
+            written[lang] = [seconds(600.0), seconds(0.25), seconds(12_000)]
+    assert written == {
+        "en": ["600", "0.25", "12,000"],
+        "es": ["600", "0,25", "12.000"],
+        "ca": ["600", "0,25", "12.000"],
+    }
+
+
 async def test_missing_api_key(tmp_path: Path) -> None:
     provider = ClaudeApiProvider(make_settings(tmp_path, anthropic_api_key=None))
     status = await provider.status()
     assert not status.available
-    assert status.detail == "Falta la clau d'API d'Anthropic (AOS_ANTHROPIC_API_KEY)"
+    assert str(status.detail) == "Falta la clau d'API d'Anthropic (AOS_ANTHROPIC_API_KEY)"
     with pytest.raises(ProviderError) as info:
         async for _ in provider.stream(request()):
             pass  # pragma: no cover
@@ -1093,7 +1128,7 @@ async def test_status_prewarm_and_protocol(tmp_path: Path) -> None:
     assert (provider.agent, provider.mode) == ("claude", "api")
     await provider.prewarm(request())
     status = await provider.status()
-    assert (status.available, status.model, status.detail) == (
+    assert (status.available, status.model, str(status.detail)) == (
         True,
         "claude-opus-5",
         "Clau d'API configurada",
