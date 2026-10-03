@@ -53,11 +53,12 @@ def read(relative: str) -> str:
 
 
 def value(text: str) -> int:
-    """A number as the docs write it: ``200.000`` (Catalan thousands), ``4 KiB``."""
-    match = re.fullmatch(r"([\d.]+)(?: ([KM])iB)?", text)
+    """A whole number as the docs write it: ``200,000`` (English thousands), ``200.000``
+    (Catalan thousands, in the documents still in Catalan), ``4 KiB``."""
+    match = re.fullmatch(r"([\d.,]+)(?: ([KM])iB)?", text)
     assert match, text
     factor = {"K": 1024, "M": 1024 * 1024}.get(match.group(2) or "", 1)
-    return int(match.group(1).replace(".", "")) * factor
+    return int(match.group(1).replace(".", "").replace(",", "")) * factor
 
 
 def field_bound(name: str, bound: str) -> int:
@@ -75,7 +76,7 @@ def field_default(name: str) -> int:
 
 
 PROTOCOL = "docs/PROTOCOL.md"
-ARQUITECTURA = "docs/ARCHITECTURE.md"
+ARCHITECTURE = "docs/ARCHITECTURE.md"
 DESPLEGAMENT = "docs/DEPLOYMENT.md"
 LOGIN_BODY = middleware.SMALL_BODY_PATHS["/api/auth/login"]
 BODY_SECONDS = int(middleware.BODY_TIMEOUT_SECONDS)
@@ -129,13 +130,9 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (PROTOCOL, r"`413` cos massa gran: com a molt (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
     (PROTOCOL, r"o (\d+ [KM]iB) a `POST /api/auth/login`", LOGIN_BODY),
     (PROTOCOL, r"`408` si el cos no arriba sencer en (\d+) s", BODY_SECONDS),
-    (
-        ARQUITECTURA,
-        r"El cos de les peticions té un màxim d'(\d+ [KM]iB)",
-        middleware.MAX_BODY_BYTES,
-    ),
-    (ARQUITECTURA, r"\((\d+ [KM]iB) per a l'inici de sessió", LOGIN_BODY),
-    (ARQUITECTURA, r"no ha arribat sencer en (\d+) s", BODY_SECONDS),
+    (ARCHITECTURE, r"Request bodies have a maximum of (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
+    (ARCHITECTURE, r"\((\d+ [KM]iB) for logging in", LOGIN_BODY),
+    (ARCHITECTURE, r"has not arrived whole within (\d+) s\b", BODY_SECONDS),
     (
         DESPLEGAMENT,
         r"El cos de les peticions té un màxim d'(\d+ [KM]iB)",
@@ -146,15 +143,15 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     # Attachments.
     (PROTOCOL, r"; (\d+) s a `PUT /api/attachments`", UPLOAD_SECONDS),
     (PROTOCOL, r"o (\d+) MB a `PUT /api/attachments`", UPLOAD_MB),
-    (ARQUITECTURA, r"té un límit propi: (\d+) MB", UPLOAD_MB),
-    (ARQUITECTURA, r"té un límit propi: \d+ MB i (\d+) s", UPLOAD_SECONDS),
+    (ARCHITECTURE, r"has a limit of its own: (\d+) MB", UPLOAD_MB),
+    (ARCHITECTURE, r"has a limit of its own: \d+ MB and (\d+) s\b", UPLOAD_SECONDS),
     (DESPLEGAMENT, r"té un límit propi: (\d+) MB", UPLOAD_MB),
     (DESPLEGAMENT, r"té un límit propi: \d+ MB i (\d+) segons", UPLOAD_SECONDS),
     (PROTOCOL, r"com a molt (\d+) adjunts per missatge", attachments.MAX_ATTACHMENTS),
     (PROTOCOL, r"com a molt (\d+), cadascun un sol cop", attachments.MAX_ATTACHMENTS),
-    (ARQUITECTURA, r"com a molt (\d+) i \d+ MB entre tots", attachments.MAX_ATTACHMENTS),
+    (ARCHITECTURE, r"at most (\d+) and \d+ MB in all", attachments.MAX_ATTACHMENTS),
     (PROTOCOL, r"i (\d+) MB entre tots", megabytes(attachments.MAX_TURN_BYTES)),
-    (ARQUITECTURA, r"i (\d+) MB entre tots", megabytes(attachments.MAX_TURN_BYTES)),
+    (ARCHITECTURE, r"and (\d+) MB in all", megabytes(attachments.MAX_TURN_BYTES)),
     (PROTOCOL, r"sumen més de (\d+) MB", megabytes(attachments.MAX_TURN_BYTES)),
     (PROTOCOL, r"imatge: (\d+) MB", megabytes(attachments.MAX_IMAGE_BYTES)),
     (PROTOCOL, r"imatge: \d+ MB i ([\d.]+) píxels", attachments.MAX_IMAGE_SIDE),
@@ -184,17 +181,17 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (PROTOCOL, r"i almenys el (\d+) % del text", GARBAGE_PERCENT),
     (PROTOCOL, r"`hidden`: (\d+) caràcters o més", pdf_facts.HIDDEN_MIN),
     (PROTOCOL, r"més petit d'(\d+) punt", TINY_POINTS),
-    (ARQUITECTURA, r"més petit d'(\d+) punt", TINY_POINTS),
+    (ARCHITECTURE, r"smaller than (\d+) point", TINY_POINTS),
     (PROTOCOL, r"l'origen a més d'(\d+) punt fora", OFFPAGE_POINTS),
     (PROTOCOL, r"ChatGPT espera el contrast com a molt (\d+) minuts", CHECK_MINUTES),
-    (ARQUITECTURA, r"la mateixa tasca, com a molt (\d+) minuts", CHECK_MINUTES),
+    (ARCHITECTURE, r"the same task, for at most (\d+) minutes", CHECK_MINUTES),
     (PROTOCOL, r"Són com a molt (\d+) crides per PDF", pdf_check.MAX_CHECK_CALLS),
-    (ARQUITECTURA, r"Són com a molt (\d+) crides per PDF", pdf_check.MAX_CHECK_CALLS),
-    (ARQUITECTURA, r"com a molt (\d+) PDF alhora", pdf_check.CHECK_CONCURRENCY),
-    (ARQUITECTURA, r"contrastos de PDF: ([\d.]+) tokens", pdf_check.CHECK_BASE_TOKENS),
-    (ARQUITECTURA, r"més ([\d.]+) per cada pàgina de la crida", pdf_check.CHECK_TEXT_PAGE_TOKENS),
-    (ARQUITECTURA, r"i ([\d.]+) per cada altra pàgina", pdf_check.CHECK_PAGE_TOKENS),
-    (ARQUITECTURA, r"altra pàgina, com a molt ([\d.]+), amb", pdf_check.CHECK_MAX_TOKENS),
+    (ARCHITECTURE, r"There are at most (\d+) calls per PDF", pdf_check.MAX_CHECK_CALLS),
+    (ARCHITECTURE, r"at most (\d+) PDFs at a time", pdf_check.CHECK_CONCURRENCY),
+    (ARCHITECTURE, r"PDF checks: ([\d,]+) tokens", pdf_check.CHECK_BASE_TOKENS),
+    (ARCHITECTURE, r"plus ([\d,]+) for each page of the call", pdf_check.CHECK_TEXT_PAGE_TOKENS),
+    (ARCHITECTURE, r"and ([\d,]+) for each other page", pdf_check.CHECK_PAGE_TOKENS),
+    (ARCHITECTURE, r"each other page, at most ([\d,]+), with", pdf_check.CHECK_MAX_TOKENS),
     # Conversation list and search.
     (PROTOCOL, r"`limit`: d'1 a (\d+)", MAX_LIST_LIMIT),
     (PROTOCOL, r"El text de la cerca pot tenir com a molt (\d+) caràcters", MAX_SEARCH_LENGTH),
@@ -243,14 +240,16 @@ def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
 
 ADR_REFINE = "docs/adr/0010-refine-mode.md"
 REFINE = RefineOptions()
-NUMBER_WORDS = {"dos": 2, "dues": 2, "tres": 3, "quatre": 4, "cinc": 5}
+NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "dos": 2, "dues": 2, "tres": 3}
 
 
 def number(text: str) -> float:
-    """A number as the prose of the docs writes it: ``20.000`` (Catalan thousands),
-    ``0,1`` (Catalan decimals) or a word (``dues``)."""
+    """A number as the prose of the docs writes it: English (``20,000``, ``0.10``), the
+    Catalan of the documents not yet translated (``20.000``, ``0,1``) or a word (``two``)."""
     if text in NUMBER_WORDS:
         return NUMBER_WORDS[text]
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d{1,2})?", text):
+        return float(text.replace(",", ""))
     assert re.fullmatch(r"\d+(?:\.\d{3})*(?:,\d+)?", text), text
     return float(text.replace(".", "").replace(",", "."))
 
@@ -274,13 +273,13 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
         (*REFINE_THRESHOLD_RANGE, REFINE.convergence_threshold),
     ),
     (
-        ARQUITECTURA,
-        r"màxim de rondes \((\d+) per defecte, de (\d+) a (\d+)\)",
+        ARCHITECTURE,
+        r"maximum number of rounds \((\d+) by default, from (\d+) to (\d+)\)",
         (REFINE.max_rounds, *REFINE_ROUNDS_RANGE),
     ),
     (
-        ARQUITECTURA,
-        r"pressupost \(([\d,]+) € per defecte, de ([\d,]+) a ([\d,]+) €",
+        ARCHITECTURE,
+        r"the budget \(€([\d.]+) by default, from €([\d.]+) to €([\d.]+);",
         (REFINE.budget_eur, *REFINE_BUDGET_EUR_RANGE),
     ),
     (
@@ -289,7 +288,7 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
         (REFINE.max_rounds, REFINE_ROUNDS_RANGE[1]),
     ),
     (ADR_REFINE, r"pressupost en euros \(([\d,]+) € per defecte", (REFINE.budget_eur,)),
-    (ARQUITECTURA, r"el llindar \((\d+) per defecte\)", (REFINE.convergence_threshold,)),
+    (ARCHITECTURE, r"give it the threshold \((\d+) by default\)", (REFINE.convergence_threshold,)),
     (ADR_REFINE, r"llindar \((\d+) per defecte\)", (REFINE.convergence_threshold,)),
     # The word budget when the owner gives no limit.
     (
@@ -297,13 +296,15 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
         r"([\d,]+) vegades les de la versió 1, i (\d+) com a mínim",
         (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
     ),
-    *(
-        (
-            document,
-            r"([\d,]+) vegades les paraules de la versió 1 \((\d+) com a mínim\)",
-            (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
-        )
-        for document in (ARQUITECTURA, ADR_REFINE)
+    (
+        ARCHITECTURE,
+        r"([\d.]+) times the words of version 1 \((\d+) at least\)",
+        (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
+    ),
+    (
+        ADR_REFINE,
+        r"([\d,]+) vegades les paraules de la versió 1 \((\d+) com a mínim\)",
+        (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
     ),
     # The loop: changes a round, the changelog every prompt gets, when it stops by itself.
     (
@@ -311,23 +312,25 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
         r"els canvis que (?:proposa|ha aplicat) \(com a molt (\d+)\)",
         (REFINE_MAX_CHANGES,),
     ),
-    (ARQUITECTURA, r"com a molt (\d+) canvis", (REFINE_MAX_CHANGES,)),
+    (ARCHITECTURE, r"at most (\d+) changes", (REFINE_MAX_CHANGES,)),
     (
         ADR_REFINE,
         r"Com a molt (\d+) canvis per ronda:\*\* (\d+) propostes per revisió i (\d+) canvis",
         (REFINE_MAX_CHANGES,) * 3,
     ),
-    (ARQUITECTURA, r"les (\d+) últimes línies del registre de canvis", (REFINE_CHANGELOG_TAIL,)),
+    (ARCHITECTURE, r"the last (\d+) lines of the changelog", (REFINE_CHANGELOG_TAIL,)),
     (ADR_REFINE, r"les (\d+) últimes línies", (REFINE_CHANGELOG_TAIL,)),
     *(
         (document, r"(\w+) rondes seguides", (REFINE_CONVERGENCE_ROUNDS,))
-        for document in (PROTOCOL, ARQUITECTURA, ADR_REFINE)
+        for document in (PROTOCOL, ADR_REFINE)
     ),
+    (ARCHITECTURE, r"(\w+) rounds in a row", (REFINE_CONVERGENCE_ROUNDS,)),
     # Every version is one reply: what does not fit in its output is cut off.
     *(
         (document, r"com a molt ([\d.]+) tokens de sortida", (EngineConfig().max_output_tokens,))
-        for document in (PROTOCOL, ARQUITECTURA, ADR_REFINE)
+        for document in (PROTOCOL, ADR_REFINE)
     ),
+    (ARCHITECTURE, r"at most ([\d,]+) output tokens", (EngineConfig().max_output_tokens,)),
 ]
 
 
@@ -452,7 +455,7 @@ def section(markdown: str, title: str) -> str:
 
 def test_the_readme_deploy_summary_puts_the_claude_token_in_env() -> None:
     [block] = re.findall(
-        r"```bash\n(.*?)```", section(read("README.md"), "Desplegar al teu VPS"), re.S
+        r"```bash\n(.*?)```", section(read("README.md"), "Deploy to your VPS"), re.S
     )
     lines = block.splitlines()
     token = next(i for i, line in enumerate(lines) if "claude setup-token" in line)
@@ -504,6 +507,7 @@ def test_the_login_messages_the_guide_quotes_are_the_ones_the_web_shows() -> Non
 
 
 def test_the_readme_gives_the_claude_cli_model_aliases() -> None:
-    [models] = [line for line in read("README.md").splitlines() if "Model a triar" in line]
+    lines = read("README.md").splitlines()
+    [models] = [line for line in lines if "Choose each agent's model" in line]
     for alias, _, _ in CLAUDE_FAMILIES:
         assert f"`{alias}`" in models, alias

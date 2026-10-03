@@ -193,7 +193,8 @@ def test_the_docs_give_caddys_timeouts() -> None:
     }
     assert len(timeouts) == 2
     for document in ("docs/ARCHITECTURE.md", "docs/DEPLOYMENT.md"):
-        said = {int(n) for n in re.findall(r"Caddy talla als (\d+)", read(document))}
+        found = re.findall(r"(?:Caddy talla als|Caddy cuts off at) (\d+)", read(document))
+        said = {int(n) for n in found}
         assert said == timeouts, document
 
 
