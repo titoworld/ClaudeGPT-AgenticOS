@@ -15,13 +15,17 @@ Attachments (docs/adr/0009-attachments.md) travel before the text, each in a blo
 own: the file itself (an image, a PDF document) or, for a text file and for a PDF sent
 as its extracted text, a text block (:func:`attachment_text`). A file's text is untrusted
 like the rest: it goes through ``neutralize_tags``, between an opening line that ends
-with a code, ``[Fitxer: <name> · <code>]``, and the closing line ``[Fi del fitxer
-<code>]``. The code (:func:`file_code`) hashes the content's SHA-256 and the name, so
-neither the file nor its name can hold it (each would have to contain its own hash) and a
-forged end of file is told apart; it is deterministic, so the prompt caches keep hitting.
-ChatGPT's page-by-page view of a PDF (:func:`pdf_view`) and Claude's check of its text
-have codes of their own, seeded apart (:func:`view_code`, :func:`check_code`): only
-ChatGPT ever sees the view's. The prompt lists the attachments by :func:`attachment_label`.
+with a code, ``[File: <name> · <code>]``, and the closing line ``[End of file <code>]``.
+The code (:func:`file_code`) hashes the content's SHA-256 and the name, so neither the
+file nor its name can hold it (each would have to contain its own hash) and a forged end
+of file is told apart; it is deterministic, so the prompt caches keep hitting. ChatGPT's
+page-by-page view of a PDF (:func:`pdf_view`) and Claude's check of its text have codes
+of their own, seeded apart (:func:`view_code`, :func:`check_code`): only ChatGPT ever
+sees the view's. The prompt lists the attachments by :func:`attachment_label`.
+
+These texts are for the models, so they are in English, like the prompts
+(docs/adr/0011-internationalization.md): the labels, the lines that enclose a file's text
+and ChatGPT's view of a PDF.
 """
 
 from __future__ import annotations
@@ -39,11 +43,13 @@ from agentic_os.providers.base import Attachment, ChatTurn, GenerationRequest
 
 AGENT_LABELS: dict[AgentName, str] = {"claude": "Claude", "chatgpt": "ChatGPT"}
 
-ATTACHMENT_KIND_LABELS: dict[str, str] = {"image": "imatge", "pdf": "PDF", "text": "fitxer de text"}
-"""Catalan name of each attachment kind, in labels and history references."""
-TEXT_ONLY_NOTE = "només el text extret"
+ATTACHMENT_KIND_LABELS: dict[str, str] = {"image": "image", "pdf": "PDF", "text": "text file"}
+"""The name of each attachment kind, in labels and history references."""
+UNKNOWN_KIND_LABEL: Final = "file"
+"""The name of an attachment whose kind :data:`ATTACHMENT_KIND_LABELS` lacks."""
+TEXT_ONLY_NOTE = "extracted text only"
 """Label note of a PDF that a call gets as its extracted text instead of the document."""
-PDF_WITHOUT_TEXT = "[No se n'ha pogut extreure el text d'aquest PDF.]"
+PDF_WITHOUT_TEXT = "[No text could be extracted from this PDF.]"
 """Body of a PDF sent as text when the server could not extract any."""
 CONVERSATION_CONTINUED: Final = "(continuation of the conversation)"
 """The user message an api call starts with when its history starts with an answer."""
@@ -140,16 +146,16 @@ def neutralize_tags(text: str, reserved: frozenset[str] = COMMON_TAGS) -> str:
 
 
 def pages_label(pages: int) -> str:
-    return "1 pàgina" if pages == 1 else f"{pages} pàgines"
+    return "1 page" if pages == 1 else f"{pages} pages"
 
 
 def attachment_label(
     name: str, kind: str, pages: int | None = None, *, text_only: bool = False
 ) -> str:
-    """How an attachment is named to the models: «informe.pdf (PDF, 12 pàgines)»,
-    «foto.jpg (imatge)», «notes.md (fitxer de text)»; a PDF that a call gets as its
-    extracted text says so («informe.pdf (PDF, 12 pàgines; només el text extret)»)."""
-    details = ATTACHMENT_KIND_LABELS.get(kind, "fitxer")
+    """How an attachment is named to the models: «report.pdf (PDF, 12 pages)»,
+    «photo.jpg (image)», «notes.md (text file)»; a PDF that a call gets as its extracted
+    text says so («report.pdf (PDF, 12 pages; extracted text only)»)."""
+    details = ATTACHMENT_KIND_LABELS.get(kind, UNKNOWN_KIND_LABEL)
     if kind == "pdf" and pages:
         details += f", {pages_label(pages)}"
     if text_only:
@@ -198,13 +204,13 @@ def _enclose(opening: str, body: str, code: str) -> str:
     """:func:`enclosed` with this ``code``."""
     text = neutralize_tags(body)
     end = "" if text.endswith("\n") else "\n"
-    return f"[{opening} · {code}]\n{text}{end}[Fi del fitxer {code}]\n"
+    return f"[{opening} · {code}]\n{text}{end}[End of file {code}]\n"
 
 
 def enclosed(opening: str, body: str, attachment: Attachment) -> str:
     """An attachment's text as the models get it: the line ``[<opening> · <code>]``, the
     body with every tag of the app's prompts neutralized (``neutralize_tags``) and the
-    line ``[Fi del fitxer <code>]``, with the attachment's :func:`file_code` and a line
+    line ``[End of file <code>]``, with the attachment's :func:`file_code` and a line
     break (Codex joins its text items: what follows starts on a line of its own). The
     body cannot close the block or open a section of the prompt: whatever it says, it
     stays the file's content."""
@@ -213,11 +219,11 @@ def enclosed(opening: str, body: str, attachment: Attachment) -> str:
 
 def attachment_text(attachment: Attachment) -> str:
     """The text block of a text file, or of a PDF sent as its extracted text (a notice
-    when there is none): :func:`enclosed` under ``Fitxer: <name>``."""
+    when there is none): :func:`enclosed` under ``File: <name>``."""
     body = attachment.text or ""
     if attachment.kind == "pdf" and not has_text(attachment):
         body = PDF_WITHOUT_TEXT
-    return enclosed(f"Fitxer: {neutralize_tags(attachment.name)}", body, attachment)
+    return enclosed(f"File: {neutralize_tags(attachment.name)}", body, attachment)
 
 
 def check_code(attachment: Attachment) -> str:
@@ -238,12 +244,18 @@ def view_code(attachment: Attachment) -> str:
 
 
 PDF_VIEW_LEGEND: Final = (
-    "Cada pàgina comença amb una línia «[Pàgina N · {code}...]». Quan aquesta línia diu que "
-    "el text és de Claude, l'ha llegit Claude al PDF perquè el text extret hi falta o no és "
-    "fiable; la resta és el text extret del fitxer."
+    'Each page starts with a line "[Page N · {code}...]". When that line says the text is '
+    "Claude's, Claude read it from the PDF because the extracted text is missing there or "
+    "unreliable; the rest is the text extracted from the file."
 )
-"""First line of ChatGPT's view of a PDF: how to read its page lines."""
-PAGE_WITHOUT_TEXT: Final = "(sense text extraïble)"
+"""First line of ChatGPT's view of a PDF: how to read its page lines, which start like
+those of Claude's check prompt (``[Page N · CODE]``, ``pdf_check.check_prompt``)."""
+PAGE_WITHOUT_TEXT: Final = "(no extractable text)"
+"""The body of a page of the view that has no stored text."""
+PAGE_SHOWS_NO_TEXT: Final = "(the page shows no text)"
+"""The body of a page whose text Claude found hidden, when it shows none."""
+UNCHECKED_STATE: Final = "text extracted by the server, unchecked"
+"""What the opening line of ChatGPT's view says of a PDF that nobody checked."""
 
 
 def _page_view(
@@ -256,36 +268,36 @@ def _page_view(
         stored = attachment.text[page.start : page.end].strip()
     if finding is not None and finding.status in ("missing", "garbled"):
         why = (
-            "la pàgina no té text extraïble"
+            "the page has no extractable text"
             if finding.status == "missing"
-            else "el text extret de la pàgina no és llegible"
+            else "the page's extracted text is unreadable"
         )
-        head = f"[Pàgina {number} · {code}: text de Claude, que l'ha llegit al PDF perquè {why}]"
+        head = f"[Page {number} · {code}: Claude's text, read from the PDF because {why}]"
         body = finding.text
     elif finding is not None and finding.status == "hidden":
         head = (
-            f"[Pàgina {number} · {code}: text visible segons Claude; la pàgina té text que no es "
-            "veu i no s'ha passat]"
+            f"[Page {number} · {code}: visible text according to Claude; the page has text that "
+            "is not visible, which was left out]"
         )
-        body = finding.text or "(la pàgina no mostra cap text)"
+        body = finding.text or PAGE_SHOWS_NO_TEXT
     else:
         notes: list[str] = []
         if not checked:
-            notes.append("sense contrastar")
+            notes.append("unchecked")
             if page.hidden:
-                notes.append("pot tenir text que no es veu")
+                notes.append("may hold text that is not visible")
         if page.cut:
-            notes.append("text retallat pel límit del servidor")
-        head = f"[Pàgina {number} · {code}{': ' + '; '.join(notes) if notes else ''}]"
+            notes.append("text truncated by the server's limit")
+        head = f"[Page {number} · {code}{': ' + '; '.join(notes) if notes else ''}]"
         body = stored or PAGE_WITHOUT_TEXT
         if finding is not None and finding.status == "partial":
             body += (
-                f"\n[Complement de Claude · {code}: text de la pàgina que l'extracció no recull]\n"
+                f"\n[Claude's addition · {code}: text of the page that the extraction misses]\n"
                 f"{finding.text}"
             )
     if finding is not None and finding.visual:
         body += (
-            f"\n[Descripció de Claude · {code}: què mostren les figures, taules o imatges]\n"
+            f"\n[Claude's description · {code}: what the figures, tables or images show]\n"
             f"{finding.visual}"
         )
     return f"{head}\n{body}"
@@ -304,29 +316,29 @@ def pdf_view(attachment: Attachment) -> str:
     code = view_code(attachment)
     if pages is None:
         if not has_text(attachment):
-            return f"[PDF «{name}»: no se n'ha pogut extreure el text]\n"
+            return f'[PDF "{name}": no text could be extracted]\n'
         count = f", {pages_label(attachment.pages)}" if attachment.pages else ""
         return _enclose(
-            f"PDF «{name}»{count}: text extret pel servidor, sense contrastar",
+            f'PDF "{name}"{count}: {UNCHECKED_STATE}',
             attachment.text or "",
             code,
         )
     check = attachment.pdf_check
     covered = check.covered if check is not None else 0
     if covered <= 0:
-        state = "text extret pel servidor, sense contrastar"
+        state = UNCHECKED_STATE
     elif covered >= len(pages):
-        state = "text extret pel servidor i contrastat per Claude"
+        state = "text extracted by the server and checked by Claude"
     else:
         state = (
-            f"text extret pel servidor i contrastat per Claude fins a la pàgina {covered} "
-            "(la resta, sense contrastar)"
+            f"text extracted by the server and checked by Claude up to page {covered} "
+            "(the rest unchecked)"
         )
     blocks = [PDF_VIEW_LEGEND.format(code=code)]
     for page in pages:
         finding = check.finding(page.number) if check is not None else None
         blocks.append(_page_view(attachment, page, finding, page.number <= covered, code))
-    header = f"PDF «{name}», {pages_label(len(pages))}: {state}"
+    header = f'PDF "{name}", {pages_label(len(pages))}: {state}'
     return _enclose(header, "\n\n".join(blocks), code)
 
 

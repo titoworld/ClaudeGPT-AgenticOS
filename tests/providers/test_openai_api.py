@@ -856,11 +856,11 @@ async def test_attachments_are_input_parts_before_the_prompt(
             },
             {
                 "type": "input_text",
-                "text": f"[Fitxer: annex · {a}]\n--- Pàgina 1 ---\nAnnex.\n[Fi del fitxer {a}]\n",
+                "text": f"[File: annex · {a}]\n--- Pàgina 1 ---\nAnnex.\n[End of file {a}]\n",
             },
             {
                 "type": "input_text",
-                "text": f"[Fitxer: notes.md · {n}]\na,b\n1,2\n[Fi del fitxer {n}]\n",
+                "text": f"[File: notes.md · {n}]\na,b\n1,2\n[End of file {n}]\n",
             },
             {"type": "input_text", "text": chat[-1][1]},
         ],
@@ -884,7 +884,7 @@ async def test_a_hostile_file_cannot_pass_for_the_prompt(
     *parts, prompt = body["input"][-1]["content"]
     for part, attachment in zip(parts, (hostile, pdf), strict=True):
         assert part["type"] == "input_text"
-        assert part["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert part["text"].endswith(f"\n[End of file {file_code(attachment)}]\n")
         assert not reserved_tags(part["text"])
     # Every tag the model reads comes from the app's own prompt.
     chat = to_chat_messages(request, "chatgpt")

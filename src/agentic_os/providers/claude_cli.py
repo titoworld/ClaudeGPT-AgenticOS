@@ -7,7 +7,7 @@ written as a single stdin line (``client_composed`` so the CLI never expands
 ``@file`` mentions or dispatches ``/commands``) and stdin is closed, so the process
 exits after the turn. With attachments the message ``content`` is a list of blocks
 (:func:`attachment_blocks`): one per attachment, in order (a base64 ``image``, a base64
-PDF ``document`` with its name as ``title``, or a ``[Fitxer: ...]`` text block), then the
+PDF ``document`` with its name as ``title``, or a ``[File: ...]`` text block), then the
 transcript; the CLI never reads a file itself.
 
 ``prewarm`` starts processes ahead of time (they wait on stdin without calling the

@@ -242,7 +242,7 @@ async def test_chatgpt_waits_for_claude_s_check_and_reads_the_pdf_through_it(
     [(delivered,)] = chatgpt.attachments
     assert delivered == replace(store.attachments[pdf_id], pdf_check=expected)
     assert (
-        f"text de Claude, que l'ha llegit al PDF perquè la pàgina no té text extraïble]\n{TABLE}\n"
+        f"Claude's text, read from the PDF because the page has no extractable text]\n{TABLE}\n"
     ) in pdf_view(delivered)
     assert await store.get_pdf_check(delivered.sha256) == expected
 
@@ -355,7 +355,7 @@ async def test_every_chatgpt_call_of_a_debate_reads_through_the_same_check(
 
     # The prompts that compare the answers say where ChatGPT read Claude's reading.
     note = (
-        "Note: ChatGPT cannot open PDFs. It read «informe.pdf» as the text the server "
+        'Note: ChatGPT cannot open PDFs. It read "informe.pdf" as the text the server '
         "extracted, and page 2 as Claude read or described it: where both of you agree on "
         "that page, that is one reading, not two.\n\n<question>"
     )
@@ -427,7 +427,7 @@ async def test_a_page_claude_only_describes_is_read_through_claude(
     [answer] = calls(chatgpt, "answer")
     view = pdf_view(answer.attachments[0])
     # Its text as extracted (right), then Claude's description of the chart.
-    assert f"{TABLE}\n[Descripció de Claude · " in view and chart in view
+    assert f"{TABLE}\n[Claude's description · " in view and chart in view
     _, checked = of_type(events, PdfCheckChanged)
     assert (checked.state, checked.claude_pages, checked.hidden_pages) == ("checked", (2,), ())
     expected_reading = [reading(pdf_id, checked=True, claude_pages=[2])]
@@ -438,7 +438,7 @@ async def test_a_page_claude_only_describes_is_read_through_claude(
     for message in messages_of(store, done.turn_id, "chatgpt"):
         assert message.meta["pdf_reading"] == expected_reading
     note = (
-        "Note: ChatGPT cannot open PDFs. It read «informe.pdf» as the text the server "
+        'Note: ChatGPT cannot open PDFs. It read "informe.pdf" as the text the server '
         "extracted, and page 2 as Claude read or described it: where both of you agree on "
         "that page, that is one reading, not two."
     )
@@ -469,9 +469,9 @@ async def test_only_chatgpt_ever_sees_the_code_of_its_view_of_the_pdf(
 
     [answer] = calls(chatgpt, "answer")
     view = pdf_view(answer.attachments[0])
-    [code] = set(re.findall(r"\[Pàgina \d+ · ([0-9a-f]{16})", view))
-    assert f"[Pàgina 2 · {code}: text de Claude" in view
-    assert view.endswith(f"[Fi del fitxer {code}]\n")
+    [code] = set(re.findall(r"\[Page \d+ · ([0-9a-f]{16})", view))
+    assert f"[Page 2 · {code}: Claude's text" in view
+    assert view.endswith(f"[End of file {code}]\n")
     [revision] = calls(claude, "revision")
     [as_text] = revision.attachments
     assert as_text.mode == "text" and not sends_file(as_text)
@@ -517,7 +517,7 @@ async def test_a_failed_check_leaves_the_pdf_unchecked_and_the_turn_uncached(
     }
     [(delivered,)] = chatgpt.attachments
     assert delivered.pdf_check is None
-    assert "text extret pel servidor, sense contrastar" in pdf_view(delivered)
+    assert "text extracted by the server, unchecked" in pdf_view(delivered)
     [row] = check_rows(store, done.turn_id)
     assert (row.ok, row.error, row.usage) == (
         False,
@@ -594,7 +594,7 @@ async def test_a_truncated_check_keeps_the_pages_before_the_cut(
         CHECK_VERSION, "fake-claude", 3, 1, (PageFinding(1, "ok", visual="Un gràfic de barres."),)
     )
     view = pdf_view(delivered)
-    assert "Un gràfic de barres." in view and "[Pàgina 2 · " in view
+    assert "Un gràfic de barres." in view and "[Page 2 · " in view
 
 
 async def test_a_check_that_takes_too_long_leaves_the_pdf_unchecked(
@@ -861,10 +861,10 @@ async def test_the_demo_claude_does_not_check_the_pdf_for_a_real_chatgpt(
     [(delivered,)] = chatgpt.attachments
     assert delivered.pdf_check is None
     view = pdf_view(delivered)
-    assert "text extret pel servidor, sense contrastar" in view
-    assert "contrastat per Claude" not in view
-    assert "sense contrastar]\n(sense text extraïble)" in view
-    assert f"sense contrastar; pot tenir text que no es veu]\n{COSTS} {hidden}" in view
+    assert "text extracted by the server, unchecked" in view
+    assert "checked by Claude" not in view
+    assert "unchecked]\n(no extractable text)" in view
+    assert f"unchecked; may hold text that is not visible]\n{COSTS} {hidden}" in view
     [answer] = messages_of(store, done.turn_id, "chatgpt")
     assert answer.meta["pdf_reading"] == [
         reading(pdf_id, checked=False, unchecked_pages=[1, 2, 3], reason=reason)

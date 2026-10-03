@@ -5,7 +5,8 @@
   web/vite.config.ts (tests/server/test_server_http.py).
 - Every ``AOS_*`` variable the docs or the interface name exists (N24: the dialog of a
   rejected origin named one that does not).
-- The messages the docs quote are the ones the code sends (the refine turns' reasons).
+- The messages the docs quote are the ones the code sends (the refine turns' reasons, the
+  texts the models get with the attachments).
 - The README's deploy summary puts the Claude token where the app reads it (N25).
 - No stale statement comes back (N26): files that do not exist, a ``hello`` version
   that is not the package's, a login message the web never shows, a model list the
@@ -34,8 +35,12 @@ from agentic_os.domain import (
     RefineReasonCode,
 )
 from agentic_os.orchestrator import engine, pdf_check
+from agentic_os.orchestrator.memory import attachments_reference
+from agentic_os.orchestrator.store import JsonValue
 from agentic_os.orchestrator.types import EngineConfig
+from agentic_os.providers.base import Attachment, AttachmentKind
 from agentic_os.providers.claude_cli import CLAUDE_FAMILIES
+from agentic_os.providers.prompt_format import attachment_text, file_code, pdf_view, view_code
 from agentic_os.server import middleware, turns, ws
 from agentic_os.storage import MAX_LIST_LIMIT, MAX_SEARCH_LENGTH, RuntimeSettings
 from agentic_os.storage.models import (
@@ -385,6 +390,53 @@ def test_the_refine_answers_the_protocol_quotes_are_the_servers() -> None:
         with pytest.raises(ValueError) as refused:
             RuntimeSettings.from_wire({"refine": {"max_rounds": REFINE_ROUNDS_RANGE[0] - 1}})
         assert f"`{refused.value}`" in protocol
+
+
+# -- the texts for the models ---------------------------------------------------------
+
+ADR_ATTACHMENTS = "docs/adr/0009-attachments.md"
+ADR_I18N = "docs/adr/0011-internationalization.md"
+
+
+def example(kind: AttachmentKind, name: str, text: str, pages: int | None = None) -> Attachment:
+    """An attachment as the docs' examples name it (nothing reads its file)."""
+    return Attachment(
+        kind=kind,
+        name=name,
+        mime="",
+        sha256="0" * 64,
+        size=len(text),
+        path=ROOT / name,
+        pages=pages,
+        text=text,
+    )
+
+
+def test_the_texts_for_the_models_the_docs_quote_are_the_ones_they_get() -> None:
+    """The reference to a question's attachments in later turns, the lines that enclose
+    a file's text, the first line of ChatGPT's view of a PDF and the page headers of a
+    PDF's text, as the docs quote them (each code shortened: ``1f0c…``, ``9b2d…``): made
+    with Catalan in force, they are English, whatever the language of the turn."""
+    adr, i18n_adr, protocol = read(ADR_ATTACHMENTS), read(ADR_I18N), read(PROTOCOL)
+    snapshot: JsonValue = [
+        {"name": "report.pdf", "kind": "pdf", "pages": 12},
+        {"name": "photo.jpg", "kind": "image"},
+    ]
+    with i18n.use("ca"):
+        reference = attachments_reference(snapshot)
+        notes = example("text", "report.txt", "Notes")
+        opening, *_, closing = attachment_text(notes).rstrip("\n").split("\n")
+        report = example("pdf", "report.pdf", f"{attachments.page_header(1)}\nText", pages=12)
+        first = pdf_view(report).split("\n")[0]
+    assert f'"{reference}"' in adr and f"`{reference}`" in i18n_adr
+    for line in (opening, closing):
+        assert f"`{line.replace(file_code(notes), '1f0c…')}`" in adr, line
+    kind = opening.split(":")[0]  # "[File"
+    assert f"`{kind}: …]`" in i18n_adr and f"`{closing.replace(file_code(notes), '…')}`" in i18n_adr
+    assert f"`{first.replace(view_code(report), '9b2d…')}`" in adr
+    header = f"`{attachments.page_header(7).replace('7', 'N')}`"
+    assert header in adr and header in protocol and header in i18n_adr
+    assert f"`{attachments.cut_notice(attachments.MAX_PDF_TEXT_CHARS)}`" in protocol
 
 
 # -- AOS_* variables (N24) -------------------------------------------------------------

@@ -244,7 +244,7 @@ def check_prompt(attachment: Attachment, first: int, last: int) -> str:
     )
     return (
         f"{CHECK_INSTRUCTIONS}\n"
-        f"PDF: «{neutralize_tags(attachment.name)}», {_count(len(pages))}. {where}\n"
+        f'PDF: "{neutralize_tags(attachment.name)}", {_count(len(pages))}. {where}\n'
         f"Hints from the server's analysis of these pages: {_hints(chosen)}.\n\n"
         f"[Extracted text · {code}]\n{text}\n[End of extracted text {code}]\n"
     )

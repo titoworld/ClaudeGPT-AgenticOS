@@ -89,8 +89,9 @@ def canonical_messages(messages: Sequence[StoredMessage]) -> tuple[StoredMessage
 
 def attachments_reference(snapshot: JsonValue) -> str | None:
     """The line that stands for a question's attachments in later turns, from its
-    ``meta.attachments``: «[Adjunts: informe.pdf (PDF, 12 pàgines), foto.jpg (imatge)]»;
-    None without any (entries that are not attachments are skipped)."""
+    ``meta.attachments``: «[Attachments: report.pdf (PDF, 12 pages), photo.jpg (image)]»
+    (in English, like every text for the models); None without any (entries that are
+    not attachments are skipped)."""
     labels: list[str] = []
     for entry in snapshot if isinstance(snapshot, list) else []:
         if not isinstance(entry, dict):
@@ -100,7 +101,7 @@ def attachments_reference(snapshot: JsonValue) -> str | None:
             continue
         count = pages if isinstance(pages, int) and not isinstance(pages, bool) else None
         labels.append(attachment_label(name, kind, count))
-    return f"[Adjunts: {', '.join(labels)}]" if labels else None
+    return f"[Attachments: {', '.join(labels)}]" if labels else None
 
 
 def to_chat_turn(message: StoredMessage) -> ChatTurn:

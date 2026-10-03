@@ -69,9 +69,10 @@ _TAGGED = {
 }
 _ATTACHMENTS_SECTION = re.compile(r"\A<attachments>\n.*?\n</attachments>\n+", re.DOTALL)
 """The list of attachments before a solo or duel question (the prompt's own section)."""
-_ATTACHMENTS_REFERENCE = re.compile(r"\A\[(?:Adjunts|Attachments): [^\n]*\]\n")
+_ATTACHMENTS_REFERENCE = re.compile(r"\A\[(?:Attachments|Adjunts): [^\n]*\]\n")
 """The line that stands for a question's attachments in the history (the engine's
-``memory.py``: Catalan until its model-facing texts are English)."""
+``memory.attachments_reference``), in English, or in Catalan as it was written before
+the texts for the models were English."""
 _WORD_RE = re.compile(r"\S+\s*|\s+")
 _CHARS_PER_TOKEN = 4
 CHECK_REPLY = '{"end": true}'

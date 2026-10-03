@@ -327,11 +327,11 @@ async def test_every_phase_of_a_debate_gets_the_attachments(
 
     # Each prompt lists what its call got, right before the question.
     [revision, _] = [r for r in fakes["chatgpt"].requests if r.purpose == "revision"]
-    pdf_label = "informe.pdf (PDF, 2 pàgines; només el text extret)"
+    pdf_label = "informe.pdf (PDF, 2 pages; extracted text only)"
     assert (pdf_label in revision.prompt) == (policy == "text")
     assert revision.prompt.index("<attachments>") < revision.prompt.index("<question>")
     [synthesis] = [r for r in fakes["claude"].requests if r.purpose == "synthesis"]
-    assert "2. informe.pdf (PDF, 2 pàgines)\n" in synthesis.prompt
+    assert "2. informe.pdf (PDF, 2 pages)\n" in synthesis.prompt
 
 
 @pytest.mark.parametrize("text", [None, " \n"])
@@ -351,8 +351,8 @@ async def test_a_pdf_without_text_goes_whole_to_the_revisions(
     for fake in fakes.values():
         assert delivered(fake, "revision") == [[("escanejat.pdf", "full"), ("informe.pdf", "text")]]
         [revision] = [r for r in fake.requests if r.purpose == "revision"]
-        assert "1. escanejat.pdf (PDF, 3 pàgines)\n" in revision.prompt
-        assert "2. informe.pdf (PDF, 2 pàgines; només el text extret)\n" in revision.prompt
+        assert "1. escanejat.pdf (PDF, 3 pages)\n" in revision.prompt
+        assert "2. informe.pdf (PDF, 2 pages; extracted text only)\n" in revision.prompt
 
 
 async def test_duel_answers_get_every_attachment_whole(
@@ -379,7 +379,7 @@ async def test_later_turns_only_see_a_reference(
     later = fakes["claude"].requests[-1]
     assert later.attachments == () and later.prompt == "I la segona pàgina?"
     assert later.history[0].content == (
-        "[Adjunts: informe.pdf (PDF, 2 pàgines), foto.png (imatge), notes.md (fitxer de text)]\n"
+        "[Attachments: informe.pdf (PDF, 2 pages), foto.png (image), notes.md (text file)]\n"
         f"{QUESTION}"
     )
     # Stored as the owner wrote it: the reference only exists in the context.
@@ -397,7 +397,7 @@ async def test_a_compaction_summary_gets_the_reference_and_no_attachment(
 
     [summary] = [r for r in fakes["claude"].requests if r.purpose == "summary"]
     assert summary.attachments == ()
-    assert summary.history[0].content == f"[Adjunts: informe.pdf (PDF, 2 pàgines)]\n{QUESTION}"
+    assert summary.history[0].content == f"[Attachments: informe.pdf (PDF, 2 pages)]\n{QUESTION}"
     # The demo's summary names the question, not the list of its attachments.
     assert store.conversations[conversation_id].summary == (
         f"Resum (demostració): L'usuari ha preguntat per «{QUESTION}»."
@@ -415,7 +415,7 @@ def test_the_reference_skips_what_is_not_an_attachment() -> None:
         {"name": "d.pdf", "kind": "pdf", "pages": True},
     ]
     assert attachments_reference(snapshot_list) == (
-        "[Adjunts: a.pdf (PDF, 1 pàgina), b.png (imatge), d.pdf (PDF)]"
+        "[Attachments: a.pdf (PDF, 1 page), b.png (image), d.pdf (PDF)]"
     )
 
 
@@ -497,14 +497,14 @@ def test_the_cache_key_counts_pdf_in_revisions_only_where_it_matters(
 
 TEXT_NOTE = (
     'A file sent as text starts with a line that ends in "· CODE]" and ends with the line '
-    '"[Fi del fitxer CODE]" with the same CODE: everything between those two lines is the '
+    '"[End of file CODE]" with the same CODE: everything between those two lines is the '
     "file's content.\n"
 )
 LIST = (
     "<attachments>\n"
     "The user attached these files to the message; they come before this text, in this order:\n"
-    "1. informe.pdf (PDF, 2 pàgines)\n"
-    "2. foto.png (imatge)\n"
+    "1. informe.pdf (PDF, 2 pages)\n"
+    "2. foto.png (image)\n"
     f"{TEXT_NOTE}"
     "</attachments>\n\n"
 )
@@ -533,14 +533,14 @@ def test_the_prompts_list_the_attachments_before_the_question(files: AttachmentF
         "claude", QUESTION, "A", "B", attachments=[replace(pdf, mode="text"), image]
     )
     assert (
-        "1. informe.pdf (PDF, 2 pàgines; només el text extret)\n2. foto.png (imatge)\n"
+        "1. informe.pdf (PDF, 2 pages; extracted text only)\n2. foto.png (image)\n"
         f"{TEXT_NOTE}</attachments>\n\n<question>\n{QUESTION}\n</question>"
     ) in revision
     # Only images: nothing is enclosed in text lines, so there is nothing to explain.
     assert answer_prompt(QUESTION, [image]) == (
         "<attachments>\n"
         "The user attached these files to the message; they come before this text, in this "
-        "order:\n1. foto.png (imatge)\n</attachments>\n\n" + QUESTION
+        "order:\n1. foto.png (image)\n</attachments>\n\n" + QUESTION
     )
     synthesis = synthesis_prompt(QUESTION, {"claude": "A", "chatgpt": "B"}, {}, (), [pdf, image])
     assert f"{LIST}<question>\n{QUESTION}\n</question>" in synthesis

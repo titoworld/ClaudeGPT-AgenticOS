@@ -786,7 +786,7 @@ def input_items(
 ) -> list[JsonObject]:
     """``UserInput`` items of a call's turn: one per attachment, in order (an image as a
     ``localImage``, at its path in ``images`` (by SHA-256, see :func:`named_image`) or
-    else its stored path; a PDF as ``prompt_format.pdf_view``; a text file as its ``[Fitxer: ...]``
+    else its stored path; a PDF as ``prompt_format.pdf_view``; a text file as its ``[File: ...]``
     text), then the rendered transcript."""
     items: list[JsonObject] = []
     for attachment in request.attachments:

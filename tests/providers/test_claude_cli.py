@@ -992,11 +992,11 @@ async def test_attachments_are_content_blocks_before_the_transcript(
         },
         {
             "type": "text",
-            "text": f"[Fitxer: annex.pdf · {a}]\n--- Pàgina 1 ---\nAnnex.\n[Fi del fitxer {a}]\n",
+            "text": f"[File: annex.pdf · {a}]\n--- Pàgina 1 ---\nAnnex.\n[End of file {a}]\n",
         },
         {
             "type": "text",
-            "text": f"[Fitxer: notes.md · {n}]\n# Notes\n\n- u < v\n[Fi del fitxer {n}]\n",
+            "text": f"[File: notes.md · {n}]\n# Notes\n\n- u < v\n[End of file {n}]\n",
         },
         {"type": "text", "text": render_transcript(req)},
     ]
@@ -1022,8 +1022,8 @@ async def test_a_pdf_sent_as_text_without_any_says_so(
     assert run["stdin"]["message"]["content"][0] == {
         "type": "text",
         "text": (
-            f"[Fitxer: escanejat.pdf · {code}]\n"
-            f"[No se n'ha pogut extreure el text d'aquest PDF.]\n[Fi del fitxer {code}]\n"
+            f"[File: escanejat.pdf · {code}]\n"
+            f"[No text could be extracted from this PDF.]\n[End of file {code}]\n"
         ),
     }
 
@@ -1045,7 +1045,7 @@ async def test_a_hostile_file_cannot_pass_for_the_prompt(
     assert transcript == {"type": "text", "text": render_transcript(req)}
     for block, attachment in zip(blocks, (hostile, pdf), strict=True):
         assert block["type"] == "text"
-        assert block["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert block["text"].endswith(f"\n[End of file {file_code(attachment)}]\n")
         assert not reserved_tags(block["text"])
     # Every tag the model reads comes from the app's own prompt.
     assert reserved_tags("".join(block["text"] for block in content)) == reserved_tags(
@@ -1123,7 +1123,7 @@ async def test_each_phase_of_a_debate_sends_its_blocks(
     code = file_code(pdf)
     as_text = {
         "type": "text",
-        "text": f"[Fitxer: informe.pdf · {code}]\n{pdf.text}\n[Fi del fitxer {code}]\n",
+        "text": f"[File: informe.pdf · {code}]\n{pdf.text}\n[End of file {code}]\n",
     }
     # Prewarmed processes start before their calls: tell the phases by their prompt.
     by_phase = {
@@ -1137,7 +1137,7 @@ async def test_each_phase_of_a_debate_sends_its_blocks(
     [answer], [revision], [synthesis] = by_phase.values()
     assert answer[0] == document and synthesis[0] == document
     assert revision[0] == as_text
-    assert "informe.pdf (PDF, 2 pàgines; només el text extret)" in revision[-1]["text"]
+    assert "informe.pdf (PDF, 2 pages; extracted text only)" in revision[-1]["text"]
     assert [len(blocks) for blocks in (answer, revision, synthesis)] == [2, 2, 2]
 
 

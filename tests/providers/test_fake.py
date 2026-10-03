@@ -197,7 +197,8 @@ async def test_the_synthesis_and_the_summary_in_every_language(
     provider = FakeProvider("chatgpt", chunk_delay=0)
     prompt = synthesis_prompt(QUESTION, {"claude": "A", "chatgpt": "B"}, {})
     history = (
-        # The line that stands for a question's attachments is left out, in English too.
+        # The line that stands for a question's attachments is left out, in English and in
+        # the Catalan it was written in before the texts for the models were English.
         ChatTurn("user", "[Attachments: a.pdf (PDF)]\nFirst question"),
         ChatTurn("assistant", "An answer.", agent="chatgpt"),
         ChatTurn("user", "[Adjunts: b.pdf (PDF)]\nSecond question"),

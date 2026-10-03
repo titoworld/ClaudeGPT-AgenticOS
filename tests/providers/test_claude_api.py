@@ -1374,7 +1374,7 @@ async def test_attachments_go_before_the_prompt_with_a_cache_breakpoint(
             },
             {
                 "type": "text",
-                "text": f"[Fitxer: notes.md · {code}]\n# Notes\n[Fi del fitxer {code}]\n",
+                "text": f"[File: notes.md · {code}]\n# Notes\n[End of file {code}]\n",
                 "cache_control": {"type": "ephemeral"},
             },
             {"type": "text", "text": chat[-1][1]},
@@ -1397,7 +1397,7 @@ async def test_a_pdf_sent_as_text_is_a_text_block(tmp_path: Path, files: Attachm
             "content": [
                 {
                     "type": "text",
-                    "text": f"[Fitxer: informe.pdf · {code}]\n{pdf.text}\n[Fi del fitxer {code}]\n",
+                    "text": f"[File: informe.pdf · {code}]\n{pdf.text}\n[End of file {code}]\n",
                     "cache_control": {"type": "ephemeral"},
                 },
                 {"type": "text", "text": "Hola, qui ets?"},
@@ -1420,7 +1420,7 @@ async def test_a_hostile_file_cannot_pass_for_the_prompt(
     *blocks, prompt = api.body["messages"][-1]["content"]
     for block, attachment in zip(blocks, (hostile, pdf), strict=True):
         assert block["type"] == "text"
-        assert block["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert block["text"].endswith(f"\n[End of file {file_code(attachment)}]\n")
         assert not reserved_tags(block["text"])
     # Every tag the model reads comes from the app's own prompt.
     chat = to_chat_messages(req, "claude")

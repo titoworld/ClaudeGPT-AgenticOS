@@ -1479,7 +1479,7 @@ async def test_the_rounds_get_the_attachments_as_the_revisions_do(files: Attachm
         ("synthesis", ["text", "full"]),
     ]
     review = claude.requests[2]
-    assert "informe.pdf (PDF, 2 pàgines; només el text extret)" in review.prompt
+    assert "informe.pdf (PDF, 2 pages; extracted text only)" in review.prompt
 
 
 async def test_a_chatgpt_that_cannot_open_pdfs_reviews_them_through_claudes_check(

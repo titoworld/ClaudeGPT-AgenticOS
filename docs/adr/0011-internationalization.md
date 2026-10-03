@@ -39,6 +39,7 @@ Until now the documentation, the interface and every message of the server were 
 - No cache shared by every client keeps a translated text. It keeps the key and its parameters, and the text is made for each client (the agents' status, the models' descriptions).
 - The demo answers (the fake provider) are written in the turn's language.
 - The prompts stay in English and keep asking for the language of the user's message. The interface's language does not decide the language of the answers.
+- Everything else the server writes for the models is in English too, in every language of the interface: the labels of the attachments and the reference to them in later turns (`[Attachments: report.pdf (PDF, 12 pages), photo.jpg (image)]`), the lines that enclose a file's text (`[File: …]`, `[End of file …]`), ChatGPT's view of a PDF and the page headers of a PDF's extracted text (`--- Page N ---`). A PDF's text extracted before this change keeps its Catalan page headers: it is the file's stored text, and the models read it as it is.
 
 ## Alternatives considered
 
