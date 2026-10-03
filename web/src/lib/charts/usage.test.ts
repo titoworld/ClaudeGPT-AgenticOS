@@ -128,7 +128,7 @@ describe('categorical series', () => {
     expect(turnsData(stats()).map((x) => [x.label, x.values.count])).toEqual([
       ['Solo', 2],
       ['Duel', 1],
-      ['Debat', 4],
+      ['Consell', 4],
       ['Perfecciona', 3],
     ]);
   });

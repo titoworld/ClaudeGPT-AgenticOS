@@ -131,13 +131,13 @@ describe('Dashboard: the turns of each mode', () => {
     const el = await loaded();
     const turns = tile(el, 'Torns');
     expect(textOf(turns.querySelector('.value'))).toBe('4');
-    expect(textOf(turns.querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 2');
+    expect(textOf(turns.querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Consell 0 · Perfecciona 2');
   });
 
   it('reads 0 from a server that does not count them yet', async () => {
     data.stats = { ...cacheHeavy(), turns: { solo: 1, duel: 1, debate: 0 } as Stats['turns'] };
     const el = await loaded();
-    expect(textOf(tile(el, 'Torns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 0');
+    expect(textOf(tile(el, 'Torns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Consell 0 · Perfecciona 0');
   });
 });
 

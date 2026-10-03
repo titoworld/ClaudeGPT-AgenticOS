@@ -1,7 +1,6 @@
 // Per-browser preferences (localStorage) and system media preferences.
 
 import type { SceneQuality } from '../scene/types';
-import { i18n, textRecord } from './i18n/index.svelte';
 import { parseOverrides, type ModelOverrides } from './models';
 import type { Agent } from './protocol';
 
@@ -81,6 +80,3 @@ class Prefs {
 }
 
 export const prefs = new Prefs();
-
-/** Each level of the visual effects, in the language in force. */
-export const EFFECTS_LABEL: Record<SceneQuality, string> = textRecord(['high', 'low', 'off'], (q) => i18n.m.app.effects[q]);

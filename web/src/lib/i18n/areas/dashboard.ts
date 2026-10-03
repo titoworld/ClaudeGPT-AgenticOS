@@ -483,7 +483,7 @@ export const ca: typeof en = {
       `El prompt de sistema va primer i no canvia, així Anthropic i OpenAI en reaprofiten el càlcul. En aquest període s’han llegit **${read}** tokens de la seva memòria cau i se n’hi han escrit **${written}**. Compten com a tokens processats, cadascun al seu preu, i no com a estalvi.`,
   },
   savingKinds: { cache: 'Memòria cau', compaction: 'Compactació', early_stop: 'Parada per consens', unchanged: 'Sense canvis' },
-  modes: { solo: 'Solo', duel: 'Duel', debate: 'Debat', refine: 'Perfecciona' },
+  modes: { solo: 'Solo', duel: 'Duel', debate: 'Consell', refine: 'Perfecciona' },
   providerModes: { cli: 'Subscripció (CLI)', api: 'Clau d’API', fake: 'Simulat' },
   window: {
     of: (n: number, unit: WindowUnit) =>

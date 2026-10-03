@@ -148,7 +148,6 @@ export const en = {
     resets: (relative: string, when: string) => `Resets ${relative} (${when})`,
     now: 'now',
   },
-  effects: { high: 'High', low: 'Low', off: 'Off' },
   messages: {
     settingsNotLoaded: 'The settings have not loaded yet.',
     settingsConflict: 'The settings changed in another tab or device. Review them and save them again.',
@@ -348,7 +347,6 @@ export const es: typeof en = {
     resets: (relative: string, when: string) => `Se restablece ${relative} (${when})`,
     now: 'ahora',
   },
-  effects: { high: 'Altos', low: 'Bajos', off: 'Desactivados' },
   messages: {
     settingsNotLoaded: 'La configuración todavía no se ha cargado.',
     settingsConflict: 'La configuración ha cambiado en otra pestaña o dispositivo. Revísala y vuelve a guardarla.',
@@ -547,7 +545,6 @@ export const ca: typeof en = {
     resets: (relative: string, when: string) => `Es restableix ${relative} (${when})`,
     now: 'ara',
   },
-  effects: { high: 'Alts', low: 'Baixos', off: 'Desactivats' },
   messages: {
     settingsNotLoaded: "La configuració encara no s'ha carregat.",
     settingsConflict: 'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.',
