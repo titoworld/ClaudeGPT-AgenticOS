@@ -300,23 +300,23 @@ describe('the limits are the ones the protocol documents', () => {
     const numbers = (pattern: RegExp): number[] => {
       const match = pattern.exec(doc);
       expect(match, String(pattern)).not.toBeNull();
-      return match!.slice(1).map((n) => Number(n.replaceAll('.', '')));
+      return match!.slice(1).map((n) => Number(n.replaceAll(',', '')));
     };
-    expect(numbers(/com a molt (\d+) adjunts per missatge, i (\d+) MB entre tots/)).toEqual([
+    expect(numbers(/at most (\d+) attachments per message, and (\d+) MB in total/)).toEqual([
       MAX_ATTACHMENTS,
       MAX_TURN_ATTACHMENT_BYTES / 1_000_000,
     ]);
-    expect(numbers(/imatge: (\d+) MB i ([\d.]+) píxels per costat/)).toEqual([MAX_IMAGE_BYTES / 1_000_000, MAX_IMAGE_SIDE]);
-    expect(numbers(/més de ([\d.]+) píxels al costat llarg/)).toEqual([DOWNSCALE_EDGE]);
-    expect(numbers(/PDF: (\d+) MB i (\d+) pàgines/)).toEqual([MAX_PDF_BYTES / 1_000_000, MAX_PDF_PAGES]);
+    expect(numbers(/image: (\d+) MB and ([\d,]+) pixels per side/)).toEqual([MAX_IMAGE_BYTES / 1_000_000, MAX_IMAGE_SIDE]);
+    expect(numbers(/over ([\d,]+) pixels on the long side/)).toEqual([DOWNSCALE_EDGE]);
+    expect(numbers(/PDF: (\d+) MB and (\d+) pages/)).toEqual([MAX_PDF_BYTES / 1_000_000, MAX_PDF_PAGES]);
     expect(numbers(/text: (\d+) kB/)).toEqual([MAX_TEXT_BYTES / 1000]);
-    expect(numbers(/com a molt (\d+) kB i (\d+) píxels per costat/)).toEqual([MAX_THUMBNAIL_BYTES / 1000, MAX_THUMBNAIL_SIDE]);
+    expect(numbers(/of at most (\d+) kB and (\d+) pixels per side/)).toEqual([MAX_THUMBNAIL_BYTES / 1000, MAX_THUMBNAIL_SIDE]);
     expect([MAX_ATTACHMENTS, MAX_TURN_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, DOWNSCALE_EDGE]).toEqual([5, 20_000_000, 7_000_000, 2576]);
   });
 
   it('the extensions of text files', async () => {
     const doc = await protocolDoc();
-    const list = /amb una d'aquestes extensions: (.+?)\. Sempre/.exec(doc)?.[1] ?? '';
+    const list = /with one of these extensions: (.+?)\. It is always/.exec(doc)?.[1] ?? '';
     const documented = [...list.matchAll(/`([a-z]+)`/g)].map((m) => m[1]);
     expect(documented.length).toBeGreaterThan(30);
     expect(new Set(documented)).toEqual(new Set(TEXT_EXTENSIONS));
