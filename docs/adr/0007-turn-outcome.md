@@ -1,74 +1,74 @@
-# 0007. Resultat del torn
+# 0007. Turn outcome
 
-- Estat: Proposat
-- Data: 2026-09-28
+- Status: Proposed
+- Date: 2026-09-28
 
 ## Context
 
-La validació de l'auditoria del 28 de setembre de 2026 (punts 9 i 14, i problema nou N10) va mostrar que l'estat final d'un torn només existia com a esdeveniment efímer del WebSocket. No es desava enlloc, i en recarregar la conversa el client l'havia d'endevinar a partir dels missatges desats.
+The validation of the audit of 28 September 2026 (points 9 and 14, and new issue N10) showed that the final state of a turn only existed as an ephemeral WebSocket event. It was not stored anywhere, and on reloading the conversation the client had to guess it from the stored messages.
 
-- **Punt 9. El cost d'una fallada tardana es perdia en recarregar.** En un duel, una crida facturada que fallava després que l'altre agent hagués desat la resposta no quedava a cap missatge: una negativa de l'API de Claude amb ús, o una resposta buida facturada de qualsevol proveïdor. L'ús de les crides sense missatge (`unstored_usage`) s'escrivia als missatges finals en desar-los, i els missatges no es tornen a escriure. En directe, el torn valia 0,029316 USD; recarregat, 0,003116. Només afectava el torn recarregat: les estadístiques globals surten de la taula d'ús i eren correctes. Ja constava com a limitació a PROTOCOL.md.
-- **Punt 14. Un duel cancel·lat es reconstruïa com a completat.** Si un agent havia desat la resposta i després arribava una cancel·lació, una aturada o un reinici, les dades desades eren idèntiques a les d'un duel completat amb un agent fallit. També es perdia el motiu de la fallada d'un agent.
-- **N10. El cost d'un torn fallit no sortia al torn.** Ni en directe (`turn.failed` no portava ús) ni en recarregar, tot i que comptava a les estadístiques.
+- **Point 9. The cost of a late failure was lost on reload.** In a duel, a billed call that failed after the other agent had stored its answer did not end up in any message: a refusal from Claude's API with usage, or a billed empty answer from any provider. The usage of the calls without a message (`unstored_usage`) was written to the final messages when they were stored, and messages are not written again. Live, the turn cost 0.029316 USD; reloaded, 0.003116. It only affected the reloaded turn: the global statistics come from the usage table and were correct. It was already listed as a limitation in PROTOCOL.md.
+- **Point 14. A cancelled duel was rebuilt as completed.** If an agent had stored its answer and then a cancellation, a shutdown or a restart came, the stored data were identical to those of a completed duel with a failed agent. The reason for an agent's failure was lost too.
+- **N10. The cost of a failed turn did not show in the turn.** Neither live (`turn.failed` carried no usage) nor on reload, even though it counted in the statistics.
 
-## Decisió
+## Decision
 
-### El resultat es desa a la pregunta
+### The outcome is stored in the question
 
-- La pregunta és el registre del torn (el seu id és el `turn_id`). El motor la crea amb `meta.outcome = null`.
-- Quan el torn acaba, el motor decideix com ha acabat, una sola vegada, i ho escriu a la pregunta **abans** d'emetre l'esdeveniment final. El resultat és:
-  - `status`: `completed`, `failed` o `cancelled`.
-  - `error` (`{kind, message}`): només si és `failed`, el mateix que porta `turn.failed`.
-  - `failures`: les fallades de crida del torn (les de `stream.failed`), en l'ordre en què van passar, amb `{agent, kind, message, round}`. Pot ser buida.
-  - `usage`: el total del torn. Inclou totes les crides facturades: els resums de compactació, les crides fallides, els intents declinats abans d'un fallback ([ADR 0008](0008-token-accounting.md)) i les crides que no han desat cap missatge. És el mateix valor que porta l'esdeveniment final.
-  - `savings`: el mateix de `turn.completed`. Un torn fallit o cancel·lat no registra estalvis, com fins ara, i hi porta zeros. L'excepció és un torn que es cancel·la quan ja estava desant els estalvis, just abans d'acabar, amb tots els missatges desats: les files d'estalvi s'escriuen senceres (en una tasca pròpia, com el resultat), i el resultat les porta i s'escriu després. Així coincideix amb el que compta el tauler.
-  - `consensus`: el d'un debat completat; `null` en els altres casos.
-  - `final_message_ids`: els missatges finals desats. En un duel cancel·lat, la resposta que ja s'havia desat.
-  - `cached`: si el torn s'ha servit des de la memòria cau de torns.
-- El contracte del magatzem (`orchestrator/store.py`) té `set_turn_outcome(question_message_id, outcome)`:
-  - SQLite l'escriu amb `json_set(meta, '$.outcome', json(?))` (JSON1, que ja es fa servir a les estadístiques). Queda com a objecte JSON, sense tocar les altres claus ni l'`updated_at` de la conversa. No cal cap migració d'esquema.
-  - Un id que no és una pregunta, o que ja no existeix perquè s'ha esborrat la conversa, no canvia res.
-  - `InMemoryStore` fa el mateix.
-- Camins del motor:
-  - `completed`: en acabar el torn, també quan se serveix des de la memòria cau.
-  - `failed`: a tots els camins que emeten `turn.failed`, també un error intern. Un `CancelledError` que no ve de cap cancel·lació (el llança una crida pel seu compte, per un error d'un proveïdor o d'una biblioteca) és un error intern: en directe arriba `turn.failed`, i el resultat desat diu el mateix.
-  - `cancelled`: quan es cancel·la el torn (el propietari l'atura, s'esborra la conversa o el servidor s'atura).
-- Cancel·lació:
-  - El motor primer atura les crides del torn. Després decideix el resultat i l'escriu en una tasca pròpia, que espera amb `asyncio.shield`. Finalment torna a llançar el `CancelledError`, que sempre es propaga.
-  - Un torn es cancel·la una sola vegada. La capa web no torna a cancel·lar un torn que ja s'està aturant: ni amb un segon `turn.cancel` (el propietari que torna a prémer «Atura») ni en aturar-se el servidor. A més, si el consumidor d'`Engine.run` es torna a cancel·lar mentre el torn s'atura, el motor no l'interromp: espera que el torn acabi (que les crides s'aturin, cosa que en una CLI pot trigar uns segons, i que el resultat quedi escrit) i després deixa continuar el `CancelledError`. Així, `turn.cancelled` arriba sempre després del resultat desat, amb el mateix `usage`, i cap escriptura del torn no arriba a una base de dades que el servidor ja ha tancat.
-  - L'escriptura segueix protegida amb `asyncio.shield`: si la tasca del torn es tornés a cancel·lar mentre s'escriu el resultat, deixaria d'esperar, però l'escriptura acabaria igualment.
-  - Si la cancel·lació arriba mentre s'escriu un resultat ja decidit (`completed` o `failed`), es conserva aquest: un resultat no se sobreescriu mai.
-- Si l'escriptura falla, queda registrat al log i el torn no falla. La pregunta es queda amb `null`.
+- The question is the turn's record (its id is the `turn_id`). The engine creates it with `meta.outcome = null`.
+- When the turn ends, the engine decides how it ended, only once, and writes it to the question **before** emitting the final event. The outcome is:
+  - `status`: `completed`, `failed` or `cancelled`.
+  - `error` (`{kind, message}`): only if it is `failed`, the same one `turn.failed` carries.
+  - `failures`: the turn's call failures (those of `stream.failed`), in the order they happened, with `{agent, kind, message, round}`. It can be empty.
+  - `usage`: the turn's total. It includes every billed call: the compaction summaries, the failed calls, the attempts declined before a fallback ([ADR 0008](0008-token-accounting.md)) and the calls that stored no message. It is the same value the final event carries.
+  - `savings`: the same as in `turn.completed`. A failed or cancelled turn records no savings, as before, and carries zeros. The exception is a turn that is cancelled when it was already storing its savings, just before ending, with all its messages stored: the savings rows are written whole (in a task of their own, like the outcome), and the outcome carries them and is written afterwards. That way it matches what the dashboard counts.
+  - `consensus`: that of a completed debate; `null` in the other cases.
+  - `final_message_ids`: the final messages stored. In a cancelled duel, the answer that had already been stored.
+  - `cached`: whether the turn was served from the turn cache.
+- The store's contract (`orchestrator/store.py`) has `set_turn_outcome(question_message_id, outcome)`:
+  - SQLite writes it with `json_set(meta, '$.outcome', json(?))` (JSON1, which the statistics already use). It stays a JSON object, without touching the other keys or the conversation's `updated_at`. No schema migration is needed.
+  - An id that is not a question, or that no longer exists because the conversation was deleted, changes nothing.
+  - `InMemoryStore` does the same.
+- The engine's paths:
+  - `completed`: when the turn finishes, also when it is served from the cache.
+  - `failed`: on every path that emits `turn.failed`, an internal error included. A `CancelledError` that does not come from any cancellation (a call raises it on its own, because of an error of a provider or of a library) is an internal error: live, `turn.failed` arrives, and the stored outcome says the same.
+  - `cancelled`: when the turn is cancelled (the owner stops it, the conversation is deleted or the server shuts down).
+- Cancellation:
+  - The engine first stops the turn's calls. Then it decides the outcome and writes it in a task of its own, which it awaits with `asyncio.shield`. Finally, it raises the `CancelledError` again, which always propagates.
+  - A turn is cancelled only once. The web layer does not cancel a turn that is already stopping again: neither on a second `turn.cancel` (the owner pressing "Stop" again) nor when the server shuts down. Besides, if the consumer of `Engine.run` is cancelled again while the turn is stopping, the engine does not interrupt it: it waits for the turn to end (for the calls to stop, which on a CLI can take a few seconds, and for the outcome to be written) and then lets the `CancelledError` go on. That way, `turn.cancelled` always arrives after the outcome has been stored, with the same `usage`, and no write of the turn reaches a database that the server has already closed.
+  - The write is still protected with `asyncio.shield`: if the turn's task were cancelled again while the outcome is being written, it would stop waiting, but the write would finish anyway.
+  - If the cancellation arrives while an outcome that was already decided (`completed` or `failed`) is being written, that one is kept: an outcome is never overwritten.
+- If the write fails, it is logged and the turn does not fail. The question stays `null`.
 
-### Esdeveniments
+### Events
 
-- `stream.failed` porta `usage` opcional: el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text). No hi és si no se sap que s'hagi facturat res.
-- `turn.failed` i `turn.cancelled` porten `usage`: el total del torn, el mateix valor que `outcome.usage`. Val zero si el torn falla abans de cap crida.
-- `turn.cancelled` l'emet la capa web quan s'acaba la tasca del torn, que no acaba fins que el resultat s'ha desat (vegeu «Cancel·lació»). El motor li fa arribar el resultat amb una funció, `on_outcome` d'`Engine.run`, que crida tan bon punt el decideix.
+- `stream.failed` carries an optional `usage`: what the failed call billed, with the cost (a refusal, an empty answer, the output limit used up without any text). It is not there if nothing is known to have been billed.
+- `turn.failed` and `turn.cancelled` carry `usage`: the turn's total, the same value as `outcome.usage`. It is zero if the turn fails before any call.
+- `turn.cancelled` is emitted by the web layer when the turn's task ends, which does not happen until the outcome has been stored (see "Cancellation"). The engine hands it the outcome with a function, the `on_outcome` of `Engine.run`, which it calls as soon as it has decided the outcome.
 
-### Reconstrucció al client (`web/`)
+### Rebuilding in the client (`web/`)
 
-- Si `outcome` hi és, s'usa: l'estat, el total (sense tornar a sumar `compaction_usage` ni `unstored_usage`), les fallades a les targetes dels agents amb el motiu, i un avís si es va cancel·lar.
-- Si `outcome` és `null`, el torn no va acabar (una caiguda o un reinici): «Aquest torn no es va completar».
-- Si la clau no hi és (torns desats abans d'aquesta decisió), es manté la reconstrucció d'abans.
-- Els missatges finals continuen portant `unstored_usage` per a les reconstruccions sense `outcome`. El total d'un torn nou, però, és `outcome.usage`.
+- If `outcome` is there, it is used: the status, the total (without adding `compaction_usage` or `unstored_usage` again), the failures on the agents' cards with their reason, and a notice if the turn was cancelled.
+- If `outcome` is `null`, the turn did not finish (a crash or a restart): "This turn was not completed".
+- If the key is not there (turns stored before this decision), the earlier rebuild is kept.
+- The final messages still carry `unstored_usage` for the rebuilds without `outcome`. The total of a new turn, however, is `outcome.usage`.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **Tornar a escriure `unstored_usage` a l'últim missatge final quan arriba una fallada tardana:** resol el punt 9, però no el 14 (un duel cancel·lat i un de completat continuarien sent iguals) ni N10 (un torn fallit no té cap missatge final on escriure-ho).
-- **Una taula `turns` nova:** seria més neta per consultar, però caldria una migració d'esquema i un canvi a l'API de converses. La pregunta ja és el registre del torn, viatja amb la conversa i les seves metadades ja es llegeixen amb JSON1.
-- **Deduir l'estat de la taula `usage`:** les files no diuen si el torn es va cancel·lar ni per què va fallar, i es conserven encara que s'esborri la conversa.
-- **Escriure el resultat després de l'esdeveniment final:** un client que recarregués la conversa de seguida podria llegir `null` d'un torn acabat. S'escriu abans, i el cost és una escriptura curta abans de `turn.completed`.
-- **Que el motor emeti `turn.cancelled`:** un cop cancel·lat, el motor no pot emetre res més sense empassar-se la cancel·lació. Per això el resultat arriba a la capa web amb `on_outcome`.
-- **Que un segon «Atura», o l'aturada del servidor, interrompin un torn que ja s'atura:** el servidor respondria uns segons abans, però `turn.cancelled` sortiria sense el cost i abans que el resultat estigués desat (una recàrrega just després mostraria el torn com a no completat), i l'escriptura del resultat podria trobar la base de dades ja tancada.
+- **Writing `unstored_usage` again to the last final message when a late failure arrives:** it fixes point 9, but neither point 14 (a cancelled duel and a completed one would still look the same) nor N10 (a failed turn has no final message to write it to).
+- **A new `turns` table:** it would be cleaner to query, but it would need a schema migration and a change to the conversations API. The question is already the turn's record, it travels with the conversation, and its metadata are already read with JSON1.
+- **Deriving the status from the `usage` table:** the rows do not say whether the turn was cancelled nor why it failed, and they are kept even if the conversation is deleted.
+- **Writing the outcome after the final event:** a client that reloaded the conversation at once could read `null` for a finished turn. It is written before, and the cost is a short write before `turn.completed`.
+- **Having the engine emit `turn.cancelled`:** once cancelled, the engine cannot emit anything else without swallowing the cancellation. That is why the outcome reaches the web layer through `on_outcome`.
+- **Letting a second "Stop", or the server's shutdown, interrupt a turn that is already stopping:** the server would answer a few seconds earlier, but `turn.cancelled` would go out without the cost and before the outcome was stored (a reload right afterwards would show the turn as not completed), and the write of the outcome could find the database already closed.
 
-## Conseqüències
+## Consequences
 
-- Un torn recarregat mostra el mateix que en directe: l'estat, el total i les fallades. En el cas de l'auditoria, el duel val 0,029316 USD en directe, recarregat i a la taula d'ús.
-- Un torn que no va acabar (una caiguda, un reinici) es distingeix d'un d'antic: `null` en lloc d'absent.
-- `turn.failed` i `turn.cancelled` mostren en directe el cost del torn.
-- Cada torn fa una escriptura més a SQLite (un `UPDATE` petit) abans de l'esdeveniment final.
-- En la finestra de pocs mil·lisegons en què s'escriu el resultat, una cancel·lació pot fer que en directe es vegi `turn.cancelled` i que el resultat desat sigui `completed`. Tots els missatges del torn ja s'havien desat.
-- Un segon «Atura», o l'aturada del servidor mentre un torn s'atura, no avancen `turn.cancelled`: arriba quan el torn s'ha acabat d'aturar. En aturar-se, el servidor espera els torns que s'estan aturant, tant com trigui cada proveïdor a aturar una crida (com a molt uns segons en una CLI, que primer rep `SIGTERM` i després `SIGKILL`).
-- Canvien els contractes interns i el protocol: `Store.set_turn_outcome`, `TurnOutcome` i `TurnFailure` (`orchestrator/events.py`), `on_outcome` d'`Engine.run` i de `TurnRunner`, i `usage` a `stream.failed`, `turn.failed` i `turn.cancelled` ([PROTOCOL.md](../PROTOCOL.md) i `web/src/lib/protocol.ts`).
-- Aquesta decisió és una proposta fins que el propietari l'accepti.
+- A reloaded turn shows the same as it did live: the status, the total and the failures. In the audit's case, the duel costs 0.029316 USD live, reloaded and in the usage table.
+- A turn that did not finish (a crash, a restart) is told apart from an old one: `null` instead of a missing key.
+- `turn.failed` and `turn.cancelled` show the turn's cost live.
+- Each turn makes one more write to SQLite (a small `UPDATE`) before the final event.
+- In the window of a few milliseconds in which the outcome is written, a cancellation can make `turn.cancelled` show live while the stored outcome is `completed`. All the turn's messages had already been stored.
+- A second "Stop", or the server shutting down while a turn is stopping, does not bring `turn.cancelled` forward: it arrives when the turn has finished stopping. When shutting down, the server waits for the turns that are stopping, for as long as each provider takes to stop a call (a few seconds at most on a CLI, which first gets `SIGTERM` and then `SIGKILL`).
+- The internal contracts and the protocol change: `Store.set_turn_outcome`, `TurnOutcome` and `TurnFailure` (`orchestrator/events.py`), the `on_outcome` of `Engine.run` and of `TurnRunner`, and `usage` in `stream.failed`, `turn.failed` and `turn.cancelled` ([PROTOCOL.md](../PROTOCOL.md) and `web/src/lib/protocol.ts`).
+- This decision is a proposal until the owner accepts it.

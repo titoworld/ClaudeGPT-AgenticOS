@@ -53,12 +53,11 @@ def read(relative: str) -> str:
 
 
 def value(text: str) -> int:
-    """A whole number as the docs write it: ``200,000`` (English thousands), ``200.000``
-    (Catalan thousands, in the documents still in Catalan), ``4 KiB``."""
-    match = re.fullmatch(r"([\d.,]+)(?: ([KM])iB)?", text)
+    """A whole number as the docs write it: ``200,000``, ``4 KiB``, ``4401`` (a code)."""
+    match = re.fullmatch(r"(\d+|\d{1,3}(?:,\d{3})+)(?: ([KM])iB)?", text)
     assert match, text
     factor = {"K": 1024, "M": 1024 * 1024}.get(match.group(2) or "", 1)
-    return int(match.group(1).replace(".", "").replace(",", "")) * factor
+    return int(match.group(1).replace(",", "")) * factor
 
 
 def field_bound(name: str, bound: str) -> int:
@@ -107,29 +106,29 @@ assert (TINY_POINTS, OFFPAGE_POINTS) == (attachments.TINY_POINTS, attachments.OF
 
 DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     # WebSocket close codes and limits.
-    (PROTOCOL, r"- `(\d+)` si no hi ha sessió", ws.CLOSE_UNAUTHORIZED),
-    (PROTOCOL, r"- `(\d+)` si l'origen no és vàlid", ws.CLOSE_FORBIDDEN_ORIGIN),
-    (PROTOCOL, r"- `(\d+)` si el client no rep prou ràpid", ws.CLOSE_TOO_SLOW),
-    (PROTOCOL, r"- `(\d+)` si hi ha un error intern", ws.CLOSE_INTERNAL_ERROR),
-    (PROTOCOL, r"té ([\d.]+) missatges pendents d'enviar", ws.SEND_QUEUE_SIZE),
-    (PROTOCOL, r"o ([\d.]+) esdeveniments o més", ws.MAX_PENDING_EVENTS),
+    (PROTOCOL, r"- `(\d+)` if there is no session", ws.CLOSE_UNAUTHORIZED),
+    (PROTOCOL, r"- `(\d+)` if the origin is not valid", ws.CLOSE_FORBIDDEN_ORIGIN),
+    (PROTOCOL, r"- `(\d+)` if the client does not receive fast enough", ws.CLOSE_TOO_SLOW),
+    (PROTOCOL, r"- `(\d+)` if there is an internal error", ws.CLOSE_INTERNAL_ERROR),
+    (PROTOCOL, r"it has ([\d,]+) messages waiting to be sent", ws.SEND_QUEUE_SIZE),
+    (PROTOCOL, r"or ([\d,]+) events or more", ws.MAX_PENDING_EVENTS),
     (
         PROTOCOL,
-        r"Cap missatge del client no pot passar de ([\d.]+) caràcters",
+        r"No client message can exceed ([\d,]+) characters",
         ws.MAX_MESSAGE_CHARS,
     ),
-    (PROTOCOL, r"la torna a comprovar cada (\d+) s\b", int(ws.SESSION_CHECK_SECONDS)),
+    (PROTOCOL, r"checks it again every (\d+) s\b", int(ws.SESSION_CHECK_SECONDS)),
     (
         PROTOCOL,
-        r"La pregunta \(`text`\) pot tenir com a molt ([\d.]+) caràcters",
+        r"The question \(`text`\) can have at most ([\d,]+) characters",
         EngineConfig().max_question_chars,
     ),
-    (PROTOCOL, r"Límit: (\d+) torns simultanis", turns.MAX_CONCURRENT_TURNS),
-    (PROTOCOL, r"acabats fa menys de (\d+) minuts", int(turns.RETENTION_SECONDS // 60)),
+    (PROTOCOL, r"Limit: (\d+) simultaneous turns", turns.MAX_CONCURRENT_TURNS),
+    (PROTOCOL, r"ended less than (\d+) minutes ago", int(turns.RETENTION_SECONDS // 60)),
     # HTTP bodies.
-    (PROTOCOL, r"`413` cos massa gran: com a molt (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
-    (PROTOCOL, r"o (\d+ [KM]iB) a `POST /api/auth/login`", LOGIN_BODY),
-    (PROTOCOL, r"`408` si el cos no arriba sencer en (\d+) s", BODY_SECONDS),
+    (PROTOCOL, r"`413` body too large: at most (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
+    (PROTOCOL, r"or (\d+ [KM]iB) on `POST /api/auth/login`", LOGIN_BODY),
+    (PROTOCOL, r"`408` if the body does not arrive whole within (\d+) s", BODY_SECONDS),
     (ARCHITECTURE, r"Request bodies have a maximum of (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
     (ARCHITECTURE, r"\((\d+ [KM]iB) for logging in", LOGIN_BODY),
     (ARCHITECTURE, r"has not arrived whole within (\d+) s\b", BODY_SECONDS),
@@ -137,51 +136,51 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (DEPLOYMENT, r"\((\d+ [KM]iB) for the login", LOGIN_BODY),
     (DEPLOYMENT, r"has not arrived whole within (\d+) seconds", BODY_SECONDS),
     # Attachments.
-    (PROTOCOL, r"; (\d+) s a `PUT /api/attachments`", UPLOAD_SECONDS),
-    (PROTOCOL, r"o (\d+) MB a `PUT /api/attachments`", UPLOAD_MB),
+    (PROTOCOL, r"; (\d+) s on `PUT /api/attachments`", UPLOAD_SECONDS),
+    (PROTOCOL, r"or (\d+) MB on `PUT /api/attachments`", UPLOAD_MB),
     (ARCHITECTURE, r"has a limit of its own: (\d+) MB", UPLOAD_MB),
     (ARCHITECTURE, r"has a limit of its own: \d+ MB and (\d+) s\b", UPLOAD_SECONDS),
     (DEPLOYMENT, r"has a limit of its own: (\d+) MB", UPLOAD_MB),
     (DEPLOYMENT, r"has a limit of its own: \d+ MB and (\d+) seconds", UPLOAD_SECONDS),
-    (PROTOCOL, r"com a molt (\d+) adjunts per missatge", attachments.MAX_ATTACHMENTS),
-    (PROTOCOL, r"com a molt (\d+), cadascun un sol cop", attachments.MAX_ATTACHMENTS),
+    (PROTOCOL, r"at most (\d+) attachments per message", attachments.MAX_ATTACHMENTS),
+    (PROTOCOL, r"at most (\d+), each one once", attachments.MAX_ATTACHMENTS),
     (ARCHITECTURE, r"at most (\d+) and \d+ MB in all", attachments.MAX_ATTACHMENTS),
-    (PROTOCOL, r"i (\d+) MB entre tots", megabytes(attachments.MAX_TURN_BYTES)),
+    (PROTOCOL, r"and (\d+) MB in total", megabytes(attachments.MAX_TURN_BYTES)),
     (ARCHITECTURE, r"and (\d+) MB in all", megabytes(attachments.MAX_TURN_BYTES)),
-    (PROTOCOL, r"sumen més de (\d+) MB", megabytes(attachments.MAX_TURN_BYTES)),
-    (PROTOCOL, r"imatge: (\d+) MB", megabytes(attachments.MAX_IMAGE_BYTES)),
-    (PROTOCOL, r"imatge: \d+ MB i ([\d.]+) píxels", attachments.MAX_IMAGE_SIDE),
+    (PROTOCOL, r"adding up to more than (\d+) MB", megabytes(attachments.MAX_TURN_BYTES)),
+    (PROTOCOL, r"image: (\d+) MB", megabytes(attachments.MAX_IMAGE_BYTES)),
+    (PROTOCOL, r"image: \d+ MB and ([\d,]+) pixels", attachments.MAX_IMAGE_SIDE),
     (PROTOCOL, r"PDF: (\d+) MB", megabytes(attachments.MAX_PDF_BYTES)),
-    (PROTOCOL, r"PDF: \d+ MB i (\d+) pàgines", attachments.MAX_PDF_PAGES),
+    (PROTOCOL, r"PDF: \d+ MB and (\d+) pages", attachments.MAX_PDF_PAGES),
     (PROTOCOL, r"text: (\d+) kB", kilobytes(attachments.MAX_TEXT_BYTES)),
-    (PROTOCOL, r"de més de ([\d.]+) píxels al costat llarg", attachments.DOWNSCALE_EDGE),
-    (PROTOCOL, r"reduïda a ([\d.]+) píxels al costat llarg", attachments.DOWNSCALE_EDGE),
-    (PROTOCOL, r"com a molt ([\d.]+), amb `\(w', h'\)`", attachments.MAX_IMAGE_TOKENS),
-    (PROTOCOL, r"PDF, ([\d.]+) per pàgina", attachments.PDF_PAGE_TOKENS),
-    (PROTOCOL, r"que decideixen els primers (\d+) bytes", attachments.SNIFF_BYTES),
-    (PROTOCOL, r"com a molt (\d+) caràcters \(un de més llarg", attachments.MAX_NAME_LENGTH),
-    (PROTOCOL, r"s'esborra al cap de (\d+) h\b", ORPHAN_HOURS),
-    (PROTOCOL, r"en un procés a part, com a molt (\d+) s", int(attachments.PDF_TIMEOUT_SECONDS)),
+    (PROTOCOL, r"over ([\d,]+) pixels on the long side", attachments.DOWNSCALE_EDGE),
+    (PROTOCOL, r"shrunk to ([\d,]+) pixels on the long side", attachments.DOWNSCALE_EDGE),
+    (PROTOCOL, r"at most ([\d,]+), with `\(w', h'\)`", attachments.MAX_IMAGE_TOKENS),
+    (PROTOCOL, r"PDF, ([\d,]+) per page", attachments.PDF_PAGE_TOKENS),
+    (PROTOCOL, r"which the first (\d+) bytes decide", attachments.SNIFF_BYTES),
+    (PROTOCOL, r"at most (\d+) characters \(a longer one", attachments.MAX_NAME_LENGTH),
+    (PROTOCOL, r"is deleted after (\d+) h\b", ORPHAN_HOURS),
+    (PROTOCOL, r"in a separate process, for at most (\d+) s", int(attachments.PDF_TIMEOUT_SECONDS)),
     (DEPLOYMENT, r"limits on time \((\d+) seconds\)", int(attachments.PDF_TIMEOUT_SECONDS)),
-    (PROTOCOL, r"Si passa d'([\d.]+) caràcters", attachments.MAX_PDF_TEXT_CHARS),
+    (PROTOCOL, r"If it exceeds ([\d,]+) characters", attachments.MAX_PDF_TEXT_CHARS),
     (
         PROTOCOL,
-        r"miniatura: PNG o WebP, com a molt (\d+) kB",
+        r"thumbnail: PNG or WebP, at most (\d+) kB",
         kilobytes(attachments.MAX_THUMBNAIL_BYTES),
     ),
-    (PROTOCOL, r"de com a molt (\d+) kB i \d+ píxels", kilobytes(attachments.MAX_THUMBNAIL_BYTES)),
-    (PROTOCOL, r"de com a molt \d+ kB i (\d+) píxels", attachments.MAX_THUMBNAIL_SIDE),
+    (PROTOCOL, r"of at most (\d+) kB and \d+ pixels", kilobytes(attachments.MAX_THUMBNAIL_BYTES)),
+    (PROTOCOL, r"of at most \d+ kB and (\d+) pixels", attachments.MAX_THUMBNAIL_SIDE),
     # The pages of a PDF, and Claude's check of its text for ChatGPT.
-    (PROTOCOL, r"`no_text`: menys de (\d+) lletres", pdf_facts.NO_TEXT_LETTERS),
-    (PROTOCOL, r"`garbled`: (\d+) caràcters trencats o més", pdf_facts.GARBAGE_MIN),
-    (PROTOCOL, r"i almenys el (\d+) % del text", GARBAGE_PERCENT),
-    (PROTOCOL, r"`hidden`: (\d+) caràcters o més", pdf_facts.HIDDEN_MIN),
-    (PROTOCOL, r"més petit d'(\d+) punt", TINY_POINTS),
+    (PROTOCOL, r"`no_text`: fewer than (\d+) letters", pdf_facts.NO_TEXT_LETTERS),
+    (PROTOCOL, r"`garbled`: (\d+) broken characters or more", pdf_facts.GARBAGE_MIN),
+    (PROTOCOL, r"and at least (\d+)% of the text", GARBAGE_PERCENT),
+    (PROTOCOL, r"`hidden`: (\d+) characters or more", pdf_facts.HIDDEN_MIN),
+    (PROTOCOL, r"smaller than (\d+) point", TINY_POINTS),
     (ARCHITECTURE, r"smaller than (\d+) point", TINY_POINTS),
-    (PROTOCOL, r"l'origen a més d'(\d+) punt fora", OFFPAGE_POINTS),
-    (PROTOCOL, r"ChatGPT espera el contrast com a molt (\d+) minuts", CHECK_MINUTES),
+    (PROTOCOL, r"origin more than (\d+) point outside", OFFPAGE_POINTS),
+    (PROTOCOL, r"ChatGPT waits for the check for at most (\d+) minutes", CHECK_MINUTES),
     (ARCHITECTURE, r"the same task, for at most (\d+) minutes", CHECK_MINUTES),
-    (PROTOCOL, r"Són com a molt (\d+) crides per PDF", pdf_check.MAX_CHECK_CALLS),
+    (PROTOCOL, r"Claude makes at most (\d+) calls per PDF", pdf_check.MAX_CHECK_CALLS),
     (ARCHITECTURE, r"There are at most (\d+) calls per PDF", pdf_check.MAX_CHECK_CALLS),
     (ARCHITECTURE, r"at most (\d+) PDFs at a time", pdf_check.CHECK_CONCURRENCY),
     (ARCHITECTURE, r"PDF checks: ([\d,]+) tokens", pdf_check.CHECK_BASE_TOKENS),
@@ -189,15 +188,15 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (ARCHITECTURE, r"and ([\d,]+) for each other page", pdf_check.CHECK_PAGE_TOKENS),
     (ARCHITECTURE, r"each other page, at most ([\d,]+), with", pdf_check.CHECK_MAX_TOKENS),
     # Conversation list and search.
-    (PROTOCOL, r"`limit`: d'1 a (\d+)", MAX_LIST_LIMIT),
-    (PROTOCOL, r"El text de la cerca pot tenir com a molt (\d+) caràcters", MAX_SEARCH_LENGTH),
+    (PROTOCOL, r"`limit`: from 1 to (\d+)", MAX_LIST_LIMIT),
+    (PROTOCOL, r"The search text can be at most (\d+) characters", MAX_SEARCH_LENGTH),
     # Sessions.
     (
         PROTOCOL,
-        r"`AOS_SESSION_IDLE_HOURS` sense activitat \((\d+) h\)",
+        r"`AOS_SESSION_IDLE_HOURS` without activity \((\d+) h\)",
         field_default("session_idle_hours"),
     ),
-    (PROTOCOL, r"`AOS_SESSION_MAX_DAYS` \((\d+) dies\)", field_default("session_max_days")),
+    (PROTOCOL, r"`AOS_SESSION_MAX_DAYS` \((\d+) days\)", field_default("session_max_days")),
     (
         DEPLOYMENT,
         r"`AOS_SESSION_IDLE_HOURS`, from 1 to ([\d,]+) hours",
@@ -236,36 +235,33 @@ def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
 
 ADR_REFINE = "docs/adr/0010-refine-mode.md"
 REFINE = RefineOptions()
-NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "dos": 2, "dues": 2, "tres": 3}
+NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5}
 
 
 def number(text: str) -> float:
-    """A number as the prose of the docs writes it: English (``20,000``, ``0.10``), the
-    Catalan of the documents not yet translated (``20.000``, ``0,1``) or a word (``two``)."""
+    """A number as the prose of the docs writes it: ``20,000``, ``0.1`` or a word (``two``)."""
     if text in NUMBER_WORDS:
         return NUMBER_WORDS[text]
-    if re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d{1,2})?", text):
-        return float(text.replace(",", ""))
-    assert re.fullmatch(r"\d+(?:\.\d{3})*(?:,\d+)?", text), text
-    return float(text.replace(".", "").replace(",", "."))
+    assert re.fullmatch(r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?", text), text
+    return float(text.replace(",", ""))
 
 
 DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
     # The ranges and defaults of RefineOptions, as the server validates them.
     (
         PROTOCOL,
-        r"max_rounds: number;\s+// (\d+)\u2013(\d+), per defecte (\d+)",
+        r"max_rounds: number;\s+// (\d+)\u2013(\d+), default (\d+)",
         (*REFINE_ROUNDS_RANGE, REFINE.max_rounds),
     ),
     (
         PROTOCOL,
-        r"budget_eur: number;\s+// ([\d,]+)\u2013([\d,]+), per defecte ([\d,]+)",
+        r"budget_eur: number;\s+// ([\d.]+)\u2013([\d.]+), default ([\d.]+)",
         (*REFINE_BUDGET_EUR_RANGE, REFINE.budget_eur),
     ),
-    (PROTOCOL, r"de cada versió: ([\d.]+)\u2013([\d.]+)", REFINE_WORDS_RANGE),
+    (PROTOCOL, r"of each version: (\d+)\u2013(\d+)", REFINE_WORDS_RANGE),
     (
         PROTOCOL,
-        r"convergence_threshold: number;\s+// (\d+)\u2013(\d+), per defecte (\d+)",
+        r"convergence_threshold: number;\s+// (\d+)\u2013(\d+), default (\d+)",
         (*REFINE_THRESHOLD_RANGE, REFINE.convergence_threshold),
     ),
     (
@@ -280,16 +276,16 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
     ),
     (
         ADR_REFINE,
-        r"màxim de rondes \((\d+) per defecte, fins a (\d+)\)",
+        r"maximum number of rounds \((\d+) by default, up to (\d+)\)",
         (REFINE.max_rounds, REFINE_ROUNDS_RANGE[1]),
     ),
-    (ADR_REFINE, r"pressupost en euros \(([\d,]+) € per defecte", (REFINE.budget_eur,)),
+    (ADR_REFINE, r"budget in euros \(€([\d.]+) by default", (REFINE.budget_eur,)),
     (ARCHITECTURE, r"give it the threshold \((\d+) by default\)", (REFINE.convergence_threshold,)),
-    (ADR_REFINE, r"llindar \((\d+) per defecte\)", (REFINE.convergence_threshold,)),
+    (ADR_REFINE, r"threshold \((\d+) by default\)", (REFINE.convergence_threshold,)),
     # The word budget when the owner gives no limit.
     (
         PROTOCOL,
-        r"([\d,]+) vegades les de la versió 1, i (\d+) com a mínim",
+        r"([\d.]+) times the word count of version 1, and at least (\d+)",
         (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
     ),
     (
@@ -299,34 +295,32 @@ DOCUMENTED_REFINE_NUMBERS: list[tuple[str, str, tuple[float, ...]]] = [
     ),
     (
         ADR_REFINE,
-        r"([\d,]+) vegades les paraules de la versió 1 \((\d+) com a mínim\)",
+        r"([\d.]+) times the word count of version 1 \(at least (\d+)\)",
         (REFINE_BUDGET_FACTOR, REFINE_MIN_BUDGET_WORDS),
     ),
     # The loop: changes a round, the changelog every prompt gets, when it stops by itself.
     (
         PROTOCOL,
-        r"els canvis que (?:proposa|ha aplicat) \(com a molt (\d+)\)",
+        r"the changes it (?:proposes|has applied) \(at most (\d+)\)",
         (REFINE_MAX_CHANGES,),
     ),
     (ARCHITECTURE, r"at most (\d+) changes", (REFINE_MAX_CHANGES,)),
     (
         ADR_REFINE,
-        r"Com a molt (\d+) canvis per ronda:\*\* (\d+) propostes per revisió i (\d+) canvis",
+        r"At most (\d+) changes per round:\*\* (\d+) proposals per review and (\d+) changes",
         (REFINE_MAX_CHANGES,) * 3,
     ),
     (ARCHITECTURE, r"the last (\d+) lines of the changelog", (REFINE_CHANGELOG_TAIL,)),
-    (ADR_REFINE, r"les (\d+) últimes línies", (REFINE_CHANGELOG_TAIL,)),
+    (ADR_REFINE, r"the last (\d+) lines", (REFINE_CHANGELOG_TAIL,)),
     *(
-        (document, r"(\w+) rondes seguides", (REFINE_CONVERGENCE_ROUNDS,))
-        for document in (PROTOCOL, ADR_REFINE)
+        (document, r"(\w+) rounds in a row", (REFINE_CONVERGENCE_ROUNDS,))
+        for document in (PROTOCOL, ARCHITECTURE, ADR_REFINE)
     ),
-    (ARCHITECTURE, r"(\w+) rounds in a row", (REFINE_CONVERGENCE_ROUNDS,)),
     # Every version is one reply: what does not fit in its output is cut off.
     *(
-        (document, r"com a molt ([\d.]+) tokens de sortida", (EngineConfig().max_output_tokens,))
-        for document in (PROTOCOL, ADR_REFINE)
+        (document, r"at most ([\d,]+) output tokens", (EngineConfig().max_output_tokens,))
+        for document in (PROTOCOL, ARCHITECTURE, ADR_REFINE)
     ),
-    (ARCHITECTURE, r"at most ([\d,]+) output tokens", (EngineConfig().max_output_tokens,)),
 ]
 
 
@@ -356,7 +350,7 @@ def test_the_turn_modes_the_protocol_gives_are_the_servers() -> None:
 def test_the_activity_messages_the_protocol_names_are_the_servers() -> None:
     """``turn.stop`` is the owner's too: it refreshes the idle timeout."""
     [named] = re.findall(
-        r"Només ((?:`[\w.]+`(?:, | i )?)+), que són accions del propietari", read(PROTOCOL)
+        r"Only ((?:`[\w.]+`(?:, | and )?)+), which are the owner's actions", read(PROTOCOL)
     )
     assert set(re.findall(r"`([\w.]+)`", named)) == ws.ACTIVITY_MESSAGES
 

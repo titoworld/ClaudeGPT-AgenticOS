@@ -1,62 +1,62 @@
-# 0010. Mode «Perfecciona»: un document que les dues IA milloren fins que l'aturis
+# 0010. Refine mode: a document the two AIs improve until you stop it
 
-- Estat: Proposat
-- Data: 2026-10-02
+- Status: Proposed
+- Date: 2026-10-02
 
 ## Context
 
-El propietari va demanar «una opció perquè vagin debatint per perfeccionar un projecte però sense sobredimensionar el resultat, és a dir un debat "infinit" fins que cliqui al botó de parar i aturi ja a la següent o a l'altra ronda amb el resultat final», per a desenvolupaments que busquen la perfecció.
+The owner asked for "an option for them to keep debating to perfect a project, but without oversizing the result, that is, an 'infinite' debate until I click the stop button and it stops at the next round or the one after, with the final result", for developments that aim for perfection.
 
-El consell (`debate`) no hi serveix tal com és:
+The Council mode (`debate`) is not suited to this as it is:
 
-- Té com a molt 4 rondes i s'atura sol quan els dos models coincideixen: està pensat per respondre una pregunta, no per polir un lliurable.
-- Cada model reescriu la seva pròpia resposta. No hi ha un sol document que millori ronda rere ronda.
-- Res no frena el creixement. Quan dos models es revisen l'un a l'altre sense límits, el text s'allarga: cadascun hi afegeix el que creu que hi falta, i el resultat acaba sobredimensionat.
+- It has at most 4 rounds and stops by itself when the two models agree: it is designed to answer a question, not to polish a deliverable.
+- Each model rewrites its own answer. There is no single document that improves round after round.
+- Nothing curbs the growth. When two models review each other without limits, the text gets longer: each one adds what it thinks is missing, and the result ends up oversized.
 
-## Decisió
+## Decision
 
-Un quart mode de torn, `refine` («Perfecciona»). Les dues IA treballen sobre **un sol document**.
+A fourth turn mode, `refine` (Refine in the interface). The two AIs work on **a single document**.
 
-1. **Ronda 0:** totes dues responen l'encàrrec, com en un consell.
-2. **Ronda 1:** l'editor (Claude per defecte) fusiona les dues respostes en la versió 1.
-3. **Ronda 2 i següents:** totes dues revisen la versió vigent, i l'editor n'escriu la següent aplicant només els canvis justificats.
+1. **Round 0:** both answer the brief, as in a Council turn.
+2. **Round 1:** the editor (Claude by default) merges the two answers into version 1.
+3. **Round 2 onwards:** both review the current version, and the editor writes the next one, applying only the justified changes.
 
-El torn s'acaba quan el propietari l'atura, quan cap de les dues IA no hi troba res a canviar o quan s'arriba a un límit. L'última versió és la resposta final del torn i la que veuen els torns següents.
+The turn ends when the owner stops it, when neither AI finds anything to change, or when it reaches a limit. The last version is the turn's final answer, and the one the following turns see.
 
-### Contra el sobredimensionament
+### Against oversizing
 
-- **Encàrrec tancat:** cada prompt torna a citar l'encàrrec. Un canvi ha de dir quin defecte corregeix o quin requisit de l'encàrrec compleix, i els prompts rebutgen els afegits que l'encàrrec no demana.
-- **Límit de paraules:** el que fixi el propietari o, si no en fixa cap, 1,2 vegades les paraules de la versió 1 (300 com a mínim).
-  - Cada prompt diu la llargada actual i el límit.
-  - El motor comprova el límit sense cap model: una versió que el passa té un intent per escurçar-se, i si encara el passa, la ronda es descarta i es manté la versió vigent.
-  - La versió 1 no té cap versió anterior per mantenir. Si la fusió passa del límit del propietari, també té un intent per escurçar-se, però si encara el passa (o si és la còpia d'una resposta, perquè ningú no ha pogut fusionar-les), es queda igualment com a versió 1, i són les edicions de les rondes següents les que l'han de fer cabre.
-  - Cada versió s'escriu sencera en una sola resposta del model, que té com a molt 16.000 tokens de sortida, el raonament inclòs: una versió que no hi cap es talla i no s'accepta. A la pràctica, el document no pot passar d'unes 10.000 paraules de prosa en anglès, i en català o en codi en són menys.
-- **Com a molt 5 canvis per ronda:** 5 propostes per revisió i 5 canvis per edició. Cada revisió ha de buscar primer defectes i després alguna cosa per treure o simplificar.
-- **Contra l'oscil·lació:** cada prompt porta el registre de canvis de les rondes anteriors (les 30 últimes línies), i desfer un canvi s'ha de justificar.
-- **Visibilitat:** el propietari veu cada versió, el que ha canviat respecte de l'anterior, les paraules i el cost de cada ronda.
+- **A closed brief:** every prompt quotes the brief again. A change must say which defect it fixes or which requirement of the brief it meets, and the prompts reject additions the brief does not ask for.
+- **Word limit:** the one the owner sets or, if they set none, 1.2 times the word count of version 1 (at least 300).
+  - Every prompt states the current length and the limit.
+  - The engine checks the limit without any model: a version that goes over it gets one attempt to shorten it and, if it still goes over, the round is discarded and the current version is kept.
+  - Version 1 has no previous version to keep. If the merge goes over the owner's limit, it also gets one attempt to shorten it, but if it still goes over (or if it is the copy of an answer, because nobody could merge them), it stays as version 1 anyway, and it is up to the edits of the following rounds to make it fit.
+  - Each version is written whole in a single reply of the model, which has at most 16,000 output tokens, reasoning included: a version that does not fit is cut off and not accepted. In practice, the document cannot go beyond about 10,000 words of English prose, and fewer in Catalan or in code.
+- **At most 5 changes per round:** 5 proposals per review and 5 changes per edit. Each review must look for defects first, and then for something to remove or simplify.
+- **Against oscillation:** every prompt carries the changelog of the previous rounds (the last 30 lines), and undoing a change must be justified.
+- **Visibility:** the owner sees each version, what changed from the previous one, and the words and the cost of each round.
 
-### Aturar-lo
+### Stopping it
 
-- **«Atura en acabar la ronda»** (`turn.stop`): la ronda en curs acaba (revisions i edició) i el torn es tanca amb l'última versió.
-- **«Atura ara»** (`turn.cancel`): les crides en curs es cancel·len. L'última versió completa es desa igualment com a resposta final, sense cap crida, perquè no es perdi res del que ja s'ha pagat.
-- **S'atura sol:**
-  - quan cap de les dues IA no troba res a canviar dues rondes seguides (sempre);
-  - quan totes dues li donen el llindar (90 per defecte) o més, sense proposar cap defecte, dues rondes seguides (es pot desactivar per fer-lo «infinit»).
-- **Límits de seguretat, sempre:** un màxim de rondes (12 per defecte, fins a 50) i un pressupost en euros (3 € per defecte; en mode subscripció compta el valor a preus d'API, per no esgotar la quota).
+- **"Stop after this round"** (`turn.stop`): the current round finishes (reviews and edit), and the turn closes with the last version.
+- **"Stop now"** (`turn.cancel`): the running calls are cancelled. The last complete version is stored anyway as the final answer, without any call, so that nothing already paid for is lost.
+- **It stops by itself:**
+  - when neither AI finds anything to change two rounds in a row (always);
+  - when both give it the threshold (90 by default) or more, without proposing any defect, two rounds in a row (this can be turned off to make it "infinite").
+- **Safety limits, always:** a maximum number of rounds (12 by default, up to 50) and a budget in euros (€3 by default; in subscription mode the value at API prices counts, so as not to use up the quota).
 
-Quan una de les dues IA falla, l'altra continua sola. Si totes dues fallen quan ja hi ha una versió, aquesta és la resposta final. Un torn «Perfecciona» no es desa mai a la memòria cau de torns.
+When one of the two AIs fails, the other one continues alone. If both fail when there is already a version, that version is the final answer. A Refine turn is never stored in the turn cache.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **Editors alterns** (cada ronda escriu una IA diferent): més independent, però cada editor desfà part del que ha fet l'altre i el document oscil·la. Es manté un sol editor, i l'altra IA hi aporta les seves revisions.
-- **Rondes lliures, sense límit de paraules:** el document creix ronda rere ronda, que és el que el propietari vol evitar.
-- **Una sola IA que es revisa a si mateixa:** no té una segona opinió, i perd el sentit del consell.
-- **Ampliar el consell actual amb més rondes:** cada IA continuaria reescrivint la seva resposta en lloc de millorar un sol document, i la síntesi arribaria només al final.
+- **Alternating editors** (a different AI writes each round): more independent, but each editor undoes part of what the other one did, and the document oscillates. A single editor is kept, and the other AI contributes its reviews.
+- **Free rounds, without a word limit:** the document grows round after round, which is what the owner wants to avoid.
+- **A single AI that reviews itself:** it has no second opinion, and it loses the point of a council.
+- **Extending the current Council mode with more rounds:** each AI would keep rewriting its own answer instead of improving a single document, and the synthesis would only come at the end.
 
-## Conseqüències
+## Consequences
 
-- El protocol té un mode nou (`refine`) amb les seves opcions, el missatge `turn.stop` i els esdeveniments `turn.stopping` i `refine.round` ([PROTOCOL.md](../PROTOCOL.md)). Els missatges fan servir els tipus que ja existeixen (`answer`, `revision`, `synthesis`), amb `meta.refine`, així que la taula de missatges no canvia. Només un torn «Perfecciona» té rondes per acabar: un `turn.stop` d'un altre mode es rebutja, i aquell torn s'atura amb `turn.cancel`.
-- «Perfecciona» no pot ser el mode per defecte de la configuració: un torn que dura fins que l'atures només comença quan el propietari el tria.
-- El pressupost es dona en euros, però el motor compta en dòlars. El servidor el converteix amb el tipus amb què l'aplicació mostra els euros (el del BCE o el manual), de manera que el torn s'atura quan el que la interfície mostra que ha gastat arriba al pressupost.
-- La taula de converses guarda el mode «Perfecciona» com a últim mode en una columna nova (`last_turn_mode`, migració 6), amb els valors de l'antiga, que es conserva sense fer-se servir. La columna antiga té una restricció `CHECK` que no es pot modificar, i refer la taula arrossegaria els missatges.
-- El cost d'un torn «Perfecciona» depèn de les rondes: una ronda són tres crides (dues revisions i una edició, i una quarta si la versió nova s'ha d'escurçar). Els límits de rondes i d'euros i l'aturada automàtica el fiten. La interfície en mostra el cost ronda a ronda.
+- The protocol has a new mode (`refine`) with its options, the `turn.stop` message and the `turn.stopping` and `refine.round` events ([PROTOCOL.md](../PROTOCOL.md)). The messages use the kinds that already exist (`answer`, `revision`, `synthesis`), with `meta.refine`, so the messages table does not change. Only a Refine turn has rounds to finish: a `turn.stop` for another mode is rejected, and that turn is stopped with `turn.cancel`.
+- Refine cannot be the default mode in the settings: a turn that lasts until you stop it only starts when the owner chooses it.
+- The budget is given in euros, but the engine counts in dollars. The server converts it with the rate the app shows euros with (the ECB's or the manual one), so the turn stops when what the interface shows it has spent reaches the budget.
+- The conversations table stores the Refine mode as the last mode in a new column (`last_turn_mode`, migration 6), with the values of the old one, which is kept but no longer used. The old column has a `CHECK` constraint that cannot be modified, and rebuilding the table would drag the messages along.
+- The cost of a Refine turn depends on its rounds: a round is three calls (two reviews and an edit, plus a fourth if the new version has to be shortened). The limits on rounds and euros and the automatic stop keep it bounded. The interface shows its cost round by round.

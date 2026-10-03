@@ -1,88 +1,88 @@
-# 0008. Recompte de tokens i intents declinats
+# 0008. Token accounting and declined attempts
 
-- Estat: Proposat
-- Data: 2026-09-28
+- Status: Proposed
+- Date: 2026-09-28
 
 ## Context
 
-La validació de l'auditoria del 28 de setembre de 2026 (punts 7 i 8) va mostrar dos errors de comptabilitat de naturalesa diferent.
+The validation of the audit of 28 September 2026 (points 7 and 8) showed two accounting errors of a different nature.
 
-**Punt 7. Els recomptes de tokens deixaven fora la memòria cau.** Els imports en diners eren correctes (es calculen per categories), però els comptes i les ràtios no.
+**Point 7. The token counts left the cache out.** The amounts of money were right (they are computed by category), but the counts and the ratios were not.
 
-- `Usage.total_tokens` era `input + output`, i `input_tokens` és només l'entrada que no ve de la memòria cau: els quatre adaptadors la normalitzen així.
-- Els consumidors el feien servir com a «tokens del torn»:
-  - l'estalvi d'un encert de la memòria cau de torns (`CachedTurn.tokens`);
-  - la parada per consens;
-  - el total d'un torn a la interfície;
-  - la ràtio d'estalvi del tauler.
-- En una crida amb context (3 tokens d'entrada, 100 de sortida, 10.000 de lectures de memòria cau i 20.000 d'escriptures), comptava 103 tokens en lloc de 30.103. La parada per consens comptava 618 tokens en lloc de 180.618.
-- Les escriptures de memòria cau, facturades a 1,25 vegades l'entrada, no sortien enlloc: `stats.daily` no les portava.
-- Els tokens estalviats no quadraven amb el seu valor (103 tokens valorats a 0,132515 USD), i la ràtio barrejava definicions: mostrava un 84 % quan el real era un 1,8 %.
+- `Usage.total_tokens` was `input + output`, and `input_tokens` is only the input that does not come from the cache: the four adapters normalize it that way.
+- The consumers used it as "the turn's tokens":
+  - the saving of a turn cache hit (`CachedTurn.tokens`);
+  - the consensus stop;
+  - a turn's total in the interface;
+  - the dashboard's savings ratio.
+- In a call with context (3 input tokens, 100 output tokens, 10,000 cache reads and 20,000 cache writes), it counted 103 tokens instead of 30,103. The consensus stop counted 618 tokens instead of 180,618.
+- Cache writes, billed at 1.25 times the input, did not show anywhere: `stats.daily` did not carry them.
+- The tokens saved did not square with their value (103 tokens valued at 0.132515 USD), and the ratio mixed definitions: it showed 84% when the real one was 1.8%.
 
-**Punt 8. Els fallbacks d'Anthropic es cobraven al preu del model final.** Els imports eren erronis.
+**Point 8. Anthropic's fallbacks were charged at the price of the final model.** The amounts were wrong.
 
-- Amb els fallbacks del costat del servidor, un model que declina passa la petició a un altre, i la resposta arriba en una sola crida.
-- `billed_usage` sumava els intents declinats al mateix `Usage`, i el motor el preuava amb el model que responia.
-- D'un Fable 5.1 (10/50 USD per milió de tokens) a un Opus 4.8 (5/25), es registraven 0,25075 USD en lloc de 0,370625 (−32 %), a nom d'Opus 4.8. Una negativa després d'un fallback quedava en 0,055 USD en lloc de 0,11 (−50 %).
-- La regla d'Anthropic (guia «Refusals and fallback», secció «Billing and rate limits», consultada el 28 de setembre de 2026): cada intent es factura a les tarifes del model que l'ha executat; `usage.iterations` és el registre del que es factura per intent; l'`usage` de primer nivell només descriu l'intent que ha produït el missatge, i els tokens de models diferents no se sumen mai en un mateix camp.
+- With server-side fallbacks, a model that declines passes the request on to another one, and the answer arrives in a single call.
+- `billed_usage` added the declined attempts to the same `Usage`, and the engine priced it with the model that answered.
+- From a Fable 5.1 (10/50 USD per million tokens) to an Opus 4.8 (5/25), 0.25075 USD was recorded instead of 0.370625 (−32%), under Opus 4.8's name. A refusal after a fallback came to 0.055 USD instead of 0.11 (−50%).
+- Anthropic's rule (the "Refusals and fallback" guide, section "Billing and rate limits", read on 28 September 2026): each attempt is billed at the rates of the model that ran it; `usage.iterations` is the record of what is billed per attempt; the top-level `usage` only describes the attempt that produced the message, and the tokens of different models are never added up in the same field.
 
-## Decisió
+## Decision
 
-### Tokens processats
+### Processed tokens
 
-- `Usage.processed_tokens = input + cache_read + cache_write + output`: tot el que la crida ha processat i s'ha facturat. El raonament (`reasoning_tokens`) ja forma part de la sortida a Anthropic, OpenAI i Codex, i no s'hi torna a sumar.
-- `Usage.total_tokens` desapareix. Cap consumidor no necessitava «entrada sense memòria cau més sortida».
-- Els tokens processats es fan servir a:
-  - `CachedTurn.tokens` i l'estalvi de la memòria cau de torns (vegeu «Valor d'un encert de la memòria cau»);
-  - la parada per consens: la parella mitjana de revisions del torn, en tokens processats;
-  - `is_billed`, que decideix si una crida fallida es va facturar;
-  - al client (`web/`): el total d'un torn, `consumed()` i la ràtio del tauler, amb la mateixa definició al numerador i al denominador, calculats amb `processedTokens(usage)` de `web/src/lib/costs.ts`.
-- `Usage` no canvia al protocol: el client calcula els tokens processats.
-- Cada fila de `stats.daily` porta `cache_write_tokens`. Els totals per agent ja el portaven.
-- La compactació i `UNCHANGED` ja eren estimacions de tokens d'entrada i de sortida a partir del text. No canvien.
-- `CACHE_KEY_VERSION` passa a 4. Les entrades anteriors comptaven `input + output` i amagaven els intents declinats dins l'ús del missatge servit, de manera que un encert hauria donat l'estalvi amb la xifra antiga i el fallback valorat al preu del model final.
-- Les files d'estalvi desades abans d'aquest canvi conserven la definició antiga (`input + output`, a la memòria cau de torns i a la parada per consens). No es migren, perquè les files no diuen quanta memòria cau hi havia.
+- `Usage.processed_tokens = input + cache_read + cache_write + output`: everything the call has processed and that has been billed. The reasoning (`reasoning_tokens`) is already part of the output at Anthropic, OpenAI and Codex, and it is not added again.
+- `Usage.total_tokens` goes away. No consumer needed "uncached input plus output".
+- Processed tokens are used in:
+  - `CachedTurn.tokens` and the turn cache's saving (see "Value of a cache hit");
+  - the consensus stop: the turn's average pair of revisions, in processed tokens;
+  - `is_billed`, which decides whether a failed call was billed;
+  - the client (`web/`): a turn's total, `consumed()` and the dashboard's ratio, with the same definition in the numerator and the denominator, computed with `processedTokens(usage)` from `web/src/lib/costs.ts`.
+- `Usage` does not change in the protocol: the client computes the processed tokens.
+- Each row of `stats.daily` carries `cache_write_tokens`. The per-agent totals already carried it.
+- Compaction and `UNCHANGED` were already estimates of input and output tokens from the text. They do not change.
+- `CACHE_KEY_VERSION` goes up to 4. The earlier entries counted `input + output` and hid the declined attempts inside the usage of the served message, so a hit would have given the saving with the old figure, and the fallback valued at the price of the final model.
+- The savings rows stored before this change keep the old definition (`input + output`, in the turn cache and in the consensus stop). They are not migrated, because the rows do not say how much cache there was.
 
-### Intents declinats d'un fallback
+### Declined attempts of a fallback
 
-- Contracte dels proveïdors (`providers/base.py`):
-  - `DeclinedAttempt(model, usage)` és un intent que el seu model va declinar abans que un altre model agafés la petició.
-  - `GenerationResult.declined` són els intents facturats que altres models van declinar abans que `model` servís la resposta, en ordre. Sense fallback és buida.
-  - `ProviderError`, i per tant `RefusalError`, també porta `declined`: una negativa, o un límit de sortida esgotat sense text, després d'un fallback.
-  - `usage` és sempre l'ús de l'intent que ha produït el resultat o l'error, a les tarifes del seu `model`. Els tokens de models diferents no se sumen mai.
-- L'adaptador de l'API de Claude llegeix `usage.iterations`:
-  - Cada entrada `message` és un intent declinat, aparellat en ordre amb el bloc `fallback` que dona la categoria i el model que va declinar. L'entrada `fallback_message` és l'intent que va servir.
-  - Només compten els intents facturats: amb sortida, o declinats abans de la sortida en una categoria que Anthropic factura igualment.
-  - El model de cada intent és el de la seva entrada. Si no hi és, el `from` del seu bloc; si tampoc, el model al qual havia passat l'intent anterior; i si no, el model que es va demanar.
-- El motor registra cada intent declinat com una crida facturada sense missatge: una fila d'ús amb el seu model i el seu cost, `ok = False` i l'error «<model> ha declinat la petició i l'ha passada a un altre model.».
-  - Compta al total del torn (`outcome.usage`, [ADR 0007](0007-turn-outcome.md)) i a `unstored_usage`.
-  - Si portava el context compactat, compta també per a l'estalvi de la compactació.
-  - Els resums de compactació fan el mateix.
-- El missatge servit conserva l'ús del seu intent (`meta.usage` i `stream.completed.usage`) i guarda els intents declinats a `meta.declined`, `[{model, usage}]`.
-- En una negativa després d'un fallback, `RefusalError.usage` és el de l'intent que ha refusat, que pot no facturar res, i `declined`, els d'abans. `stream.failed.usage` és el cost de la crida fallida; els intents declinats compten al total del torn.
+- The providers' contract (`providers/base.py`):
+  - `DeclinedAttempt(model, usage)` is an attempt that its model declined before another model took the request.
+  - `GenerationResult.declined` is the billed attempts that other models declined before `model` served the answer, in order. Without a fallback, it is empty.
+  - `ProviderError`, and so `RefusalError`, also carries `declined`: a refusal, or an output limit used up without any text, after a fallback.
+  - `usage` is always the usage of the attempt that produced the result or the error, at the rates of its `model`. The tokens of different models are never added up.
+- The adapter of Claude's API reads `usage.iterations`:
+  - Each `message` entry is a declined attempt, paired in order with the `fallback` block that gives the category and the model that declined. The `fallback_message` entry is the attempt that served.
+  - Only billed attempts count: those with output, or declined before the output in a category that Anthropic bills anyway.
+  - The model of each attempt is that of its entry. If it is not there, the `from` of its block; if that is not there either, the model the previous attempt had passed the request to; and otherwise, the model that was asked for.
+- The engine records each declined attempt as a billed call without a message: a usage row with its model and its cost, `ok = False` and the error `<model> declined the request and passed it on to another model.`
+  - It counts towards the turn's total (`outcome.usage`, [ADR 0007](0007-turn-outcome.md)) and towards `unstored_usage`.
+  - If it carried the compacted context, it also counts towards the compaction saving.
+  - The compaction summaries do the same.
+- The served message keeps the usage of its attempt (`meta.usage` and `stream.completed.usage`) and keeps the declined attempts in `meta.declined`, `[{model, usage}]`.
+- In a refusal after a fallback, `RefusalError.usage` is that of the attempt that refused, which may bill nothing, and `declined`, those that came before. `stream.failed.usage` is the cost of the failed call; the declined attempts count towards the turn's total.
 
-### Valor d'un encert de la memòria cau
+### Value of a cache hit
 
-- Un encert val el torn original sencer: les crides de cada missatge i els intents declinats abans de cadascuna (`meta.declined`), cadascun a les tarifes actuals del seu model.
-- Els tokens estalviats són els tokens processats d'aquestes mateixes crides. Així, l'estalvi i el seu valor surten de les mateixes dades i quadren.
-- Les crides fallides del torn original que es van reintentar no hi compten, com fins ara: no formen part de la resposta que es reprodueix.
+- A hit is worth the whole original turn: the calls of each message and the attempts declined before each of them (`meta.declined`), each at the current rates of its model.
+- The tokens saved are the processed tokens of these same calls. That way, the saving and its value come from the same data, and they square.
+- The failed calls of the original turn that were retried do not count, as before: they are not part of the answer that is replayed.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **Mantenir `total_tokens` al costat de `processed_tokens`:** cap consumidor no el necessitava, i tenir dues definicions semblants convidava a tornar-les a barrejar.
-- **Afegir `processed_tokens` a l'`Usage` del protocol:** és una dada derivada dels altres camps. El client la calcula amb una funció.
-- **Migrar les files d'estalvi antigues:** les files no diuen quanta memòria cau hi havia, així que qualsevol xifra seria inventada.
-- **No pujar `CACHE_KEY_VERSION` i documentar que les entrades antigues conserven la xifra antiga:** durant els 7 dies de vida de les entrades, els encerts sortirien amb 103 tokens i els fallbacks valorats al preu del model final.
-- **Sumar els tokens dels intents declinats a l'`usage` i posar-hi el cost correcte a part:** un `Usage` amb tokens de dos models no es pot tornar a preuar (el valor d'un encert es calcula als preus actuals) i contradiu la regla d'Anthropic.
-- **Una sola fila d'ús per crida, amb el cost de tots els intents:** trencaria la regla que una fila és una crida d'un sol model, de la qual depenen les estadístiques per model.
-- **Valorar un encert només amb el missatge servit:** l'estalvi d'un torn amb fallback valdria menys del que va costar el torn.
+- **Keeping `total_tokens` next to `processed_tokens`:** no consumer needed it, and having two similar definitions invited mixing them up again.
+- **Adding `processed_tokens` to the protocol's `Usage`:** it is derived from the other fields. The client computes it with a function.
+- **Migrating the old savings rows:** the rows do not say how much cache there was, so any figure would be made up.
+- **Not raising `CACHE_KEY_VERSION`, and documenting that the old entries keep the old figure:** during the 7 days the entries live, hits would come out with 103 tokens, and fallbacks valued at the price of the final model.
+- **Adding the tokens of the declined attempts to the `usage`, and putting the right cost aside:** a `Usage` with the tokens of two models cannot be priced again (the value of a hit is computed at the current prices), and it goes against Anthropic's rule.
+- **A single usage row per call, with the cost of all the attempts:** it would break the rule that a row is a call of a single model, which the per-model statistics depend on.
+- **Valuing a hit with the served message alone:** the saving of a turn with a fallback would be worth less than what the turn cost.
 
-## Conseqüències
+## Consequences
 
-- Els tokens del torn, del tauler i dels estalvis són els tokens processats: 30.103 en lloc de 103 en el cas de l'auditoria. La ràtio d'estalvi és coherent.
-- Els imports d'un torn amb fallback són els que factura Anthropic: 0,370625 USD en el cas de l'auditoria, amb una fila de Fable 5.1 (0,240125, `ok = False`) i una d'Opus 4.8 (0,1305). Una negativa després d'un fallback val 0,11 USD, a les tarifes de Fable 5.1.
-- `stats.totals.errors` compta també els intents declinats.
-- Les entrades de la memòria cau de torns d'abans de la versió 4 deixen de fer-se servir i caduquen soles en 7 dies. La primera vegada que es repeteixi una pregunta, es tornarà a cridar el model.
-- Les files d'estalvi d'abans d'aquest canvi conserven la definició antiga. Una finestra del tauler que en barregi de totes dues les suma tal com són.
-- Canvien els contractes interns i el protocol: `Usage.processed_tokens` (`domain.py`), `DeclinedAttempt` i `declined` (`providers/base.py`), `CachedTurn.tokens` (`orchestrator/store.py`), `meta.declined` i `cache_write_tokens` a `stats.daily` ([PROTOCOL.md](../PROTOCOL.md) i `web/src/lib/protocol.ts`).
-- Aquesta decisió és una proposta fins que el propietari l'accepti.
+- The tokens of the turn, of the dashboard and of the savings are the processed tokens: 30,103 instead of 103 in the audit's case. The savings ratio is consistent.
+- The amounts of a turn with a fallback are the ones Anthropic bills: 0.370625 USD in the audit's case, with a Fable 5.1 row (0.240125, `ok = False`) and an Opus 4.8 one (0.1305). A refusal after a fallback is worth 0.11 USD, at Fable 5.1's rates.
+- `stats.totals.errors` also counts the declined attempts.
+- The turn cache entries from before version 4 are no longer used, and they expire on their own within 7 days. The first time a question is repeated, the model will be called again.
+- The savings rows from before this change keep the old definition. A dashboard window that mixes rows of both kinds adds them up as they are.
+- The internal contracts and the protocol change: `Usage.processed_tokens` (`domain.py`), `DeclinedAttempt` and `declined` (`providers/base.py`), `CachedTurn.tokens` (`orchestrator/store.py`), `meta.declined`, and `cache_write_tokens` in `stats.daily` ([PROTOCOL.md](../PROTOCOL.md) and `web/src/lib/protocol.ts`).
+- This decision is a proposal until the owner accepts it.
