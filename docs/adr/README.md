@@ -17,7 +17,7 @@ An accepted ADR is not edited: if the decision changes, a new ADR is written to 
 | 0007 | [The turn outcome, stored on the question](0007-turn-outcome.md) | Proposed |
 | 0008 | [Token accounting and declined attempts](0008-token-accounting.md) | Proposed |
 | 0009 | [Attachments: images, PDFs and text files in the chat](0009-attachments.md) | Proposed |
-| 0010 | [The Refine mode: a document that both AIs improve until you stop it](0010-refine-mode.md) | Proposed |
+| 0010 | [Refine mode: a document the two AIs improve until you stop it](0010-refine-mode.md) | Proposed |
 | 0011 | [Internationalization: the repository in English, the interface in English, Spanish and Catalan](0011-internationalization.md) | Proposed |
 
 ## Template
