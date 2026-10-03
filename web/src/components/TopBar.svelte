@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { prefs } from '../lib/prefs.svelte';
   import { router } from '../lib/router.svelte';
   import { MODE_LABEL } from '../lib/text';
@@ -7,7 +8,10 @@
   import Icon from './Icon.svelte';
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
-  const title = $derived(router.route.name === 'dashboard' ? 'Tauler' : app.convs.currentTitle);
+  const t = $derived(i18n.m.app);
+  const title = $derived(router.route.name === 'dashboard' ? t.dashboard : app.convs.currentTitle);
+  /** A new conversation, not yet sent: the page is just the app's name. */
+  const fresh = $derived(router.route.name !== 'dashboard' && app.convs.currentId == null);
   const lastMode = $derived.by(() => {
     const id = app.convs.currentId;
     if (router.route.name !== 'chat' || id == null) return null;
@@ -30,7 +34,7 @@
 </script>
 
 <svelte:head>
-  <title>{title === 'Nova conversa' ? 'ClaudeGPT OS' : `${title} · ClaudeGPT OS`}</title>
+  <title>{fresh ? 'ClaudeGPT OS' : `${title} · ClaudeGPT OS`}</title>
 </svelte:head>
 
 <header class="topbar">
@@ -40,7 +44,7 @@
       type="button"
       class="icon-btn"
       onclick={toggleSidebar}
-      aria-label={prefs.narrow ? 'Obre el menú' : 'Mostra la barra lateral'}>
+      aria-label={prefs.narrow ? t.topBar.openMenu : t.topBar.showSidebar}>
       <Icon name={prefs.narrow ? 'menu' : 'sidebar'} />
     </button>
   {/if}
@@ -52,7 +56,7 @@
     <ConnectionIndicator />
     <button type="button" class="palette-btn" onclick={() => (app.paletteOpen = true)} aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'}>
       <Icon name="search" size={15} />
-      <span class="palette-text">Cerca i ordres</span>
+      <span class="palette-text">{t.topBar.palette}</span>
       <kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd>
     </button>
   </div>

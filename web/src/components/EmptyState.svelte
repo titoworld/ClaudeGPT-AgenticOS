@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n/index.svelte';
   import { TURN_MODES } from '../lib/protocol';
   import { MODE_DESCRIPTION, MODE_LABEL } from '../lib/text';
   import Icon, { type IconName } from './Icon.svelte';
@@ -9,29 +10,28 @@
 
   let { onPick }: Props = $props();
 
-  const EXAMPLES = [
-    "Explica'm la diferència entre TCP i UDP amb una analogia quotidiana.",
-    'Revisa aquest pla: migrar una API REST a gRPC en dues setmanes amb un equip de tres persones.',
-    'Quins riscos té guardar les sessions en JWT sense poder-les revocar, i com els mitigo?',
-  ];
+  const t = $derived(i18n.m.app.emptyState);
 
-  const MODES: { icon: IconName; name: string; text: string }[] = TURN_MODES.map((mode) => ({
-    icon: `mode-${mode}`,
-    name: MODE_LABEL[mode],
-    text: MODE_DESCRIPTION[mode],
-  }));
+  const MODES: { mode: string; icon: IconName; name: string; text: string }[] = $derived(
+    TURN_MODES.map((mode) => ({
+      mode,
+      icon: `mode-${mode}`,
+      name: MODE_LABEL[mode],
+      text: MODE_DESCRIPTION[mode],
+    })),
+  );
 </script>
 
 <section class="empty" aria-labelledby="empty-title">
   <div class="hero">
     <span class="orb claude" aria-hidden="true"></span>
     <span class="orb chatgpt" aria-hidden="true"></span>
-    <h1 id="empty-title">Què vols preguntar al consell?</h1>
-    <p>Claude i ChatGPT treballen junts per donar-te una resposta millor gastant menys tokens.</p>
+    <h1 id="empty-title">{t.title}</h1>
+    <p>{t.text}</p>
   </div>
 
   <ul class="modes">
-    {#each MODES as mode (mode.name)}
+    {#each MODES as mode (mode.mode)}
       <li>
         <Icon name={mode.icon} size={20} />
         <div>
@@ -43,8 +43,8 @@
   </ul>
 
   <div class="examples">
-    <h2>Prova amb un exemple</h2>
-    {#each EXAMPLES as example (example)}
+    <h2>{t.examplesTitle}</h2>
+    {#each t.examples as example (example)}
       <button type="button" class="example" onclick={() => onPick(example)}>
         <Icon name="sparkles" size={16} />
         <span>{example}</span>

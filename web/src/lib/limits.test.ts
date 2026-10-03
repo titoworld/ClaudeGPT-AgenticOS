@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 // A zone east of UTC: a reset shortly after local midnight falls on the previous UTC day.
 // (Node reads TZ again when it changes; `process` is not typed in this project.)
@@ -10,6 +10,7 @@ const previousTz = vi.hoisted(() => {
   return tz;
 });
 
+import { i18n } from './i18n/index.svelte';
 import { LIMIT_WARN_PERCENT, limitLevel, resetText, shortUntil } from './limits';
 
 afterAll(() => {
@@ -46,5 +47,22 @@ describe('limitLevel', () => {
     expect(limitLevel('warning', null)).toBe('warn');
     expect(limitLevel('allowed', 100)).toBe('bad');
     expect(limitLevel('rejected', 5)).toBe('bad');
+  });
+});
+
+describe('resetText and shortUntil in English and Spanish', () => {
+  const now = new Date('2026-09-27T08:00:00Z'); // Sunday 27, 10:00 in Madrid
+
+  afterEach(() => i18n.set('ca'));
+
+  it('say when a window resets in the language in force, with its own date format', () => {
+    i18n.set('en');
+    expect(resetText('2026-09-29T23:30:00Z', now)).toBe('Resets in 3 days (30 Sept, 01:30)');
+    expect(resetText('2026-09-27T15:00:00Z', now)).toBe('Resets in 7 hours (17:00)');
+    expect(shortUntil('2026-09-27T08:00:30Z', now)).toBe('now');
+    expect(shortUntil('2026-09-27T10:00:00Z', now)).toBe('2 h');
+    i18n.set('es');
+    expect(resetText('2026-09-29T23:30:00Z', now)).toBe('Se restablece dentro de 3 días (30 sept, 01:30)');
+    expect(shortUntil('2026-09-27T08:00:30Z', now)).toBe('ahora');
   });
 });

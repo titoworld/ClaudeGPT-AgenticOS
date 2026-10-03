@@ -196,7 +196,7 @@ export class SceneHost {
       this.status = this.#quality === 'off' ? 'off' : 'on';
       this.apply(this.#state);
     } catch (err) {
-      console.warn('Escena 3D desactivada:', err);
+      console.warn('3D scene disabled:', err);
       if (generation === this.#generation) this.status = 'off';
     }
   }

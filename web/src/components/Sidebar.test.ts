@@ -200,3 +200,59 @@ describe('Sidebar search (A12)', () => {
     expect(server.lists).toHaveLength(sent);
   });
 });
+
+describe('Sidebar in English and Spanish', () => {
+  /** The language of this test's module graph (the one the sidebar reads). */
+  const language = () => import('../lib/i18n/index.svelte').then((m) => m.i18n);
+
+  afterEach(() => localStorage.removeItem('aos.lang'));
+
+  it('shows its texts in the language in force, and repaints them when it changes', async () => {
+    const now = new Date().toISOString();
+    const { e, root } = await shown(conversations(3).map((c) => ({ ...c, updated_at: now })));
+    const i18n = await language();
+    const headings = () => [...root.querySelectorAll('nav.list h2')].map((h) => h.textContent);
+    const links = () => e.textOf(root.querySelector('nav.links'));
+
+    i18n.set('en');
+    e.flushSync();
+    expect(headings()).toEqual(['Today']);
+    expect(e.textOf(root.querySelector('.btn.new'))).toBe('New conversation');
+    expect(searchInput(root).placeholder).toBe('Search conversations');
+    expect(root.querySelector('aside')!.getAttribute('aria-label')).toBe('Conversations and navigation');
+    expect(links()).toBe('Dashboard Settings Log out');
+    expect(root.querySelector('li.item button')!.getAttribute('aria-label')).toBe('Rename “Conversa número 3”');
+
+    i18n.set('es');
+    e.flushSync();
+    expect(headings()).toEqual(['Hoy']);
+    expect(e.textOf(root.querySelector('.btn.new'))).toBe('Nueva conversación');
+    expect(searchInput(root).placeholder).toBe('Buscar conversaciones');
+    expect(links()).toBe('Panel Configuración Cerrar sesión');
+    expect(root.querySelector('li.item button')!.getAttribute('aria-label')).toBe('Cambiar el nombre de «Conversa número 3»');
+  });
+
+  it('says what a search found, in English and in Spanish', async () => {
+    const { e, root } = await shown(conversations(60, { 5: ZEBRA }));
+    const i18n = await language();
+    const status = () => e.textOf(root.querySelector('[role=status]'));
+    i18n.set('en');
+    type(root, 'zebra');
+    expect(e.textOf(nav(root))).toContain('Searching…');
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await until(() => expect(titles(root)).toEqual([ZEBRA]));
+    expect(status()).toBe('1 conversation found.');
+
+    type(root, 'cap-ni-una');
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await until(() => expect(e.textOf(nav(root))).toBe('No conversation matches “cap-ni-una”.'));
+    i18n.set('es');
+    e.flushSync();
+    expect(e.textOf(nav(root))).toBe('Ninguna conversación coincide con «cap-ni-una».');
+
+    type(root, 'número');
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await until(() => expect(status()).toBe('50 conversaciones encontradas, y hay más.'));
+    expect(button(root, 'Mostrar más')).toBeDefined();
+  });
+});

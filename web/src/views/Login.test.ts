@@ -149,3 +149,92 @@ describe('the lock screen (A4)', () => {
     expect(root.querySelector('input[name="password"]')).not.toBeNull();
   });
 });
+
+describe('the login screen in English and Spanish', () => {
+  /** The plain login screen (no session yet), with this module graph's language. */
+  async function loginScreen() {
+    const e = (env = await load());
+    server.session = false;
+    await e.app.init();
+    expect(e.app.auth).toBe('login');
+    const { i18n } = await import('../lib/i18n/index.svelte');
+    const root = e.render(e.Login, {});
+    return { e, root, i18n };
+  }
+
+  /** The owner picks `locale` in the screen's language picker. */
+  function pick(root: HTMLElement, locale: string): void {
+    const select = root.querySelector<HTMLSelectElement>('.language select')!;
+    select.value = locale;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    env!.flushSync();
+  }
+
+  const fieldNames = (root: HTMLElement) => [...root.querySelectorAll('label.field > span:first-child')].map((s) => env!.textOf(s));
+  const shown = (root: HTMLElement, selector: string) => env!.textOf(root.querySelector(selector));
+
+  it('the language picker repaints it before any session, without opening a socket', async () => {
+    const { root, i18n } = await loginScreen();
+    expect(shown(root, '.tagline')).toBe('El teu consell privat de Claude i ChatGPT');
+
+    pick(root, 'en');
+    expect(i18n.locale).toBe('en');
+    expect(document.documentElement.lang).toBe('en');
+    expect(shown(root, '.tagline')).toBe('Your private council of Claude and ChatGPT');
+    expect(fieldNames(root)).toEqual(['Password', 'Verification code']);
+    expect(shown(root, '.hint')).toBe('The 6 digits from your authenticator app. It is sent automatically.');
+    expect(shown(root, 'button[type=submit]')).toBe('Log in');
+    expect(shown(root, '.foot')).toBe('Private access: only the owner can log in.');
+    expect(shown(root, '.language label')).toBe('Language');
+
+    pick(root, 'es');
+    expect(shown(root, '.tagline')).toBe('Tu consejo privado de Claude y ChatGPT');
+    expect(fieldNames(root)).toEqual(['Contraseña', 'Código de verificación']);
+    expect(shown(root, 'button[type=submit]')).toBe('Entrar');
+    expect(shown(root, '.language label')).toBe('Idioma');
+    expect(localStorage.getItem('aos.lang')).toBe('es'); // the choice stays in this browser
+    expect(FakeSocket.all).toHaveLength(0); // no session: nothing to reconnect
+  });
+
+  it('an error already shown follows the language', async () => {
+    const { e, root } = await loginScreen();
+    pick(root, 'en');
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    e.flushSync();
+    expect(shown(root, '.error')).toBe('Enter the password.');
+    pick(root, 'es');
+    expect(shown(root, '.error')).toBe('Escribe la contraseña.');
+  });
+
+  it('says the password or the code is wrong, in Spanish', async () => {
+    const fetch = server.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      input === '/api/auth/login'
+        ? Promise.resolve(new Response(JSON.stringify({ detail: 'Unauthorized' }), { status: 401 }))
+        : fetch(input, init),
+    );
+    const { e, root } = await loginScreen();
+    pick(root, 'es');
+    const password = root.querySelector<HTMLInputElement>('input[name="password"]')!;
+    password.value = 'no-és-aquesta';
+    password.dispatchEvent(new Event('input', { bubbles: true }));
+    const code = root.querySelector<HTMLInputElement>('input[name="totp"]')!;
+    code.value = '654321'; // six digits: sent on its own
+    code.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => {
+      e.flushSync();
+      expect(shown(root, '.error')).toBe('La contraseña o el código no son correctos.');
+    });
+    expect(e.app.auth).toBe('login');
+  });
+
+  it('the lock screen, in Spanish', async () => {
+    localStorage.setItem('aos.lang', 'es'); // the owner's choice, before the page loads
+    const { e, root } = await lockedScreen();
+    const text = e.textOf(root);
+    expect(text).toContain('Todavía no se ha podido cerrar la sesión en el servidor');
+    expect(text).toContain('Motivo: El servidor ha respondido con un error.');
+    expect(text).toContain('O vuelve a entrar: al iniciar sesión se cierra la sesión anterior.');
+    expect(buttonNamed(root, 'Volver a intentarlo')).not.toBeNull();
+  });
+});

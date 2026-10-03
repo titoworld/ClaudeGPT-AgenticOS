@@ -1,26 +1,17 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { formatMs } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import Icon from './Icon.svelte';
 
   const conn = app.conn;
 
-  const STATE_TEXT = {
-    idle: 'Desconnectat',
-    connecting: 'Connectant…',
-    open: 'Connectat',
-    reconnecting: 'Reconnectant…',
-    offline: 'Sense connexió',
-    closed: 'Desconnectat',
-  } as const;
+  const t = $derived(i18n.m.app.connection);
+  const state = $derived(t.states[conn.status]);
 
-  const label = $derived(
-    conn.status === 'open' && conn.rttMs != null ? formatMs(conn.rttMs) : STATE_TEXT[conn.status],
-  );
+  const label = $derived(conn.status === 'open' && conn.rttMs != null ? formatMs(conn.rttMs) : state);
   const title = $derived(
-    conn.status === 'open'
-      ? `Connectat en temps real${conn.rttMs != null ? ` · latència ${formatMs(conn.rttMs)}` : ''}`
-      : STATE_TEXT[conn.status],
+    conn.status === 'open' ? t.live(conn.rttMs != null ? formatMs(conn.rttMs) : null) : state,
   );
   const retryable = $derived(conn.status === 'reconnecting' || conn.status === 'offline');
 </script>
@@ -28,9 +19,9 @@
 <div class="conn {conn.status}" {title}>
   <span class="dot" aria-hidden="true"></span>
   <span class="label" aria-hidden="true">{label}</span>
-  <span class="sr-only" role="status">{STATE_TEXT[conn.status]}</span>
+  <span class="sr-only" role="status">{state}</span>
   {#if retryable}
-    <button type="button" class="icon-btn small" onclick={() => conn.retryNow()} aria-label="Reintenta ara">
+    <button type="button" class="icon-btn small" onclick={() => conn.retryNow()} aria-label={t.retryNow}>
       <Icon name="refresh" size={14} />
     </button>
   {/if}

@@ -50,25 +50,8 @@ export type SettingsStatus = 'loading' | 'ready' | 'error';
 /** Waits between automatic retries of a failed settings load (the last one repeats). */
 const SETTINGS_RETRY_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];
 
-const SETTINGS_NOT_LOADED = "La configuració encara no s'ha carregat.";
-
-const SETTINGS_CONFLICT =
-  'La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.';
-
-const QUESTION_TOO_LONG = `La pregunta és massa llarga (màxim ${formatInt(MAX_QUESTION_CHARS)} caràcters). Escurça-la per enviar-la.`;
-
-const MESSAGE_TOO_LARGE =
-  'La pregunta no es pot enviar: té massa caràcters de control, que ocupen massa. Treu-los i torna-ho a provar.';
-
-const UNREAD_MESSAGE =
-  'El servidor no ha llegit la pregunta perquè el missatge era massa gran. Escurça-la i torna-ho a provar.';
-
-const ATTACHMENTS_FAILED =
-  "Hi ha adjunts que no s'han pogut pujar: treu-los o torna-ho a provar abans d'enviar la pregunta.";
-
-const ATTACHMENTS_UPLOADING = 'Encara es pugen adjunts. Espera que acabin i torna-ho a provar.';
-
-const STOP_UNSENT = "Sense connexió: no s'ha pogut demanar que s'aturi en acabar la ronda.";
+/** The texts of this controller (toasts, errors), in the language in force when they are made. */
+const messages = () => i18n.m.app.messages;
 
 /**
  * Requests the app makes by itself (refreshes after `hello`, after turn events, retries):
@@ -89,7 +72,7 @@ class App {
   auth: AuthPhase = $state('checking');
   /** A POST /api/auth/logout is under way (the lock screen says so and waits). */
   logoutBusy = $state(false);
-  /** Why the last attempt to end the session on the server failed (Catalan), for the lock screen. */
+  /** Why the last attempt to end the session on the server failed, for the lock screen. */
   logoutError: string | null = $state(null);
   /** Unrecoverable problem (WebSocket origin rejected). */
   fatal: string | null = $state(null);
@@ -100,7 +83,7 @@ class App {
    * saved, since the built-in defaults would stand in for the owner's (audit A11).
    */
   settingsStatus: SettingsStatus = $state('loading');
-  /** Why the last load of the settings failed (Catalan). */
+  /** Why the last load of the settings failed. */
   settingsError: string | null = $state(null);
   /** A request for the settings is under way. */
   settingsLoading = $state(false);
@@ -134,8 +117,7 @@ class App {
     onMessage: (msg) => this.#onMessage(msg),
     onUnauthorized: () => this.#sessionGone(),
     onForbidden: () => {
-      this.fatal =
-        "El servidor ha rebutjat la connexió en temps real perquè l'origen d'aquesta pàgina no és a la llista permesa (codi 4403).";
+      this.fatal = i18n.m.app.root.originRejected;
     },
   });
 
@@ -225,7 +207,7 @@ class App {
     if (await this.#endServerSession()) this.toLogin();
   }
 
-  /** «Torna-ho a provar» on the lock screen, and every page load while a logout is pending. */
+  /** «Try again» on the lock screen, and every page load while a logout is pending. */
   async retryLogout(): Promise<void> {
     this.#lock();
     if (await this.#endServerSession()) await this.#askServer();
@@ -250,7 +232,7 @@ class App {
       ended = true;
     } catch (err) {
       ended = err instanceof ApiError && err.status === 401;
-      if (!ended) this.logoutError = errorMessage(err, 'El servidor ha respost amb un error.');
+      if (!ended) this.logoutError = errorMessage(err, messages().serverError);
     } finally {
       this.logoutBusy = false;
     }
@@ -373,7 +355,7 @@ class App {
       return true;
     } catch (err) {
       if (ticket !== this.#settingsTicket) return this.settingsStatus === 'ready';
-      this.settingsError = errorMessage(err, 'El servidor ha respost amb un error.');
+      this.settingsError = errorMessage(err, messages().serverError);
       if (this.settingsStatus !== 'ready') {
         this.settingsStatus = 'error';
         this.#retrySettingsLater();
@@ -413,7 +395,7 @@ class App {
    * SettingsConflictError says so: nothing is overwritten.
    */
   async saveSettings(s: RuntimeSettings): Promise<RuntimeSettings> {
-    if (this.settingsStatus !== 'ready') throw new Error(SETTINGS_NOT_LOADED);
+    if (this.settingsStatus !== 'ready') throw new Error(messages().settingsNotLoaded);
     const ticket = this.#settingsTicket;
     let saved: RuntimeSettings;
     try {
@@ -476,7 +458,7 @@ class App {
       },
       (err: unknown) => {
         if (ticket !== this.#catalogTicket) return;
-        this.catalogError = errorMessage(err, "No s'ha pogut obtenir la llista de models.");
+        this.catalogError = errorMessage(err, messages().modelsFailed);
       },
     );
     this.#catalogRequest = request.finally(() => {
@@ -497,7 +479,7 @@ class App {
       this.pricingError = null;
     } catch (err) {
       if (epoch !== this.#epoch) return;
-      this.pricingError = errorMessage(err, "No s'han pogut carregar els preus.");
+      this.pricingError = errorMessage(err, messages().pricesFailed);
     }
   }
 
@@ -589,7 +571,7 @@ class App {
     }
     const exists = await this.convs.open(route.id);
     if (!exists) {
-      toasts.push('Aquesta conversa ja no existeix.', 'error');
+      toasts.push(messages().conversationGone, 'error');
       router.replace({ name: 'chat', id: null });
       this.newConversation(false);
       return;
@@ -618,10 +600,10 @@ class App {
   async deleteConversation(id: number): Promise<void> {
     try {
       await this.convs.remove(id);
-      toasts.push('Conversa eliminada.', 'success');
+      toasts.push(messages().conversationDeleted, 'success');
       if (this.convs.currentId === id) this.newConversation();
     } catch (err) {
-      toasts.push(errorMessage(err, "No s'ha pogut eliminar la conversa."), 'error');
+      toasts.push(errorMessage(err, messages().deleteFailed), 'error');
     }
   }
 
@@ -632,7 +614,7 @@ class App {
       await this.convs.rename(id, clean);
       return true;
     } catch (err) {
-      toasts.push(errorMessage(err, "No s'ha pogut canviar el nom."), 'error');
+      toasts.push(errorMessage(err, messages().renameFailed), 'error');
       return false;
     }
   }
@@ -675,24 +657,24 @@ class App {
     const question = text.trim();
     if (!question || this.runningTurn) return false;
     if (charCount(question) > MAX_QUESTION_CHARS) {
-      toasts.push(QUESTION_TOO_LONG, 'error');
+      toasts.push(messages().questionTooLong(formatInt(MAX_QUESTION_CHARS)), 'error');
       return false;
     }
     const tray = this.composer.attachments;
     if (tray.failed || tray.busy) {
-      toasts.push(tray.failed ? ATTACHMENTS_FAILED : ATTACHMENTS_UPLOADING, 'error');
+      toasts.push(tray.failed ? messages().attachmentsFailed : messages().attachmentsUploading, 'error');
       return false;
     }
     if (this.conn.status !== 'open') {
-      toasts.push('Sense connexió amb el servidor. Espera que es reconnecti.', 'error');
+      toasts.push(messages().offline, 'error');
       return false;
     }
     if (this.settingsStatus !== 'ready') {
       // Never with the built-in defaults instead of the owner's (A11); the composer waits too.
       toasts.push(
         this.settingsStatus === 'error'
-          ? "No s'ha pogut carregar la configuració: fins que no es carregui no es pot enviar cap pregunta."
-          : 'Encara es carrega la configuració. Torna-ho a provar en un moment.',
+          ? messages().settingsFailed
+          : messages().settingsLoading,
         'error',
       );
       return false;
@@ -721,7 +703,7 @@ class App {
     };
     if (charCount(JSON.stringify(msg)) > MAX_MESSAGE_CHARS) {
       // The server would not read it, nor could it say which turn went unread.
-      toasts.push(MESSAGE_TOO_LARGE, 'error');
+      toasts.push(messages().messageTooLarge, 'error');
       return false;
     }
     this.turns.add(
@@ -737,7 +719,7 @@ class App {
     );
     if (!this.conn.send(msg)) {
       this.turns.remove(requestId);
-      toasts.push("No s'ha pogut enviar la pregunta.", 'error');
+      toasts.push(messages().sendFailed, 'error');
       return false;
     }
     tray.take(); // they go with the question now
@@ -748,12 +730,12 @@ class App {
     const turn = this.runningTurn;
     if (!turn?.requestId) return;
     if (!this.conn.send({ type: 'turn.cancel', request_id: turn.requestId })) {
-      toasts.push("Sense connexió: no s'ha pogut aturar el torn.", 'error');
+      toasts.push(messages().stopFailed, 'error');
     }
   }
 
   /**
-   * «Atura en acabar la ronda»: the running refine turn ends after the round in course
+   * «Stop after this round»: the running refine turn ends after the round in course
    * (turn.stop), with its last version; it says so until turn.stopping names that round.
    * Only a refine turn has rounds to finish (any turn stops at once with `cancel`).
    */
@@ -761,7 +743,7 @@ class App {
     const turn = this.runningTurn;
     if (!turn?.requestId || turn.mode !== 'refine' || turn.stopRequested || turn.stoppingRound != null) return;
     if (!this.conn.send({ type: 'turn.stop', request_id: turn.requestId })) {
-      toasts.push(STOP_UNSENT, 'error');
+      toasts.push(messages().stopUnsent, 'error');
       return;
     }
     turn.stopRequested = true;
@@ -871,7 +853,7 @@ class App {
           if (gone !== null) this.composer.attachments.markGone(gone);
         }
         if (turn.conversationId !== this.convs.currentId) {
-          toasts.push(`Un torn ha fallat: ${ev.error.message}`, 'error');
+          toasts.push(messages().turnFailed(ev.error.message), 'error');
         }
         break;
       case 'turn.cancelled':
@@ -934,8 +916,8 @@ class App {
       // The server never saved it: offer the text back.
       turn.status = 'failed';
       turn.error = unread
-        ? { kind: 'too_large', message: UNREAD_MESSAGE }
-        : { kind: 'lost', message: "La connexió es va tallar abans d'enviar la pregunta. Torna-ho a provar." };
+        ? { kind: 'too_large', message: messages().unreadMessage }
+        : { kind: 'lost', message: messages().connectionLost };
       this.composer.restore(turn.question, turn.attachments);
       return;
     }
@@ -985,7 +967,7 @@ function conflictSettings(body: unknown): RuntimeSettings | null {
 }
 
 function conflictDetail(body: unknown): string {
-  return isObject(body) && typeof body.detail === 'string' && body.detail ? body.detail : SETTINGS_CONFLICT;
+  return isObject(body) && typeof body.detail === 'string' && body.detail ? body.detail : messages().settingsConflict;
 }
 
 export const app = new App();

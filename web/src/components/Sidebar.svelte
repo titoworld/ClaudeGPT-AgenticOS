@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { prefs } from '../lib/prefs.svelte';
   import { CONVERSATION_QUERY_MAX_LENGTH } from '../lib/protocol';
   import { router } from '../lib/router.svelte';
@@ -17,6 +18,7 @@
   const search = convs.search();
   onDestroy(() => search.dispose());
   let pendingDelete: { id: number; title: string } | null = $state(null);
+  const t = $derived(i18n.m.app);
 
   const searching = $derived(search.term !== '');
   const shown = $derived(searching ? search.shown : convs.list);
@@ -24,22 +26,21 @@
   /** Why nothing is listed. A search says there is no match only once the server has said so. */
   const emptyText = $derived.by(() => {
     if (searching) {
-      if (search.answered) return `Cap conversa coincideix amb «${search.term}».`;
-      return search.error ?? 'Cercant…';
+      if (search.answered) return t.sidebar.noMatch(search.term);
+      return search.error ?? t.sidebar.searching;
     }
     if (convs.listError) return convs.listError;
-    if (convs.listLoading) return 'Carregant…';
-    return 'Encara no hi ha converses.';
+    if (convs.listLoading) return t.loading;
+    return t.sidebar.empty;
   });
   /** What the search found, for screen readers (a live region). */
   const searchStatus = $derived.by(() => {
     if (!searching) return '';
     if (search.error) return search.error;
-    if (!search.answered) return 'Cercant…';
+    if (!search.answered) return t.sidebar.searching;
     const n = search.items.length;
-    if (n === 0) return `Cap conversa coincideix amb «${search.term}».`;
-    const found = n === 1 ? '1 conversa trobada' : `${n} converses trobades`;
-    return search.hasMore ? `${found}, i n'hi ha més.` : `${found}.`;
+    if (n === 0) return t.sidebar.noMatch(search.term);
+    return t.sidebar.found(n, search.hasMore);
   });
   const runningIds = $derived(
     new Set(
@@ -56,17 +57,17 @@
   }
 </script>
 
-<aside class="sidebar glass" class:open={app.sidebarOpen} aria-label="Converses i navegació">
+<aside class="sidebar glass" class:open={app.sidebarOpen} aria-label={t.sidebar.label}>
   <div class="brand">
     <BrandMark size={26} />
     <span class="brand-name">ClaudeGPT <b>OS</b></span>
-    <button type="button" class="icon-btn" onclick={close} aria-label={prefs.narrow ? 'Tanca el menú' : 'Amaga la barra lateral'}>
+    <button type="button" class="icon-btn" onclick={close} aria-label={prefs.narrow ? t.closeMenu : t.sidebar.hideSidebar}>
       <Icon name={prefs.narrow ? 'x' : 'sidebar'} />
     </button>
   </div>
 
   <button type="button" class="btn primary new" onclick={() => app.newConversation()}>
-    <Icon name="plus" size={16} />Nova conversa
+    <Icon name="plus" size={16} />{t.newConversation}
   </button>
 
   <div class="search">
@@ -74,15 +75,15 @@
     <input
       type="search"
       class="search-input"
-      placeholder="Cerca converses"
-      aria-label="Cerca converses"
+      placeholder={t.sidebar.search}
+      aria-label={t.sidebar.search}
       maxlength={CONVERSATION_QUERY_MAX_LENGTH}
       value={search.query}
       oninput={(e) => (search.query = e.currentTarget.value)} />
   </div>
 
-  <nav class="list" aria-label="Converses" aria-busy={searching ? search.pending || search.loading : convs.listLoading}>
-    {#each groups as group (group.label)}
+  <nav class="list" aria-label={t.sidebar.list} aria-busy={searching ? search.pending || search.loading : convs.listLoading}>
+    {#each groups as group (group.key)}
       <section>
         <h2>{group.label}</h2>
         <ul>
@@ -103,46 +104,44 @@
       <p class="none">{search.error}</p>
     {/if}
     {#if searching && search.error && !search.answered}
-      <button type="button" class="btn ghost more" onclick={() => search.retry()}>Torna-ho a provar</button>
+      <button type="button" class="btn ghost more" onclick={() => search.retry()}>{t.retry}</button>
     {:else if searching ? search.answered && search.hasMore : convs.hasMore}
       <button
         type="button"
         class="btn ghost more"
         onclick={() => void (searching ? search.loadMore() : convs.loadMore())}
         disabled={searching ? search.loading : convs.listLoading}>
-        Mostra'n més
+        {t.sidebar.showMore}
       </button>
     {/if}
   </nav>
   <p class="sr-only" role="status">{searchStatus}</p>
 
   {#if app.providers.length}
-    <section class="providers" aria-label="Proveïdors">
+    <section class="providers" aria-label={t.sidebar.providers}>
       {#each app.providers as provider (provider.agent)}
         <ProviderBadge {provider} spend={app.spend} />
       {/each}
     </section>
   {/if}
 
-  <nav class="links" aria-label="Aplicació">
+  <nav class="links" aria-label={t.sidebar.links}>
     <a href="#/tauler" class:current={isDashboard} aria-current={isDashboard ? 'page' : undefined}>
-      <Icon name="dashboard" size={16} />Tauler
+      <Icon name="dashboard" size={16} />{t.dashboard}
     </a>
     <button type="button" onclick={() => (app.settingsOpen = true)}>
-      <Icon name="settings" size={16} />Configuració
+      <Icon name="settings" size={16} />{t.settings}
     </button>
     <button type="button" onclick={() => void app.logout()}>
-      <Icon name="logout" size={16} />Tancar sessió
+      <Icon name="logout" size={16} />{t.sidebar.logOut}
     </button>
   </nav>
 </aside>
 
 <ConfirmDialog
   open={pendingDelete !== null}
-  title="Eliminar la conversa?"
-  message={pendingDelete
-    ? `S'eliminarà «${pendingDelete.title}» amb tots els seus missatges. No es pot desfer.`
-    : ''}
+  title={t.sidebar.deleteTitle}
+  message={pendingDelete ? t.sidebar.deleteMessage(pendingDelete.title) : ''}
   onConfirm={() => {
     if (pendingDelete) void app.deleteConversation(pendingDelete.id);
   }}

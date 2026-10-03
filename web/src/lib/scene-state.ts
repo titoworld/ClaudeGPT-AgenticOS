@@ -21,7 +21,7 @@ export function deriveSceneState(turn: TurnView | null | undefined): SceneState 
     active[s.agent] = true;
     if (s.text || s.critique) hasText = true;
   }
-  // A refine round («Perfecciona»): both review the document, then the editor writes it;
+  // A refine round: both review the document, then the editor writes it;
   // the orbs are as close as the reviews find the document fit for the brief.
   if (turn.phase === 'review') return { mood: 'debate', active, agreement: latestRefineScore(turn) };
   if (turn.phase === 'edit') return { mood: 'synthesis', active, agreement: latestRefineScore(turn) };

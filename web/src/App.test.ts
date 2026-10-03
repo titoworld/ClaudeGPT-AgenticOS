@@ -4,7 +4,7 @@
 // the server ignores it.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimeSettings } from './lib/protocol';
-import { FakeApi, FakeSocket } from './lib/test-server';
+import { FakeApi, FakeSocket, polyfillDialog } from './lib/test-server';
 
 const SAVED: RuntimeSettings = {
   revision: 1,
@@ -50,6 +50,44 @@ describe('the rejected-origin dialog (N24)', () => {
       expect(hint).toContain('AOS_EXTRA_ORIGINS');
       expect(hint).toContain(location.origin);
       expect(hint).not.toContain('AOS_ALLOWED_ORIGINS');
+    } finally {
+      cleanup();
+      app.toLogin();
+    }
+  });
+
+  it('in English: the server refused the socket, and the settings and the address are code', async () => {
+    localStorage.setItem('aos.effects', 'off'); // no 3D scene in jsdom
+    localStorage.setItem('aos.lang', 'en'); // the owner's choice, before the page loads
+    polyfillDialog();
+    FakeSocket.all = [];
+    const server = new FakeApi(SAVED);
+    vi.stubGlobal('fetch', server.fetch);
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.resetModules();
+    const { app } = await import('./lib/app.svelte');
+    const { render, cleanup, textOf } = await import('./lib/test-render');
+    const { flushSync } = await import('svelte');
+    const { default: App } = await import('./App.svelte');
+    const root = render(App, {});
+    try {
+      await vi.waitFor(() => expect(FakeSocket.all).toHaveLength(1));
+      FakeSocket.last().onclose?.({ code: 4403 }); // the server rejects the page's origin
+      flushSync();
+      const dialog = root.querySelector('[role=alertdialog]')!;
+      expect(textOf(dialog.querySelector('h2'))).toBe('Connection refused');
+      expect(textOf(dialog.querySelector('#fatal-text'))).toBe(
+        "The server refused the real-time connection because this page's origin is not on the allowed list (code 4403).",
+      );
+      expect([...dialog.querySelectorAll('.hint code')].map((c) => c.textContent)).toEqual([
+        'AOS_PUBLIC_ORIGIN',
+        location.origin,
+        'AOS_EXTRA_ORIGINS',
+      ]);
+      expect(textOf(dialog.querySelector('.hint'))).toBe(
+        `On the server, AOS_PUBLIC_ORIGIN must be exactly the address of this page, ${location.origin} (or this address must be in AOS_EXTRA_ORIGINS). Fix it, restart the app and reload the page.`,
+      );
+      expect(textOf(dialog.querySelector('button'))).toBe('Reload');
     } finally {
       cleanup();
       app.toLogin();

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { spendLine } from '../lib/costs';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { limitLevel, resetText, shortUntil } from '../lib/limits';
   import Icon from './Icon.svelte';
   import type { MonthSpend, ProviderStatus } from '../lib/protocol';
@@ -13,6 +14,7 @@
   }
 
   let { provider, spend = null }: Props = $props();
+  const t = $derived(i18n.m.app.provider);
   const month = $derived.by(() => {
     const own = spend?.by_agent[provider.agent];
     return spend && own ? spendLine(provider.mode, own, spend.fx, spend.month) : null;
@@ -32,8 +34,8 @@
     onclick={() => (open = !open)}
     onblur={() => (open = false)}>
     <AgentLabel agent={provider.agent} size={16} />
-    <span class="avail" class:on={provider.available} title={provider.available ? 'Disponible' : 'No disponible'}>
-      <i aria-hidden="true"></i><span class="sr-only">{provider.available ? 'Disponible' : 'No disponible'}</span>
+    <span class="avail" class:on={provider.available} title={provider.available ? t.available : t.unavailable}>
+      <i aria-hidden="true"></i><span class="sr-only">{provider.available ? t.available : t.unavailable}</span>
     </span>
     <span class="mode chip">{PROVIDER_MODE_LABEL[provider.mode]}</span>
   </button>
@@ -47,14 +49,14 @@
       <span
         class="bar"
         role="meter"
-        aria-label="Ús de la finestra de {limit.window}"
+        aria-label={t.windowUsage(limit.window)}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={used ?? undefined}
-        aria-valuetext={used == null ? 'Desconegut' : `${Math.round(used)} %`}>
+        aria-valuetext={used == null ? t.unknown : t.percent(Math.round(used))}>
         <span class="fill" style:width="{Math.min(100, used ?? 0)}%"></span>
       </span>
-      <span class="pct">{used == null ? '—' : `${Math.round(used)} %`}</span>
+      <span class="pct">{used == null ? '—' : t.percent(Math.round(used))}</span>
       {#if limit.resets_at}
         <span class="reset" title={resetText(limit.resets_at)}>
           <Icon name="refresh" size={10} /><span aria-hidden="true">{shortUntil(limit.resets_at)}</span>
@@ -71,11 +73,11 @@
     <div class="month {month.kind} {month.level}" title={month.title}>
       {#if ratio != null}
         <div class="limit">
-          <span class="window">mes</span>
+          <span class="window">{t.month}</span>
           <span
             class="bar"
             role="meter"
-            aria-label={month.kind === 'budget' ? 'Pressupost mensual utilitzat' : 'Valor aprofitat del pla'}
+            aria-label={month.kind === 'budget' ? t.budgetUsed : t.planValueUsed}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={Math.min(100, Math.round(ratio * 100))}
@@ -87,13 +89,13 @@
         </div>
       {/if}
       <div class="caption" aria-hidden={ratio != null}>
-        {#if ratio == null}<span class="window">mes</span>{/if}
+        {#if ratio == null}<span class="window">{t.month}</span>{/if}
         <span>{month.label} <b>{month.amount}</b></span>
       </div>
     </div>
   {/if}
 
-  <div class="tip" class:open role="tooltip" id="{uid}-detail">{provider.detail || 'Sense detalls.'}</div>
+  <div class="tip" class:open role="tooltip" id="{uid}-detail">{provider.detail || t.noDetails}</div>
 </div>
 
 <style>

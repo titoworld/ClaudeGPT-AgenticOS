@@ -160,3 +160,42 @@ describe('CommandPalette: the modes', () => {
     expect(e.app.paletteOpen).toBe(false);
   });
 });
+
+describe('CommandPalette in English and Spanish', () => {
+  afterEach(() => localStorage.removeItem('aos.lang'));
+
+  it('names its commands and groups in the language in force, and finds them by its own keywords', async () => {
+    const { e, root } = await opened(conversations(3));
+    const { i18n } = await import('../lib/i18n/index.svelte');
+    const groups = () => [...root.querySelectorAll('li.group')].map((li) => li.textContent);
+
+    i18n.set('en');
+    e.flushSync();
+    expect(labels(root)).toEqual([
+      'New conversation',
+      'Switch to Solo mode',
+      'Switch to Duel mode',
+      'Switch to Council mode',
+      'Switch to Refine mode',
+      'Open the dashboard',
+      'Settings',
+      'Log out',
+      'Conversa número 3',
+      'Conversa número 2',
+      'Conversa número 1',
+    ]);
+    expect(groups()).toEqual(['Actions', 'Conversations']);
+    expect(input(root).placeholder).toBe('Type a command or search for a conversation…');
+    type(root, 'statistics');
+    expect(labels(root)[0]).toBe('Open the dashboard');
+    expect(listText(root)).toContain('Searching conversations…');
+
+    i18n.set('es');
+    type(root, 'estadisticas');
+    expect(labels(root)[0]).toBe('Abrir el panel');
+    expect(listText(root)).toContain('Buscando conversaciones…');
+    type(root, '');
+    expect(labels(root).slice(0, 2)).toEqual(['Nueva conversación', 'Cambiar al modo Solo']);
+    expect(groups()).toEqual(['Acciones', 'Conversaciones']);
+  });
+});
