@@ -1,11 +1,13 @@
 // An attachment's card, in the composer and in a question (like claude.ai): its thumbnail,
 // the first lines of a text file or an icon, its name, type, size, pages and estimated
-// tokens, and its state (uploading, ready or an error in Catalan). A ready one opens its
-// preview; in the composer it can be removed, and retried after a failed connection. A
-// PDF also shows the warnings of the server's analysis of its pages (P7b).
+// tokens, and its state (uploading, ready or an error). A ready one opens its preview; in
+// the composer it can be removed, and retried after a failed connection. A PDF also shows
+// the warnings of the server's analysis of its pages (P7b). In Catalan, and at the end in
+// Spanish and English.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
 import type { AttachmentView } from '../lib/attachments';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { RuntimeSettings } from '../lib/protocol';
 import { DEFAULT_SETTINGS } from '../lib/settings';
 import { cleanup, render, textOf } from '../lib/test-render';
@@ -170,5 +172,40 @@ describe("AttachmentCard: the warnings of a PDF's pages (the server's analysis)"
   it("in a question's card they are part of the button that opens its preview", () => {
     const root = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [], garbled: [], hidden: [7] } }), onopen: vi.fn() });
     expect(textOf(root.querySelector('button.body .pdf-note .note-text'))).toBe('Possible text ocult: pàg. 7');
+  });
+});
+
+describe('AttachmentCard in Spanish and English', () => {
+  const pdf = (partial: Partial<AttachmentView>) =>
+    view({ name: 'informe.pdf', kind: 'pdf', mime: 'application/pdf', size: 1_234_567, pages: 12, tokens: 43_200, ...partial });
+  const noteTexts = (root: HTMLElement) => [...root.querySelectorAll('.pdf-note .note-text')].map((n) => textOf(n));
+
+  afterEach(() => i18n.set('ca'));
+
+  it('in Spanish: its pages, size and tokens, its states and its buttons', () => {
+    i18n.set('es');
+    const ready = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [2, 5], garbled: [3], hidden: [] } }), onopen: vi.fn() });
+    for (const part of ['informe.pdf', 'PDF', '12 páginas', '1,2 MB', '≈ 43,2k tokens']) expect(textOf(ready)).toContain(part);
+    expect(ready.querySelector<HTMLButtonElement>('button.body')!.title).toBe('Abrir la vista previa');
+    expect(noteTexts(ready).map((text) => text.slice(text.indexOf(':')))).toEqual([': págs. 2, 5', ': pág. 3']);
+
+    const uploading = render(AttachmentCard, { view: view({ id: null, status: 'uploading', tokens: null }), onremove: vi.fn() });
+    expect(textOf(uploading)).toContain('Subiendo…');
+    const remove = uploading.querySelector<HTMLButtonElement>('button.remove')!;
+    expect([remove.getAttribute('aria-label'), remove.title]).toEqual(['Quitar foto.png', 'Quitar el adjunto']);
+
+    const failed = view({ id: null, status: 'error', error: 'No se ha podido subir el archivo: la conexión ha fallado.', retryable: true });
+    const retry = render(AttachmentCard, { view: failed, onretry: vi.fn() }).querySelector('button.retry');
+    expect(textOf(retry)).toBe('Reintentar');
+  });
+
+  it('in English, and it follows a change of language', () => {
+    i18n.set('en');
+    const root = render(AttachmentCard, { view: pdf({ pdfNotes: { no_text: [2, 3, 4], garbled: [8], hidden: [] } }) });
+    for (const part of ['12 pages', '1.2 MB', '≈ 43.2k tokens']) expect(textOf(root)).toContain(part);
+    expect(noteTexts(root).map((text) => text.slice(text.indexOf(':')))).toEqual([': pp. 2–4', ': p. 8']);
+    i18n.set('es');
+    flushSync();
+    for (const part of ['12 páginas', '1,2 MB', '≈ 43,2k tokens']) expect(textOf(root)).toContain(part);
   });
 });

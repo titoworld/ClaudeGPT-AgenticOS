@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { findModel, modelHint, modelOptionLabel, validateModelId } from '../lib/models';
   import type { AgentModels } from '../lib/protocol';
 
@@ -15,7 +16,7 @@
     onchange: (value: string | null) => void;
     /** Catalog of this agent (null while it loads). */
     models: AgentModels | null;
-    /** Model used when nothing is chosen, shown as "Per defecte (<model>)". */
+    /** Model used when nothing is chosen, shown as "Default (<model>)". */
     defaultModel?: string | null;
     /** True while a typed id is not valid (lets a form block saving). */
     invalid?: boolean;
@@ -56,6 +57,7 @@
   const error = $derived(isCustom ? validateModelId(text) : null);
   const showError = $derived(!!error && (touched || showErrors || text.trim() !== ''));
   const hint = $derived(isCustom ? '' : modelHint(findModel(models, value ?? defaultModel)));
+  const t = $derived(i18n.m.composer.picker);
 
   $effect(() => {
     invalid = !!error;
@@ -118,15 +120,15 @@
     value={selectValue}
     onchange={onSelect}
     aria-describedby="{uid}-hint">
-    <option value={DEFAULT}>Per defecte{defaultModel ? ` (${defaultModel})` : ''}</option>
+    <option value={DEFAULT}>{t.byDefault}{defaultModel ? ` (${defaultModel})` : ''}</option>
     {#if models?.models.length}
-      <optgroup label={models.live ? 'Disponibles ara' : 'Llista de reserva'}>
+      <optgroup label={models.live ? t.live : t.fallback}>
         {#each models.models as m (m.id)}
           <option value={m.id}>{modelOptionLabel(m)}</option>
         {/each}
       </optgroup>
     {/if}
-    <option value={CUSTOM}>Personalitzat…</option>
+    <option value={CUSTOM}>{t.custom}</option>
   </select>
   {#if isCustom}
     <input
@@ -137,12 +139,12 @@
       onchange={commit}
       onkeydown={onKeydown}
       onblur={() => (touched = true)}
-      placeholder="p. ex. claude-opus-5-5 o gpt-6-sol"
+      placeholder={t.placeholder}
       maxlength="100"
       spellcheck="false"
       autocomplete="off"
       autocapitalize="off"
-      aria-label="Identificador del model ({label})"
+      aria-label={t.idLabel(label)}
       aria-invalid={showError}
       aria-describedby="{uid}-hint" />
   {/if}
@@ -151,7 +153,7 @@
       {#if showError}
         {error}
       {:else if isCustom}
-        L'identificador exacte, encara que el model no surti a la llista.
+        {t.customHint}
       {:else}
         {hint}
       {/if}

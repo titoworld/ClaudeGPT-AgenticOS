@@ -1,7 +1,8 @@
 // What the browser checks before it uploads an attachment (docs/PROTOCOL.md «Adjunts»):
-// the type from the content as the server sniffs it, its Catalan messages, the limits,
-// the downscale of large images and the token estimate shown on each card.
-import { describe, expect, it } from 'vitest';
+// the type from the content as the server sniffs it, its messages (in Catalan, and in
+// English and Spanish at the end), the limits, the downscale of large images and the
+// token estimate shown on each card.
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   ACCEPT,
   AttachmentError,
@@ -10,28 +11,29 @@ import {
   decodeText,
   detectType,
   downscaleTarget,
-  EMPTY_MESSAGE,
+  emptyMessage,
   encodeFormats,
   estimateTokens,
   extension,
   firstLines,
   fitWithin,
   formatBytes,
-  GONE_MESSAGE,
-  HEIC_MESSAGE,
+  goneMessage,
+  heicMessage,
   imageSideMessage,
   kindLabel,
   missingAttachment,
   pagesLabel,
   pdfPagesMessage,
-  SVG_MESSAGE,
+  svgMessage,
   thumbnailUrl,
   tooLargeMessage,
-  TOO_MANY_MESSAGE,
-  TURN_TOO_LARGE_MESSAGE,
+  tooManyMessage,
+  turnTooLargeMessage,
   typeLabel,
-  UNSUPPORTED_MESSAGE,
+  unsupportedMessage,
 } from './attachments';
+import { i18n } from './i18n/index.svelte';
 import {
   DOWNSCALE_EDGE,
   MAX_ATTACHMENTS,
@@ -89,10 +91,10 @@ describe('the type of a file comes from its content, as the server decides it', 
   it('refuses SVG and HEIC with their own message, anything else with the general one (415)', () => {
     expect(refused(() => detectType(bytes('<svg xmlns="http://www.w3.org/2000/svg">'), 'logo.svg'))).toMatchObject({
       status: 415,
-      message: SVG_MESSAGE,
+      message: svgMessage(),
     });
-    expect(refused(() => detectType(HEIC, 'IMG_0001.HEIC')).message).toBe(HEIC_MESSAGE);
-    expect(refused(() => detectType(HEIC, 'foto.jpg')).message).toBe(HEIC_MESSAGE); // a HEIF brand in the content
+    expect(refused(() => detectType(HEIC, 'IMG_0001.HEIC')).message).toBe(heicMessage());
+    expect(refused(() => detectType(HEIC, 'foto.jpg')).message).toBe(heicMessage()); // a HEIF brand in the content
     for (const [name, head] of [
       ['arxiu.zip', bytes('PK', [3, 4, 20, 0])],
       ['dades.txt', bytes('ab', [0], 'cd')], // a NUL: not text
@@ -100,28 +102,28 @@ describe('the type of a file comes from its content, as the server decides it', 
       ['sense-extensio', TEXT],
       ['presentacio.pptx', TEXT],
     ] as const) {
-      expect(refused(() => detectType(head, name)), name).toMatchObject({ status: 415, message: UNSUPPORTED_MESSAGE });
+      expect(refused(() => detectType(head, name)), name).toMatchObject({ status: 415, message: unsupportedMessage() });
     }
   });
 
   it('uses the server messages', () => {
-    expect(UNSUPPORTED_MESSAGE).toBe(
+    expect(unsupportedMessage()).toBe(
       "Aquest tipus de fitxer no s'admet. Pots adjuntar imatges (PNG, JPEG, GIF o WebP), PDF i fitxers de text (UTF-8).",
     );
-    expect(SVG_MESSAGE).toBe(
+    expect(svgMessage()).toBe(
       "Les imatges SVG no s'admeten, perquè poden portar codi. Converteix-la a PNG i torna-la a adjuntar.",
     );
-    expect(HEIC_MESSAGE).toBe(
+    expect(heicMessage()).toBe(
       "Les imatges HEIC no s'admeten. Converteix-la a JPEG (o fes-ne una captura) i torna-la a adjuntar.",
     );
-    expect(EMPTY_MESSAGE).toBe('El fitxer és buit.');
+    expect(emptyMessage()).toBe('El fitxer és buit.');
     expect(tooLargeMessage('image')).toBe('El fitxer és massa gran: una imatge pot tenir com a molt 7 MB.');
     expect(tooLargeMessage('pdf')).toBe('El fitxer és massa gran: un PDF pot tenir com a molt 20 MB.');
     expect(tooLargeMessage('text')).toBe('El fitxer és massa gran: un fitxer de text pot tenir com a molt 200 kB.');
     expect(imageSideMessage(9000, 1200)).toBe('La imatge fa 9.000 x 1.200 píxels: com a molt 8.000 per costat.');
     expect(pdfPagesMessage(150)).toBe('El PDF té 150 pàgines: com a molt 100.');
-    expect(TOO_MANY_MESSAGE).toBe('Un missatge pot portar com a màxim 5 adjunts.');
-    expect(TURN_TOO_LARGE_MESSAGE).toBe("Els adjunts d'un missatge no poden sumar més de 20 MB.");
+    expect(tooManyMessage()).toBe('Un missatge pot portar com a màxim 5 adjunts.');
+    expect(turnTooLargeMessage()).toBe("Els adjunts d'un missatge no poden sumar més de 20 MB.");
   });
 
   it('knows which attachment a turn failed for because the server no longer has it', () => {
@@ -131,7 +133,7 @@ describe('the type of a file comes from its content, as the server decides it', 
     expect(missingAttachment({ kind: 'invalid', message: "L'adjunt 12 no existeix." })).toBe(12);
     expect(missingAttachment({ kind: 'invalid', message: "L'adjunt no existeix." })).toBeNull();
     expect(missingAttachment({ kind: 'not_found', message: 'La conversa no existeix.' })).toBeNull();
-    expect(GONE_MESSAGE).toBe("Aquest adjunt ja no és al servidor: treu-lo i torna'l a adjuntar.");
+    expect(goneMessage()).toBe("Aquest adjunt ja no és al servidor: treu-lo i torna'l a adjuntar.");
   });
 
   it('reads the extension as the server does', () => {
@@ -151,9 +153,9 @@ describe('the content of a text file', () => {
   it('is refused otherwise (415)', () => {
     expect(refused(() => decodeText(bytes([0x41, 0xff, 0xfe, 0x42]), 'a.txt'))).toMatchObject({
       status: 415,
-      message: UNSUPPORTED_MESSAGE,
+      message: unsupportedMessage(),
     });
-    expect(refused(() => decodeText(bytes('a', [0], 'b'), 'a.txt')).message).toBe(UNSUPPORTED_MESSAGE);
+    expect(refused(() => decodeText(bytes('a', [0], 'b'), 'a.txt')).message).toBe(unsupportedMessage());
   });
 
   it('gives the first lines for its card', () => {
@@ -318,5 +320,48 @@ describe('the limits are the ones the protocol documents', () => {
     const documented = [...list.matchAll(/`([a-z]+)`/g)].map((m) => m[1]);
     expect(documented.length).toBeGreaterThan(30);
     expect(new Set(documented)).toEqual(new Set(TEXT_EXTENSIONS));
+  });
+});
+
+describe('in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('the refusals, with the numbers as each language writes them', () => {
+    i18n.set('en');
+    expect(tooLargeMessage('image')).toBe('The file is too large: an image can be at most 7 MB.');
+    expect(tooLargeMessage('text')).toBe('The file is too large: a text file can be at most 200 kB.');
+    expect(imageSideMessage(9000, 1200)).toBe('The image is 9,000 x 1,200 pixels: at most 8,000 per side.');
+    expect(pdfPagesMessage(1500)).toBe('The PDF has 1,500 pages: at most 100.');
+    expect(tooManyMessage()).toBe('A message can carry at most 5 attachments.');
+    expect(turnTooLargeMessage()).toBe('The attachments of a message cannot add up to more than 20 MB.');
+    expect(refused(() => detectType(HEIC, 'foto.heic')).message).toBe(
+      'HEIC images are not accepted. Convert it to JPEG (or take a screenshot of it) and attach it again.',
+    );
+
+    i18n.set('es');
+    expect(tooLargeMessage('pdf')).toBe('El archivo es demasiado grande: un PDF puede ocupar como máximo 20 MB.');
+    expect(tooLargeMessage('image')).toBe('El archivo es demasiado grande: una imagen puede ocupar como máximo 7 MB.');
+    expect(imageSideMessage(12_000, 1200)).toBe('La imagen mide 12.000 x 1200 píxeles: como máximo 8000 por lado.');
+    expect(emptyMessage()).toBe('El archivo está vacío.');
+    expect(goneMessage()).toBe('Este adjunto ya no está en el servidor: quítalo y vuelve a adjuntarlo.');
+    expect(refused(() => detectType(bytes('PK'), 'arxiu.zip')).message).toBe(
+      'Este tipo de archivo no se admite. Puedes adjuntar imágenes (PNG, JPEG, GIF o WebP), PDF y archivos de texto (UTF-8).',
+    );
+  });
+
+  it('what a card says: sizes with the decimal mark of the language, types and pages', () => {
+    i18n.set('en');
+    expect([formatBytes(1500), formatBytes(1_234_567)]).toEqual(['1.5 kB', '1.2 MB']);
+    expect([typeLabel(null, null, 'a.bin'), typeLabel('image', 'image/avif', 'a.avif'), kindLabel('text')]).toEqual([
+      'File',
+      'Image',
+      'Text file',
+    ]);
+    expect([pagesLabel(1), pagesLabel(12)]).toEqual(['1 page', '12 pages']);
+
+    i18n.set('es');
+    expect([formatBytes(1500), formatBytes(1_234_567)]).toEqual(['1,5 kB', '1,2 MB']);
+    expect([typeLabel(null, null, 'a.bin'), kindLabel('image'), kindLabel('text')]).toEqual(['Archivo', 'Imagen', 'Archivo de texto']);
+    expect([pagesLabel(1), pagesLabel(12)]).toEqual(['1 página', '12 páginas']);
   });
 });

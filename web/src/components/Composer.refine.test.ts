@@ -192,3 +192,59 @@ describe('Composer: the «Perfecciona» mode', () => {
     expect(radio(root, 'refine').checked).toBe(false);
   });
 });
+
+describe('Composer: the Refine mode in English and Spanish', () => {
+  const texts = (root: HTMLElement, selector: string) => [...popover(root).querySelectorAll(selector)].map((n) => env!.textOf(n));
+
+  afterEach(() => localStorage.removeItem('aos.lang'));
+
+  it('in English: its name, its options button, and the labels and hints of its options', async () => {
+    localStorage.setItem('aos.lang', 'en'); // the page opens in English
+    const { e, root } = await ready();
+    click(radio(root, 'refine'));
+    expect(e.textOf(radio(root, 'refine').closest('label'))).toBe('Refine');
+    expect(e.textOf(optionsButton(root))).toBe('12 rounds · €3');
+    expect(optionsButton(root)!.getAttribute('aria-label')).toBe(
+      'Refine options: at most 12 rounds, a budget of €3, automatic word limit, Claude edits, stops by itself when it converges',
+    );
+    expect(texts(root, 'h3, .field > span, .toggle > span, .inline > span, legend')).toEqual([
+      'Refine options',
+      'Maximum rounds 12',
+      'Budget (€)',
+      'Automatic word limit',
+      'Word limit',
+      'Editor',
+      'Stops by itself when it converges',
+      'Convergence threshold 90',
+    ]);
+    const hints = texts(root, '.hint');
+    expect(hints[0]).toBe('Both AIs improve a single document round after round until you stop them. The last version is the final answer.');
+    expect(hints).toContain('Round 1 merges the answers; each round after it reviews and writes a version.');
+    expect(hints).toContain('Automatic: 1.2 times the words of version 1 (at least 300).');
+    expect(hints).toContain('Merges the answers and writes each version.');
+    expect(hints.at(-1)).toBe('When both give it this score or more, with no flaw, two rounds in a row.');
+    expect(field(root, 'Word limit').placeholder).toBe('Automatic');
+
+    click(field(root, 'Stops by itself'));
+    expect(texts(root, '.hint').at(-1)).toBe(
+      'It only stops when you stop it, when neither finds anything to change or when it reaches a limit.',
+    );
+    expect(optionsButton(root)!.getAttribute('aria-label')).toMatch(/, does not stop by itself$/);
+  });
+
+  it('in Spanish: its options button and what it says of a word limit set by the owner', async () => {
+    localStorage.setItem('aos.lang', 'es');
+    const { e, root } = await ready();
+    click(radio(root, 'refine'));
+    expect(e.textOf(radio(root, 'refine').closest('label'))).toBe('Perfecciona');
+    click(field(root, 'Límite de palabras automático'));
+    set(field(root, 'Rondas máximas'), '20');
+    click(popover(root).querySelector<HTMLInputElement>('input[type=radio][value=chatgpt]')!);
+    expect(e.textOf(optionsButton(root))).toBe('20 rondas · 3 €');
+    expect(optionsButton(root)!.getAttribute('aria-label')).toBe(
+      'Opciones de Perfecciona: como máximo 20 rondas, presupuesto de 3 €, límite de 1000 palabras, edita ChatGPT, se detiene solo cuando converge',
+    );
+    expect(texts(root, 'h3')).toEqual(['Opciones de Perfecciona']);
+    expect(texts(root, '.hint')).toContain('Fusiona las respuestas y escribe cada versión.');
+  });
+});

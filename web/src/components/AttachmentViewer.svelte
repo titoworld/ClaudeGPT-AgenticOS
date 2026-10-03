@@ -4,6 +4,7 @@
   // button (PDFs and text files are served as downloads, never as pages of the app).
   import { contentUrl, formatBytes, pagesLabel, typeLabel } from '../lib/attachments';
   import { lightDismiss, syncDialog } from '../lib/dialog';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { viewer } from '../lib/viewer.svelte';
   import Icon from './Icon.svelte';
   import PdfPages from './PdfPages.svelte';
@@ -42,9 +43,9 @@
           <p class="meta">{meta}</p>
         </div>
         <a class="btn ghost download" href={contentUrl(current.id)} download={current.name}>
-          <Icon name="download" size={15} /><span class="label">Descarrega</span>
+          <Icon name="download" size={15} /><span class="label">{i18n.m.attachments.viewer.download}</span>
         </a>
-        <button type="button" class="icon-btn" aria-label="Tanca la vista prèvia" onclick={() => dialog?.close()}>
+        <button type="button" class="icon-btn" aria-label={i18n.m.attachments.viewer.close} onclick={() => dialog?.close()}>
           <Icon name="x" />
         </button>
       </header>

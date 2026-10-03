@@ -391,3 +391,70 @@ describe('Composer: Enter on phones and tablets (N20)', () => {
     expect(turnStarts(socket)).toHaveLength(1);
   });
 });
+
+describe('Composer in English and Spanish', () => {
+  const hint = (root: HTMLElement) => env!.textOf(root.querySelector('.kbd-hint'));
+  const modes = (root: HTMLElement) => [...root.querySelectorAll<HTMLLabelElement>('.modes label')];
+
+  /** The owner picks a language (in the app just loaded): the composer repaints. */
+  async function speak(locale: 'en' | 'es'): Promise<void> {
+    const { i18n } = await import('../lib/i18n/index.svelte');
+    i18n.set(locale);
+    env!.flushSync();
+  }
+
+  afterEach(() => localStorage.removeItem('aos.lang'));
+
+  it('in English: the placeholder, the modes and what each does, the hint, the send button and the limit', async () => {
+    const { root, textarea } = await ready();
+    expect(textarea.placeholder).toBe('Pregunta el que vulguis…');
+    await speak('en');
+    expect(textarea.placeholder).toBe('Ask anything…');
+    expect(modes(root).map((label) => env!.textOf(label))).toEqual(['Solo', 'Duel', 'Council', 'Refine']);
+    expect(modes(root).map((label) => label.title)).toEqual([
+      'Solo: one AI answers. The fastest and cheapest.',
+      'Duel: Claude and ChatGPT answer at once, side by side.',
+      'Council: they answer, critique each other round by round and synthesize the best answer. If they reach a consensus, they stop early.',
+      'Refine: both AIs improve a single document round after round until you stop them.',
+    ]);
+    expect([sendButton(root).getAttribute('aria-label'), sendButton(root).title]).toEqual(['Send', 'Send (Enter)']);
+    expect(root.querySelector('button.attach')!.getAttribute('aria-label')).toBe('Attach files');
+    expect(env!.textOf(root.querySelector('label.cache'))).toBe('Cache');
+    type(textarea, '');
+    expect(hint(root)).toBe('Enter to send . Shift+Enter starts a new line and Esc stops the running turn.');
+
+    type(textarea, 'x'.repeat(LIMIT + 1));
+    expect(env!.textOf(root.querySelector('.char-count'))).toBe('100,001 / 100,000 characters');
+    expect(env!.textOf(root.querySelector('.too-long'))).toBe(
+      'The question is over the maximum of 100,000 characters: shorten it to send it.',
+    );
+    expect(sendButton(root).title).toBe('The question is too long');
+  });
+
+  it('in Spanish: the keys as Spanish keyboards name them, and the council options', async () => {
+    media.set(COARSE, true);
+    const { root, textarea } = await ready();
+    await speak('es');
+    expect(textarea.placeholder).toBe('Pregunta lo que quieras…');
+    expect(sendButton(root).title).toBe('Enviar (Ctrl+Intro)');
+    type(textarea, '');
+    expect(hint(root)).toBe(
+      'Ctrl+Intro para enviar . Intro inserta un salto de línea. También puedes enviar con el botón Enviar, o con Cmd+Intro en un teclado de Apple. Esc detiene el turno en curso.',
+    );
+
+    root.querySelector<HTMLInputElement>('input[type=radio][value=debate]')!.click();
+    env!.flushSync();
+    const options = root.querySelector<HTMLButtonElement>('button.options-btn')!;
+    expect(env!.textOf(options)).toBe('1 ronda · 70');
+    expect(options.getAttribute('aria-label')).toBe('Opciones del consejo: 1 ronda, umbral 70, sintetiza ChatGPT');
+    const popover = document.getElementById(options.getAttribute('popovertarget')!)!;
+    expect([...popover.querySelectorAll('h3, .field > span, legend, .hint')].map((n) => env!.textOf(n))).toEqual([
+      'Opciones del consejo',
+      'Rondas de revisión 1',
+      '0 = sin revisiones: respuestas y síntesis directa.',
+      'Umbral de consenso 70',
+      'Si los dos superan este acuerdo, las rondas se detienen.',
+      'Sintetizador',
+    ]);
+  });
+});

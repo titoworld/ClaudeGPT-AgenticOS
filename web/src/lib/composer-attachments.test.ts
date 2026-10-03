@@ -1,20 +1,21 @@
 // The attachments of the composer (docs/PROTOCOL.md «Adjunts»): each file is checked as
 // the server would check it, prepared (large images downscaled, a thumbnail made) and
-// uploaded, with its state on its card: uploading, ready or an error in Catalan. A file
-// the server would refuse is never uploaded; one removed is stopped or deleted; the
-// ready ones go with the next question, in order. The browser's image and PDF work is
-// a double here (lib/media.test.ts covers it).
+// uploaded, with its state on its card: uploading, ready or an error (in Catalan, and at
+// the end in Spanish and English). A file the server would refuse is never uploaded; one
+// removed is stopped or deleted; the ready ones go with the next question, in order. The
+// browser's image and PDF work is a double here (lib/media.test.ts covers it).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  HEIC_MESSAGE,
+  heicMessage,
   pdfPagesMessage,
-  SVG_MESSAGE,
+  svgMessage,
   tooLargeMessage,
-  TOO_MANY_MESSAGE,
-  TURN_TOO_LARGE_MESSAGE,
-  UNSUPPORTED_MESSAGE,
+  tooManyMessage,
+  turnTooLargeMessage,
+  unsupportedMessage,
   AttachmentError,
 } from './attachments';
+import { i18n } from './i18n/index.svelte';
 import type { RuntimeSettings } from './protocol';
 import { DEFAULT_SETTINGS } from './settings';
 import { deferred, FakeApi } from './test-server';
@@ -146,10 +147,10 @@ describe('a file attached', () => {
 
 describe('what the server would refuse is refused here, without uploading it', () => {
   it.each([
-    ['logo.svg', () => text('logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>'), SVG_MESSAGE],
-    ['foto.heic', () => new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 104, 101, 105, 99, 0, 0, 0, 0])], 'foto.heic'), HEIC_MESSAGE],
-    ['arxiu.zip', () => new File([new Uint8Array([80, 75, 3, 4, 20, 0])], 'arxiu.zip'), UNSUPPORTED_MESSAGE],
-    ['dades.txt (not UTF-8)', () => new File([new Uint8Array([65, 0xff, 0xfe, 66])], 'dades.txt'), UNSUPPORTED_MESSAGE],
+    ['logo.svg', () => text('logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>'), svgMessage()],
+    ['foto.heic', () => new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 104, 101, 105, 99, 0, 0, 0, 0])], 'foto.heic'), heicMessage()],
+    ['arxiu.zip', () => new File([new Uint8Array([80, 75, 3, 4, 20, 0])], 'arxiu.zip'), unsupportedMessage()],
+    ['dades.txt (not UTF-8)', () => new File([new Uint8Array([65, 0xff, 0xfe, 66])], 'dades.txt'), unsupportedMessage()],
     ['buit.txt', () => new File([], 'buit.txt'), 'El fitxer és buit.'],
     ['llarg.txt', () => sized(text('llarg.txt', 'hola'), 200_001), tooLargeMessage('text')],
     ['gran.pdf', () => sized(pdf('gran.pdf'), 20_000_001), tooLargeMessage('pdf')],
@@ -172,7 +173,7 @@ describe('what the server would refuse is refused here, without uploading it', (
   it('at most 5 attachments per message', async () => {
     tray.add(Array.from({ length: 7 }, (_, i) => png(`foto-${i + 1}.png`)));
     expect(tray.items.map((i) => i.name)).toEqual(['foto-1.png', 'foto-2.png', 'foto-3.png', 'foto-4.png', 'foto-5.png']);
-    expect(toasts.items.map((t) => t.text)).toEqual([TOO_MANY_MESSAGE]);
+    expect(toasts.items.map((t) => t.text)).toEqual([tooManyMessage()]);
     await tray.settled();
     tray.add([png('foto-6.png')]);
     expect(tray.items).toHaveLength(5);
@@ -184,7 +185,7 @@ describe('what the server would refuse is refused here, without uploading it', (
     await tray.settled();
     tray.add([sized(pdf('b.pdf'), 8_000_001)]);
     await tray.settled();
-    expect(plain(tray.items[1])).toMatchObject({ status: 'error', error: TURN_TOO_LARGE_MESSAGE });
+    expect(plain(tray.items[1])).toMatchObject({ status: 'error', error: turnTooLargeMessage() });
     expect(server.uploads.map((u) => u.name)).toEqual(['a.pdf']);
     // Removing one makes room again.
     tray.remove(tray.items[0]!.key);
@@ -207,7 +208,7 @@ describe('what the server would refuse is refused here, without uploading it', (
 describe('when the upload fails', () => {
   it.each([
     [413, 'El fitxer és massa gran: un PDF pot tenir com a molt 20 MB.'],
-    [415, UNSUPPORTED_MESSAGE],
+    [415, unsupportedMessage()],
     [422, 'El PDF està xifrat o protegit amb contrasenya. Treu-ne la protecció i torna\'l a adjuntar.'],
   ])('the server refused it (%i): its reason, and no retry', async (status, detail) => {
     server.uploadAnswer = () => new Response(JSON.stringify({ detail }), { status });
@@ -328,5 +329,43 @@ describe('the attachments of a question', () => {
     tray.add([png('a.png'), text('b.txt', 'x'.repeat(1000))]);
     await tray.settled();
     expect(tray.tokens).toBe(1250);
+  });
+});
+
+describe('in Spanish and English', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('in Spanish: a file too large, the connection that failed and too many files', async () => {
+    i18n.set('es');
+    server.uploadAnswer = () => {
+      throw new TypeError('Failed to fetch');
+    };
+    tray.add([sized(pdf('gran.pdf'), 20_000_001), png(), new File([], '')]);
+    await tray.settled();
+    expect(tray.items.map(plain)).toMatchObject([
+      { name: 'gran.pdf', error: 'El archivo es demasiado grande: un PDF puede ocupar como máximo 20 MB.', retryable: false },
+      { name: 'foto.png', error: 'No se ha podido subir el archivo: la conexión ha fallado.', retryable: true },
+      { name: 'archivo', error: 'El archivo está vacío.', retryable: false },
+    ]);
+    tray.add([png('a.png'), png('b.png'), png('c.png')]);
+    expect(toasts.items.map((t) => t.text)).toEqual(['Un mensaje puede llevar como máximo 5 adjuntos.']);
+  });
+
+  it('in English: an upload the server refused without a reason, and an attachment it no longer has', async () => {
+    i18n.set('en');
+    server.uploadAnswer = () => new Response('', { status: 500 });
+    tray.add([png()]);
+    await tray.settled();
+    expect(plain(tray.items[0])).toMatchObject({ error: 'The file could not be uploaded (error 500).', retryable: true });
+
+    server.uploadAnswer = () => null;
+    tray.clear();
+    tray.add([png()]);
+    await tray.settled();
+    tray.markGone(tray.items[0]!.attachment!.id);
+    expect(plain(tray.items[0])).toMatchObject({
+      status: 'error',
+      error: 'This attachment is no longer on the server: remove it and attach it again.',
+    });
   });
 });

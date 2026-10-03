@@ -2,7 +2,7 @@
 // attachment (lib/composer-attachments.svelte.ts) so the login screen does without it:
 //
 // 1. its checks, as the server would make them (its type from its content, its limits),
-//    so one the server would refuse gets its Catalan error at once and is never uploaded;
+//    so one the server would refuse gets its error at once and is never uploaded;
 // 2. its preparation: a large image downscaled, a thumbnail made (an image's, a PDF's
 //    first page), a text file's first lines read (lib/media.ts);
 // 3. its upload, and then its thumbnail's.
@@ -13,13 +13,13 @@ import {
   AttachmentError,
   decodeText,
   detectType,
-  EMPTY_MESSAGE,
+  emptyMessage,
   estimateTokens,
   firstLines,
   kindLimit,
   pdfPagesMessage,
   tooLargeMessage,
-  TURN_TOO_LARGE_MESSAGE,
+  turnTooLargeMessage,
 } from './attachments';
 import type { DraftAttachment } from './composer-attachments.svelte';
 import { blobToDataUrl, pdfPreview, prepareImage, readHead } from './media';
@@ -33,7 +33,7 @@ import { MAX_PDF_PAGES, MAX_TURN_ATTACHMENT_BYTES } from './protocol';
 export async function processDraft(item: DraftAttachment, controller: AbortController, otherBytes: () => number): Promise<void> {
   const file = item.file!;
   const { signal } = controller;
-  if (file.size === 0) throw new AttachmentError(422, EMPTY_MESSAGE);
+  if (file.size === 0) throw new AttachmentError(422, emptyMessage());
   const type = detectType(await readHead(file), file.name);
   item.kind = type.kind;
   item.mime = type.mime;
@@ -64,7 +64,7 @@ export async function processDraft(item: DraftAttachment, controller: AbortContr
     });
   }
   if (item.removed) return;
-  if (otherBytes() + body.size > MAX_TURN_ATTACHMENT_BYTES) throw new AttachmentError(422, TURN_TOO_LARGE_MESSAGE);
+  if (otherBytes() + body.size > MAX_TURN_ATTACHMENT_BYTES) throw new AttachmentError(422, turnTooLargeMessage());
   item.body = body;
   // The thumbnail shows as soon as it is made.
   const shown = thumbnail

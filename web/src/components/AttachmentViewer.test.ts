@@ -3,6 +3,7 @@
 // download button. PDF.js is a double here (lib/pdf.test.ts covers it).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { Attachment, RuntimeSettings } from '../lib/protocol';
 import { DEFAULT_SETTINGS } from '../lib/settings';
 import { cleanup, render, textOf } from '../lib/test-render';
@@ -167,5 +168,40 @@ describe('AttachmentViewer', () => {
     const root = render(AttachmentViewer, {});
     const dialog = open(root, TEXT); // the server does not have it: 404
     await vi.waitFor(() => expect(textOf(dialog.querySelector('[role=alert]'))).toContain("No s'ha pogut carregar el fitxer."));
+  });
+});
+
+describe('AttachmentViewer in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('in English: what it is, its buttons and the pages of a PDF', async () => {
+    i18n.set('en');
+    vi.mocked(openPdf).mockResolvedValue(fakeDocument(3));
+    const root = render(AttachmentViewer, {});
+    const dialog = open(root, { ...PDF, size: 1_234_567 });
+    expect(textOf(dialog.querySelector('.meta'))).toBe('PDF · 3 pages · 1.2 MB');
+    expect(textOf(dialog.querySelector('a[download]'))).toBe('Download');
+    expect(button(root, 'Close preview')).not.toBeNull();
+    await vi.waitFor(() => expect(textOf(dialog.querySelector('.pager'))).toBe('Page 1 of 3'));
+    expect(dialog.querySelector('.pager')!.getAttribute('aria-label')).toBe('Pages');
+    expect(button(root, 'Previous page').disabled).toBe(true);
+    expect(button(root, 'Next page').disabled).toBe(false);
+  });
+
+  it('in Spanish: a text file that cannot be loaded, and a PDF that cannot be shown', async () => {
+    i18n.set('es');
+    vi.mocked(openPdf).mockRejectedValue(new Error('Invalid PDF structure.'));
+    const root = render(AttachmentViewer, {});
+    const text = open(root, TEXT);
+    expect(textOf(text.querySelector('.meta'))).toBe('MD · 120 kB');
+    await vi.waitFor(() =>
+      expect(textOf(text.querySelector('[role=alert]'))).toBe('No se ha podido cargar el archivo. Puedes descargarlo.'),
+    );
+    const pdf = open(root, PDF);
+    await vi.waitFor(() =>
+      expect(textOf(pdf.querySelector('[role=alert]'))).toBe('No se ha podido mostrar el PDF. Puedes descargarlo.'),
+    );
+    expect(textOf(pdf.querySelector('a[download]'))).toBe('Descargar');
+    expect(button(root, 'Cerrar la vista previa')).not.toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { AGENT_LABEL } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { shortModel } from '../lib/models';
   import { placeAbove } from '../lib/popover';
   import { prefs } from '../lib/prefs.svelte';
@@ -18,9 +19,8 @@
   /** Agents that answer with the current mode (solo: only the target). */
   const shown = $derived<readonly Agent[]>(c.mode === 'solo' ? [c.target] : AGENTS);
   const overridden = $derived(AGENTS.some((a) => prefs.models[a]));
-  const summary = $derived(
-    shown.map((a) => `${AGENT_LABEL[a]}: ${app.modelFor(a) ?? 'per defecte'}`).join(', '),
-  );
+  const t = $derived(i18n.m.composer.models);
+  const summary = $derived(shown.map((a) => `${AGENT_LABEL[a]}: ${app.modelFor(a) ?? t.byDefault}`).join(', '));
 
   function onToggle(e: Event): void {
     if ((e as ToggleEvent).newState === 'open') void app.loadModels();
@@ -33,8 +33,8 @@
   class:custom={overridden}
   popovertarget={popoverId}
   bind:this={button}
-  aria-label="Models ({summary}). Canvia els models"
-  title={overridden ? 'Models triats per a aquesta pestanya' : 'Models per defecte'}>
+  aria-label={t.button(summary)}
+  title={overridden ? t.chosen : t.defaults}>
   <Icon name="cpu" size={15} />
   <span class="names">
     {#each shown as agent (agent)}
@@ -53,23 +53,23 @@
   aria-labelledby="{uid}-title"
   {@attach placeAbove(() => button, 360)}>
   <header>
-    <h3 id="{uid}-title">Models</h3>
-    <p class="hint">S'apliquen als torns següents d'aquesta pestanya.</p>
+    <h3 id="{uid}-title">{t.title}</h3>
+    <p class="hint">{t.hint}</p>
   </header>
 
   {#each AGENTS as agent (agent)}
     {@const models = app.catalog?.[agent] ?? null}
-    <section class="agent" aria-label="Model de {AGENT_LABEL[agent]}">
+    <section class="agent" aria-label={t.agentModel(AGENT_LABEL[agent])}>
       <div class="agent-head">
         <AgentLabel {agent} size={15} />
         {#if models && !models.live}
-          <span class="chip" title="No s'ha pogut consultar el proveïdor: es mostra una llista de reserva.">
-            llista de reserva
+          <span class="chip" title={t.fallbackTitle}>
+            {t.fallback}
           </span>
         {/if}
       </div>
       <ModelPicker
-        label="Model de {AGENT_LABEL[agent]}"
+        label={t.agentModel(AGENT_LABEL[agent])}
         hideLabel
         value={prefs.models[agent] ?? null}
         onchange={(v) => prefs.setModel(agent, v)}
@@ -90,15 +90,11 @@
       onclick={() => void app.loadModels(true)}
       disabled={app.catalogLoading}>
       <Icon name="refresh" size={14} class={app.catalogLoading ? 'spin' : ''} />
-      {app.catalogLoading ? 'Actualitzant…' : 'Actualitza la llista'}
+      {app.catalogLoading ? t.updating : t.update}
     </button>
     {#if overridden}
-      <button
-        type="button"
-        class="btn ghost small"
-        onclick={() => prefs.resetModels()}
-        title="Torna als models per defecte">
-        Restableix
+      <button type="button" class="btn ghost small" onclick={() => prefs.resetModels()} title={t.resetTitle}>
+        {t.reset}
       </button>
     {/if}
   </footer>

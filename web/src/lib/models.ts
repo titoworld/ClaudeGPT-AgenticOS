@@ -1,6 +1,7 @@
 // Model selection helpers: id validation, turn.start overrides, short labels and
 // the per-browser persistence of the composer choice.
 
+import { i18n } from './i18n/index.svelte';
 import { formatK } from './text';
 import { AGENTS, MODEL_ID_PATTERN, type Agent, type AgentModels, type ModelInfo } from './protocol';
 
@@ -9,14 +10,13 @@ export type ModelOverrides = Partial<Record<Agent, string>>;
 
 export const MODEL_ID_MAX = 100;
 
-/** Catalan error for a model id typed by the owner, or null when valid. */
+/** The error for a model id typed by the owner (in the language in force), or null when valid. */
 export function validateModelId(raw: string): string | null {
   const id = raw.trim();
-  if (!id) return "Escriu l'identificador del model.";
-  if (id.length > MODEL_ID_MAX) return `Com a màxim ${MODEL_ID_MAX} caràcters.`;
-  if (!MODEL_ID_PATTERN.test(id)) {
-    return "Identificador no vàlid: sense espais, començant per lletra o xifra (s'admeten . _ - : / @ [ ]).";
-  }
+  const t = i18n.m.composer.modelId;
+  if (!id) return t.empty;
+  if (id.length > MODEL_ID_MAX) return t.tooLong(MODEL_ID_MAX);
+  if (!MODEL_ID_PATTERN.test(id)) return t.invalid;
   return null;
 }
 
@@ -102,6 +102,6 @@ export function modelOptionLabel(m: ModelInfo): string {
 export function modelHint(m: ModelInfo | null): string {
   if (!m) return '';
   const parts = [m.description.trim()];
-  if (m.context_window) parts.push(`${formatK(m.context_window)} tokens de context`);
+  if (m.context_window) parts.push(i18n.m.composer.modelId.context(formatK(m.context_window)));
   return parts.filter(Boolean).join(' · ');
 }

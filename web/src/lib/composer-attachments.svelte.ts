@@ -1,7 +1,7 @@
 // The attachments of the composer (docs/PROTOCOL.md «Adjunts»). Each file attached is
 // checked as the server would check it, prepared and uploaded, then its thumbnail
 // (lib/attachment-work.ts, loaded with the first file), before it is ready; its card
-// shows each state, and a Catalan error for one refused.
+// shows each state, and an error for one refused (in the language of the interface).
 //
 // A file removed stops its upload, or is deleted on the server if it got there. The
 // ready ones go with the next question, in the order they were attached; if the server
@@ -11,13 +11,14 @@ import { api, ApiError, RequestTimeoutError } from './api';
 import { knownLines } from './attachment-lines';
 import {
   AttachmentError,
-  CONNECTION_FAILED_MESSAGE,
-  GONE_MESSAGE,
+  connectionFailedMessage,
+  goneMessage,
   thumbnailUrl,
-  TOO_MANY_MESSAGE,
+  tooManyMessage,
   type AttachmentStatus,
   type AttachmentView,
 } from './attachments';
+import { i18n } from './i18n/index.svelte';
 import { MAX_ATTACHMENTS, type Attachment, type AttachmentKind, type PdfNotes } from './protocol';
 import { toasts } from './toasts.svelte';
 
@@ -77,7 +78,7 @@ export class DraftAttachment implements AttachmentView {
   }
 
   get name(): string {
-    return this.attachment?.name ?? (this.file?.name.trim() || 'fitxer');
+    return this.attachment?.name ?? (this.file?.name.trim() || i18n.m.attachments.unnamed);
   }
 
   get size(): number {
@@ -117,12 +118,12 @@ function failure(err: unknown): { message: string; retryable: boolean } {
     const refused = err.status === 413 || err.status === 415 || err.status === 422;
     const detail = typeof (err.body as { detail?: unknown } | null)?.detail === 'string';
     return {
-      message: detail ? err.message : `No s'ha pogut pujar el fitxer (error ${err.status}).`,
+      message: detail ? err.message : i18n.m.attachments.failed.upload(err.status),
       retryable: !refused,
     };
   }
   if (err instanceof RequestTimeoutError) return { message: err.message, retryable: true };
-  return { message: CONNECTION_FAILED_MESSAGE, retryable: true };
+  return { message: connectionFailedMessage(), retryable: true };
 }
 
 export class ComposerAttachments {
@@ -160,7 +161,7 @@ export class ComposerAttachments {
       this.items.push(item);
       item.task = this.#process(item);
     }
-    if (refused) toasts.push(TOO_MANY_MESSAGE, 'error');
+    if (refused) toasts.push(tooManyMessage(), 'error');
   }
 
   /** Uploads again an attachment whose upload failed for a reason a retry can fix. */
@@ -211,7 +212,7 @@ export class ComposerAttachments {
    * after a day): its card says so, and it must be removed before sending.
    */
   markGone(id: number): void {
-    this.items.find((item) => item.attachment?.id === id)?.fail(new AttachmentError(404, GONE_MESSAGE));
+    this.items.find((item) => item.attachment?.id === id)?.fail(new AttachmentError(404, goneMessage()));
   }
 
   /** Forgets every attachment (the session ended, or they were sent): nothing is deleted. */
