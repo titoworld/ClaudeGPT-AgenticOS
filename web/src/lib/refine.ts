@@ -1,33 +1,32 @@
-// What the view of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md) shows:
-// the versions of its living document, the block of each round, what the turn is doing
-// now and why it stopped. Pure functions of a TurnView, live or stored, so a reloaded turn
-// shows what the live one did (its rounds are rebuilt from the messages: turns.svelte.ts).
+// What the view of a refine turn (Refine, docs/adr/0010-refine-mode.md) shows: the
+// versions of its living document, the block of each round, what the turn is doing now and
+// why it stopped, in the language of the interface (lib/i18n, areas/refine.ts). Pure
+// functions of a TurnView, live or stored, so a reloaded turn shows what the live one did
+// (its rounds are rebuilt from the messages: turns.svelte.ts).
 
 import { AGENT_LABEL, formatInt } from './format';
 import { formatMoney } from './costs';
-import { AGENTS, type Agent, type RefineChange, type RefineStopReason } from './protocol';
-import { isTerminal, REFINE_ROUND_REASONS, type RefineRoundView, type StreamView, type TurnView } from './turns.svelte';
+import { i18n, textRecord } from './i18n/index.svelte';
+import { AGENTS, type Agent, type RefineChange, type RefineReasonCode, type RefineStopReason } from './protocol';
+import { isTerminal, STOP_REASONS, type RefineRoundView, type StreamView, type TurnView } from './turns.svelte';
 
-const CHANGE_KIND_LABEL: Record<string, string> = {
-  defect: 'Defecte',
-  clarity: 'Claredat',
-  simplification: 'Simplificació',
-  requirement: 'Requisit',
-  merge: 'Fusió',
-};
+/** A kind of change, in the language of the interface (one the client does not know is kept as it is). */
+export function changeKindLabel(kind: string): string {
+  const kinds = i18n.m.refine.changeKinds;
+  return Object.hasOwn(kinds, kind) ? kinds[kind as keyof typeof kinds] : kind;
+}
 
-/** A kind of change in Catalan (one the client does not know is kept as it is). */
-export const changeKindLabel = (kind: string): string => CHANGE_KIND_LABEL[kind] ?? kind;
+/** Why a refine turn stopped, in the language of the interface. */
+export const STOP_REASON_LABEL: Record<RefineStopReason, string> = textRecord(STOP_REASONS, (reason) => i18n.m.refine.stopReasons[reason]);
 
-/** Why a refine turn stopped, in Catalan. */
-export const STOP_REASON_LABEL: Record<RefineStopReason, string> = {
-  owner: "L'has aturat",
-  unchanged: 'Cap dels dos hi troba res a canviar',
-  converged: 'Tots dos el puntuen per sobre del llindar',
-  max_rounds: 'Màxim de rondes',
-  budget: 'Pressupost esgotat',
-  failed: 'Els dos models han fallat',
-};
+/**
+ * Why a round wrote no new version, or a version was not accepted, in the language of the
+ * interface: the client's own text for a code it knows, else the server's text as it came
+ * (a code this client does not know). Null when there is no reason.
+ */
+export function reasonText(why: { reason: string | null; reasonCode: RefineReasonCode | null }): string | null {
+  return why.reasonCode ? i18n.m.refine.reasons[why.reasonCode] : why.reason;
+}
 
 /** The last item of `items` that `test` accepts (the lib is ES2022: no Array.prototype.findLast). */
 function lastOf<T>(items: readonly T[], test: (item: T) => boolean): T | undefined {
@@ -57,8 +56,10 @@ export interface VersionView {
    */
   retry: boolean;
   state: VersionState;
-  /** Why it did not become the current version (Catalan). */
+  /** Why it did not become the current version, as the server wrote it (`reasonText` shows it). */
   reason: string | null;
+  /** The code of `reason`: the shortening of a version over the word limit follows it. */
+  reasonCode: RefineReasonCode | null;
   /** Its words (counted while it is being written). */
   words: number;
   budgetWords: number | null;
@@ -83,7 +84,7 @@ export function refineVersions(turn: TurnView): VersionView[] {
       before !== undefined &&
       before.round === s.round &&
       before.stream.agent === s.agent &&
-      before.reason === REFINE_ROUND_REASONS.overBudget;
+      before.reasonCode === 'over_budget';
     const info = s.refine?.role === 'version' ? s.refine : null;
     let state: VersionState;
     if (s.status === 'streaming') state = 'writing';
@@ -99,6 +100,7 @@ export function refineVersions(turn: TurnView): VersionView[] {
       retry: shortening,
       state,
       reason: info?.reason ?? null,
+      reasonCode: info?.reasonCode ?? null,
       words: info?.words ?? countWords(s.text),
       budgetWords: info?.budgetWords ?? null,
       changelog: info?.changelog ?? [],
@@ -114,7 +116,7 @@ export const currentVersion = (versions: readonly VersionView[]): VersionView | 
 
 /**
  * The version a refine turn keeps as its answer, once it ended: the one its final message
- * stored (the answer later turns see). Stopped with «Atura ara», the engine stores the current
+ * stored (the answer later turns see). Stopped with «Stop now», the engine stores the current
  * version as that message without streaming it: live, the current version is the answer; a
  * reloaded turn has the message. Null while it runs, and when it ended without one: cancelled
  * or failed before any version was accepted, or failed (or never finished) before storing it.
@@ -192,36 +194,37 @@ export function roundBlocks(turn: TurnView): RoundBlock[] {
     });
 }
 
-/** What a running refine turn is doing: its round and the part of it, in Catalan. */
+/** What a running refine turn is doing: its round and the part of it, in the language of the interface. */
 export function liveStatus(turn: TurnView): { round: number; text: string } {
+  const t = i18n.m.refine.status;
   const round = turn.round;
   const versions = refineVersions(turn);
   const current = currentVersion(versions);
   // It ends: the current version becomes the final answer (stored without a call).
   if (turn.phase === 'synthesis' || turn.streams.some((s) => s.refineRole === 'final')) {
-    return { round, text: current ? `Desa la versió ${current.number} com a resposta final` : 'Desa la resposta final' };
+    return { round, text: current ? t.savingVersion(current.number) : t.savingFinal };
   }
   // Between the end of a round and what comes next: another round, or the end.
   if ((turn.phase === 'review' || turn.phase === 'edit') && turn.refineRounds.some((r) => r.round === round)) {
-    return { round, text: 'Ronda acabada' };
+    return { round, text: t.roundDone };
   }
   if (turn.phase === 'review') {
-    return { round, text: current ? `Revisen la versió ${current.number}` : 'Revisen el document' };
+    return { round, text: current ? t.reviewingVersion(current.number) : t.reviewingDocument };
   }
   if (turn.phase === 'edit') {
     const writing = lastOf(versions, (v) => v.round === round && v.state === 'writing');
     const editor = AGENT_LABEL[writing?.stream.agent ?? turn.options?.refine?.editor ?? 'claude'];
-    if (round <= 1) return { round, text: `${editor} fusiona les respostes en la versió 1` };
-    const verb = writing?.retry ? 'escurça' : 'escriu';
-    return { round, text: `${editor} ${verb} la versió ${writing?.number ?? round}` };
+    if (round <= 1) return { round, text: t.merging(editor) };
+    const number = writing?.number ?? round;
+    return { round, text: writing?.retry ? t.shortening(editor, number) : t.writing(editor, number) };
   }
-  if (turn.phase === 'compaction') return { round: 0, text: "Compactant l'historial" };
-  return { round, text: "Les dues IA responen l'encàrrec" };
+  if (turn.phase === 'compaction') return { round: 0, text: t.compacting };
+  return { round, text: t.answering };
 }
 
 /**
- * Why an ended refine turn stopped, in Catalan, with the limit that stopped it when it was
- * one; null while it runs or when nothing says.
+ * Why an ended refine turn stopped, in the language of the interface, with the limit that
+ * stopped it when it was one; null while it runs or when nothing says.
  */
 export function stopReasonText(turn: TurnView): string | null {
   const reason = turn.stopReason;

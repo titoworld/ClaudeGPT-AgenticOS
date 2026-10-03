@@ -392,7 +392,7 @@ export function refineEvents(): TurnEvent[] {
   const k = REFINE_CALLS;
   const sum = (...names: (keyof typeof REFINE_CALLS)[]) => total(names.map((n) => k[n].usage));
   const round = (n: 1 | 2 | 3, body: string, changes: RefineChange[], usage: Usage, so_far: Usage): Draft => ({
-    type: 'refine.round', round: n, version: n, accepted: true, reason: null, words: words(body), budget_words: BUDGET_WORDS,
+    type: 'refine.round', round: n, version: n, accepted: true, reason: null, reason_code: null, words: words(body), budget_words: BUDGET_WORDS,
     changes,
     proposals: n === 1 ? { claude: null, chatgpt: null } : { claude: REVIEWS[n].claude.changes.length, chatgpt: REVIEWS[n].chatgpt.changes.length },
     scores: n === 1 ? { claude: null, chatgpt: null } : { claude: REVIEWS[n].claude.score, chatgpt: REVIEWS[n].chatgpt.score },

@@ -5,13 +5,14 @@
   import type { Snippet } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { formatInt } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { diffHunks, diffStats, lineDiff } from '../lib/line-diff';
   import PlainText from './PlainText.svelte';
 
   interface Props {
     before: string;
     after: string;
-    /** What the list is, for screen readers ("Canvis de la versió 2 respecte de la versió 1"). */
+    /** What the list is, for screen readers ("Changes in version 2 since version 1"). */
     label: string;
     /** Shown above the lines (the changes the editor says it applied). */
     header?: Snippet;
@@ -25,30 +26,30 @@
   /** Folded parts the owner opened (the parent mounts a new diff for other texts). */
   const unfolded = new SvelteSet<number>();
 
-  const lineWord = (n: number) => (n === 1 ? 'línia' : 'línies');
+  const t = $derived(i18n.m.refine.diff);
 </script>
 
 <div class="line-diff">
   {#if header}{@render header()}{/if}
   <p class="diff-stats">
-    <span class="added">+{formatInt(stats.added)}</span> <span class="removed">−{formatInt(stats.removed)}</span> línies
+    <span class="added">+{formatInt(stats.added)}</span> <span class="removed">−{formatInt(stats.removed)}</span> {t.lines}
   </p>
   {#if stats.added + stats.removed === 0}
-    <p class="none">No hi ha cap línia diferent.</p>
+    <p class="none">{t.none}</p>
   {/if}
   <ol aria-label={label}>
     {#each parts as part, i (i)}
       {#if part.kind === 'lines' || unfolded.has(i)}
         {#each part.lines as line, j (j)}
           <li class={line.op}>
-            {#if line.op !== 'same'}<span class="sr-only">{line.op === 'add' ? 'Afegit:' : 'Tret:'}</span>{' '}{/if}<span
+            {#if line.op !== 'same'}<span class="sr-only">{line.op === 'add' ? t.added : t.removed}</span>{' '}{/if}<span
               class="text">{#if line.text}<PlainText text={line.text} />{:else}&nbsp;{/if}</span>
           </li>
         {/each}
       {:else}
         <li class="skip">
           <button type="button" class="unfold" onclick={() => unfolded.add(i)}
-            >{formatInt(part.count)} {lineWord(part.count)} sense canvis</button>
+            >{t.unchanged(part.count, formatInt(part.count))}</button>
         </li>
       {/if}
     {/each}

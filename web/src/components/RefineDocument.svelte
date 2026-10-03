@@ -1,17 +1,19 @@
 <script lang="ts">
-  // The living document of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md):
+  // The living document of a refine turn (Refine, docs/adr/0010-refine-mode.md):
   // the version shown (the current one unless the owner picks another), rendered through the
   // sanitized Markdown renderer, or its diff against the version that was current when it
   // was written; its words against the limit, whether it was cut off, and, once the turn
   // ended, why it stopped and which version it keeps as its answer, if any.
-  import { formatInt } from '../lib/format';
+  import { AGENT_LABEL, formatInt } from '../lib/format';
   import { answerForClipboard } from '../lib/hidden-chars';
+  import { i18n } from '../lib/i18n/index.svelte';
   import {
     changeKindLabel,
     countWords,
     currentVersion,
     keptVersion,
     previousAccepted,
+    reasonText,
     shownDocument,
     stopReasonText,
     type VersionView,
@@ -35,6 +37,7 @@
   let { turn, versions, picked = $bindable() }: Props = $props();
 
   const uid = $props.id();
+  const t = $derived(i18n.m.refine.document);
   const ended = $derived(isTerminal(turn.status));
   const auto = $derived(shownDocument(turn, versions));
   const current = $derived(currentVersion(versions));
@@ -67,24 +70,23 @@
   );
   const fill = $derived(budget ? Math.min(100, (words / budget) * 100) : 0);
 
-  /** How the current version is named: in the chip, in the selector, and from another version. */
-  const CURRENT = {
-    running: { chip: 'Actual', tone: 'good', option: 'actual', which: "l'actual" },
-    kept: { chip: 'Final', tone: 'good', option: 'final', which: 'la final' },
-    last: { chip: 'Última acceptada', tone: '', option: 'última acceptada', which: "l'última acceptada" },
-  } as const;
+  /**
+   * The tone of the current version's chip, by what it is. Its names are the catalog's:
+   * `current` in the chip and in the selector, `earlier` from another version.
+   */
+  const CURRENT_TONE = { running: 'good', kept: 'good', last: '' } as const;
   /** The current version: the one being improved, the turn's answer, or only the last one accepted (the turn kept none). */
-  const currentIs = $derived<keyof typeof CURRENT>(
+  const currentIs = $derived<keyof typeof CURRENT_TONE>(
     !ended ? 'running' : kept != null && kept === current?.number ? 'kept' : 'last',
   );
 
   const chip = $derived.by((): { text: string; tone: string } | null => {
-    if (!shown) return finalOnly ? { text: 'Final', tone: 'good' } : null;
-    if (shown.state === 'writing') return { text: 'Escrivint…', tone: '' };
-    if (shown.state === 'interrupted') return { text: 'Interrompuda', tone: 'warn' };
-    if (shown.state === 'rejected') return { text: 'Rebutjada', tone: 'warn' };
-    if (!isCurrent) return { text: 'Anterior', tone: '' };
-    return { text: CURRENT[currentIs].chip, tone: CURRENT[currentIs].tone };
+    if (!shown) return finalOnly ? { text: t.current.kept.chip, tone: 'good' } : null;
+    if (shown.state === 'writing') return { text: t.chips.writing, tone: '' };
+    if (shown.state === 'interrupted') return { text: t.chips.interrupted, tone: 'warn' };
+    if (shown.state === 'rejected') return { text: t.chips.rejected, tone: 'warn' };
+    if (!isCurrent) return { text: t.chips.earlier, tone: '' };
+    return { text: t.current[currentIs].chip, tone: CURRENT_TONE[currentIs] };
   });
 
   /** The answer a version 1 copies when nobody could merge them. */
@@ -95,13 +97,14 @@
 
   const note = $derived.by((): string | null => {
     if (!shown) return null;
-    if (shown.state === 'writing') return `S'està escrivint la versió ${shown.number}…`;
-    if (shown.state === 'interrupted') return `La versió ${shown.number} no es va acabar d'escriure.`;
+    if (shown.state === 'writing') return t.notes.writing(shown.number);
+    if (shown.state === 'interrupted') return t.notes.interrupted(shown.number);
     if (shown.state === 'rejected') {
-      return `Aquesta versió no s'ha acceptat${shown.reason ? `: ${shown.reason}` : '.'}`;
+      const reason = reasonText(shown);
+      return reason ? t.notes.rejectedBecause(reason) : t.notes.rejected;
     }
-    if (copiedFrom) return `Ningú no ha pogut fusionar les respostes: és la de ${copiedFrom === 'claude' ? 'Claude' : 'ChatGPT'}, tal com era.`;
-    if (!isCurrent && current) return `És una versió anterior: ${CURRENT[currentIs].which} és la ${current.number}.`;
+    if (copiedFrom) return t.notes.copied(AGENT_LABEL[copiedFrom]);
+    if (!isCurrent && current) return t.earlier[currentIs](current.number);
     return null;
   });
 
@@ -112,30 +115,28 @@
   const end = $derived.by((): { text: string; icon: 'check' | 'x' | 'info'; tone: string } | null => {
     if (!ended || number == null) return null;
     if (kept == null) {
-      const text = current
-        ? `L'última versió acceptada és la ${current.number}, però no s'ha desat com a resposta del torn.`
-        : "No es conserva cap versió com a resposta final: encara no se n'havia acceptat cap.";
+      const text = current ? t.end.notKept(current.number) : t.end.noneKept;
       return { text, icon: 'info', tone: 'muted' };
     }
     if (turn.status === 'cancelled') {
-      // The owner's «Atura ara» or a server shutdown: neither says which (Turn.svelte).
-      return { text: `Aquest torn s'ha aturat. Es conserva la versió ${kept} com a resposta final.`, icon: 'x', tone: 'muted' };
+      // The owner's «Stop now» or a server shutdown: neither says which (Turn.svelte).
+      return { text: t.end.cancelled(kept), icon: 'x', tone: 'muted' };
     }
-    const answer = `La resposta final és la versió ${kept}.`;
+    const answer = t.end.answer(kept);
     if (turn.status !== 'done') return { text: answer, icon: 'info', tone: 'muted' };
     const reason = stopReasonText(turn);
     const round = turn.refineRounds.at(-1)?.round ?? turn.round;
-    return { text: reason ? `S'ha aturat a la ronda ${round}: ${reason}. ${answer}` : answer, icon: 'check', tone: '' };
+    return { text: reason ? t.end.stopped(round, reason, answer) : answer, icon: 'check', tone: '' };
   });
 
   function optionLabel(v: VersionView): string {
     const parts = [`v${v.number}`];
-    if (v.retry) parts.push('escurçada');
-    if (v.state === 'writing') parts.push('escrivint…');
-    else if (v.state === 'interrupted') parts.push('interrompuda');
-    else if (v.state === 'rejected') parts.push('rebutjada');
-    else if (v === current) parts.push(CURRENT[currentIs].option);
-    if (v.stream.status === 'done' && v.stream.truncated) parts.push('incompleta');
+    if (v.retry) parts.push(t.options.shortened);
+    if (v.state === 'writing') parts.push(t.options.writing);
+    else if (v.state === 'interrupted') parts.push(t.options.interrupted);
+    else if (v.state === 'rejected') parts.push(t.options.rejected);
+    else if (v === current) parts.push(t.current[currentIs].option);
+    if (v.stream.status === 'done' && v.stream.truncated) parts.push(t.options.incomplete);
     return parts.join(' · ');
   }
 
@@ -149,7 +150,7 @@
 {#snippet applied()}
   {#if shown?.changelog.length}
     <div class="applied">
-      <span class="applied-label">Canvis aplicats:</span>
+      <span class="applied-label">{t.applied}</span>
       <ul>
         {#each shown.changelog as change, i (i)}
           <li><span class="kind {change.kind}">{changeKindLabel(change.kind)}</span> <PlainText text={change.text} /></li>
@@ -163,14 +164,14 @@
   <header>
     <div class="heading">
       <Icon name="mode-refine" size={18} />
-      <h3 id="{uid}-title">{number == null ? 'Document' : `Versió ${number}`}</h3>
+      <h3 id="{uid}-title">{number == null ? t.title : i18n.m.refine.version(number)}</h3>
       {#if chip}<span class="chip {chip.tone}">{chip.text}</span>{/if}
-      {#if cut}<span class="chip warn">Incompleta</span>{/if}
+      {#if cut}<span class="chip warn">{t.chips.incomplete}</span>{/if}
     </div>
     <div class="tools">
       {#if versions.length}
         <label class="pick">
-          <span>Versió</span>
+          <span>{t.picker}</span>
           <select class="input" value={shown?.key ?? ''} onchange={choose}>
             {#each versions as v (v.key)}
               <option value={v.key}>{optionLabel(v)}</option>
@@ -182,17 +183,13 @@
           class="btn ghost diff-toggle"
           aria-pressed={showDiff}
           disabled={!base || writing}
-          title={!base
-            ? 'És la primera versió: no hi ha cap versió anterior per comparar'
-            : writing
-              ? "Es pot comparar quan s'acabi d'escriure"
-              : `Mostra què ha canviat respecte de la versió ${base.number}`}
+          title={!base ? t.noEarlier : writing ? t.compareLater : t.showChanges(base.number)}
           onclick={() => (diff = !diff)}>
-          <Icon name="diff" size={15} />Canvis
+          <Icon name="diff" size={15} />{t.changes}
         </button>
       {/if}
       {#if text && !writing}
-        <CopyButton {text} label="Copia el document" prepare={answerForClipboard} />
+        <CopyButton {text} label={t.copy} prepare={answerForClipboard} />
       {/if}
     </div>
   </header>
@@ -209,18 +206,18 @@
         class="words"
         class:over={words > budget}
         role="meter"
-        aria-label="Paraules de la versió"
+        aria-label={t.wordsMeter}
         aria-valuemin={0}
         aria-valuemax={budget}
         aria-valuenow={Math.min(words, budget)}
-        aria-valuetext="{words} de {budget} paraules">
+        aria-valuetext={t.wordsOf(`${words}`, `${budget}`)}>
         <span class="track" aria-hidden="true"><span class="fill" style:width="{fill}%"></span></span>
-        {formatInt(words)} de {formatInt(budget)} paraules
+        {t.wordsOf(formatInt(words), formatInt(budget))}
       </span>
     {:else if text}
-      <span class="words">{formatInt(words)} paraules</span>
+      <span class="words">{i18n.m.refine.words(words, formatInt(words))}</span>
     {/if}
-    {#if author}<span class="by">per <AgentLabel agent={author} size={14} /></span>{/if}
+    {#if author}<span class="by">{t.by} <AgentLabel agent={author} size={14} /></span>{/if}
   </div>
 
   {#if note}
@@ -230,7 +227,7 @@
   {/if}
 
   {#if cut && stream}
-    <TruncationNote reason={stream.finishReason} lead="Document incomplet" />
+    <TruncationNote reason={stream.finishReason} lead={t.incomplete} />
   {/if}
 
   <div class="doc-body" aria-busy={writing}>
@@ -239,7 +236,7 @@
         <LineDiff
           before={base.stream.text}
           after={text}
-          label="Canvis de la versió {shown.number} respecte de la versió {base.number}"
+          label={t.diff(shown.number, base.number)}
           header={applied} />
       {/key}
     {:else if text}

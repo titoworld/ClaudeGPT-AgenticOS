@@ -15,6 +15,7 @@ import {
   type Phase,
   type RefineMeta,
   type RefineOptions,
+  type RefineReasonCode,
   type RefineStopReason,
   type RuntimeSettings,
   type Stats,
@@ -23,7 +24,7 @@ import {
   type TurnOutcome,
   type Usage,
 } from './protocol';
-import { REFINE_ROUND_REASONS } from './turns.svelte';
+import { REFINE_REASON_CODES } from './turns.svelte';
 
 type PdfCheckEvent = Extract<TurnEvent, { type: 'pdf.check' }>;
 type StreamCompleted = Extract<TurnEvent, { type: 'stream.completed' }>;
@@ -171,6 +172,7 @@ describe('the wire of the refine mode («Perfecciona», ADR 0010)', () => {
     expectTypeOf<Phase>().toEqualTypeOf<'answer' | 'revision' | 'synthesis' | 'compaction' | 'review' | 'edit'>();
     expectTypeOf<RefineRoundEvent['proposals']>().toEqualTypeOf<Record<'claude' | 'chatgpt', number | null>>();
     expectTypeOf<RefineRoundEvent['reason']>().toEqualTypeOf<string | null>();
+    expectTypeOf<RefineRoundEvent['reason_code']>().toEqualTypeOf<RefineReasonCode | null>();
     // As RefineRound.to_wire writes it.
     const round = {
       type: 'refine.round',
@@ -180,6 +182,7 @@ describe('the wire of the refine mode («Perfecciona», ADR 0010)', () => {
       version: 2,
       accepted: true,
       reason: null,
+      reason_code: null,
       words: 410,
       budget_words: 456,
       changes: [{ kind: 'defect', text: 'El termini de la fase 2' }],
@@ -216,9 +219,12 @@ describe('the wire of the refine mode («Perfecciona», ADR 0010)', () => {
       budget_words: 456,
       accepted: true,
       reason: null,
+      reason_code: null,
       changelog: [{ kind: 'merge', text: 'y' }],
       copied_from: 71,
     } satisfies RefineMeta;
+    // A message stored before the codes has its reason alone.
+    expectTypeOf<Extract<RefineMeta, { role: 'version' }>['reason_code']>().toEqualTypeOf<RefineReasonCode | null | undefined>();
     const final = { role: 'final', version: 1, words: 380, budget_words: 456, stop_reason: 'owner' } satisfies RefineMeta;
     const block = /type RefineMeta =([\s\S]*?)```/.exec(await protocolDoc())?.[1] ?? '';
     const variants = block.split(/\n\s*\| \{/).slice(1).map(fieldsOf);
@@ -229,9 +235,14 @@ describe('the wire of the refine mode («Perfecciona», ADR 0010)', () => {
 });
 
 describe('the reasons of refine.round (P8)', () => {
-  it('every reason a reloaded round is rebuilt with is one the protocol gives', async () => {
+  it('has a code for each reason, which the client knows', () => {
+    expectTypeOf<RefineReasonCode>().toEqualTypeOf<'over_budget' | 'incomplete' | 'identical' | 'nothing_to_change' | 'failed_round'>();
+    expect(REFINE_REASON_CODES).toEqual(['over_budget', 'incomplete', 'identical', 'nothing_to_change', 'failed_round']);
+  });
+
+  it('every code the client knows is one the protocol gives', async () => {
     const row = (await protocolDoc()).split('\n').find((line) => line.startsWith('| `refine.round` |')) ?? '';
-    const quoted = [...row.matchAll(/`([^`]+\.)`/g)].map((m) => m[1]);
-    expect(Object.values(REFINE_ROUND_REASONS).filter((reason) => !quoted.includes(reason))).toEqual([]);
+    const quoted = [...row.matchAll(/`(\w+)`/g)].map((m) => m[1]);
+    expect(REFINE_REASON_CODES.filter((code) => !quoted.includes(code))).toEqual([]);
   });
 });

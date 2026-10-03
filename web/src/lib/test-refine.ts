@@ -1,4 +1,4 @@
-// Fixtures of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md) for unit
+// Fixtures of a refine turn (Refine, docs/adr/0010-refine-mode.md) for unit
 // tests: what the client sees live and what the server stores of the same turn, with the
 // wire of docs/PROTOCOL.md. Never imported by application code.
 import type {
@@ -7,6 +7,7 @@ import type {
   RefineChange,
   RefineMeta,
   RefineOptions,
+  RefineReasonCode,
   RefineStopReason,
   TurnEvent,
   TurnOptions,
@@ -44,6 +45,7 @@ export const V2 =
 export const V3_LONG = `${V2}\n\n${'mètrica '.repeat(320).trim()}`;
 export const V3_SHORT = `${V2}\n\n${'mètrica '.repeat(305).trim()}`;
 export const BUDGET_WORDS = 300;
+/** Why a version was not accepted, as the server writes it in a Catalan turn (its code: `reason_code`). */
 export const OVER_BUDGET = 'La nova versió passava del límit de paraules.';
 
 const MERGE_CHANGES = [
@@ -78,6 +80,10 @@ export const ROUND_TOTAL = {
 
 const NO_SAVINGS = { cache: 0, compaction: 0, early_stop: 0, unchanged: 0, total: 0, cost_usd: null };
 
+/** The code the server sends with each reason of these fixtures. */
+const codeOf = (reason: string | null): RefineReasonCode | null =>
+  reason === OVER_BUDGET ? 'over_budget' : reason === INCOMPLETE ? 'incomplete' : null;
+
 const version = (n: number, text: string, accepted: boolean, reason: string | null, changelog = E2_CHANGES): RefineMeta => ({
   role: 'version',
   version: n,
@@ -85,6 +91,7 @@ const version = (n: number, text: string, accepted: boolean, reason: string | nu
   budget_words: BUDGET_WORDS,
   accepted,
   reason,
+  reason_code: codeOf(reason),
   changelog,
 });
 const review = (score: number | null, changes: { kind: string; text: string }[]): RefineMeta => ({
@@ -145,7 +152,7 @@ function firstRounds(): Draft[] {
     { type: 'stream.delta', stream_id: 'e1', section: 'critique', text: "- [merge] L'estructura en fases de Claude" },
     done('e1', 73, MERGE, version(1, V1, true, null, MERGE_CHANGES)),
     {
-      type: 'refine.round', round: 1, version: 1, accepted: true, reason: null, words: countWords(V1),
+      type: 'refine.round', round: 1, version: 1, accepted: true, reason: null, reason_code: null, words: countWords(V1),
       budget_words: BUDGET_WORDS, changes: MERGE_CHANGES, proposals: { claude: null, chatgpt: null },
       scores: { claude: null, chatgpt: null }, converged: false, usage: ROUND_USAGE[1], total: ROUND_TOTAL[1],
     },
@@ -162,7 +169,7 @@ function firstRounds(): Draft[] {
     { type: 'stream.delta', stream_id: 'e2', section: 'critique', text: '- [defect] La fase 2 té data' },
     done('e2', 76, E2, version(2, V2, true, null)),
     {
-      type: 'refine.round', round: 2, version: 2, accepted: true, reason: null, words: countWords(V2),
+      type: 'refine.round', round: 2, version: 2, accepted: true, reason: null, reason_code: null, words: countWords(V2),
       budget_words: BUDGET_WORDS, changes: E2_CHANGES, proposals: { claude: 1, chatgpt: 0 },
       scores: { claude: 70, chatgpt: 85 }, converged: false, usage: ROUND_USAGE[2], total: ROUND_TOTAL[2],
     },
@@ -210,7 +217,7 @@ export function refineEvents(requestId = 'req-p', stopReason: RefineStopReason =
     { type: 'stream.delta', stream_id: 's3', section: 'answer', text: V3_SHORT },
     done('s3', 80, S3, version(3, V3_SHORT, false, OVER_BUDGET, E3_CHANGES)),
     {
-      type: 'refine.round', round: 3, version: 2, accepted: false, reason: OVER_BUDGET, words: countWords(V2),
+      type: 'refine.round', round: 3, version: 2, accepted: false, reason: OVER_BUDGET, reason_code: 'over_budget', words: countWords(V2),
       budget_words: BUDGET_WORDS, changes: [], proposals: { claude: 0, chatgpt: 1 },
       scores: { claude: 92, chatgpt: 88 }, converged: false, usage: ROUND_USAGE[3], total: ROUND_TOTAL[3],
     },
@@ -344,12 +351,12 @@ const UNPRICED: Usage = emptyUsage();
 /** Version 1 stored without a call: a copy of Claude's answer (message 71). */
 const COPY: RefineMeta = {
   role: 'version', version: 1, words: countWords(CLAUDE_ANSWER), budget_words: BUDGET_WORDS, accepted: true, reason: null,
-  changelog: [], copied_from: 71,
+  reason_code: null, changelog: [], copied_from: 71,
 };
 
 /** The end of round 1, the merge (no reviews). */
 const roundEnd = (round: number, version: number, text: string, usage: Usage, total: Usage, changes: RefineChange[] = []): Draft => ({
-  type: 'refine.round', round, version, accepted: true, reason: null, words: countWords(text),
+  type: 'refine.round', round, version, accepted: true, reason: null, reason_code: null, words: countWords(text),
   budget_words: BUDGET_WORDS, changes, proposals: { claude: null, chatgpt: null },
   scores: { claude: null, chatgpt: null }, converged: false, usage, total,
 });
@@ -628,7 +635,7 @@ export function editorFallbackEvents(requestId = 'req-e'): TurnEvent[] {
     { type: 'stream.delta', stream_id: 'e2c', section: 'answer', text: V2 },
     done('e2c', 76, E2, version(2, V2, true, null)),
     {
-      type: 'refine.round', round: 2, version: 2, accepted: true, reason: null, words: countWords(V2),
+      type: 'refine.round', round: 2, version: 2, accepted: true, reason: null, reason_code: null, words: countWords(V2),
       budget_words: BUDGET_WORDS, changes: E2_CHANGES, proposals: { claude: 1, chatgpt: 0 },
       scores: { claude: 70, chatgpt: 85 }, converged: false, usage: ROUND_USAGE[2], total: ROUND_TOTAL[2],
     },
@@ -713,7 +720,7 @@ export function shortenFailedEvents(requestId = 'req-f'): TurnEvent[] {
     ...before,
     next({ type: 'stream.failed', stream_id: 's3', error: down('claude') }),
     next({
-      type: 'refine.round', round: 3, version: 2, accepted: false, reason: OVER_BUDGET, words: countWords(V2),
+      type: 'refine.round', round: 3, version: 2, accepted: false, reason: OVER_BUDGET, reason_code: 'over_budget', words: countWords(V2),
       budget_words: BUDGET_WORDS, changes: [], proposals: { claude: 0, chatgpt: 1 }, scores: { claude: 92, chatgpt: 88 },
       converged: false, usage: round3, total,
     }),
@@ -754,4 +761,35 @@ export function refusedAnswerMessages(): Message[] {
     message({ id: 73, turn_id: 70, kind: 'revision', agent: 'claude', round: 1, content: V1, meta: meta(MERGE, version(1, V1, true, null, MERGE_CHANGES)) }),
     storedFinalOf(74, 'claude', 1, V1, finalOf(1, V1, 'owner'), 73, { unstored_usage: REFUSAL }),
   ];
+}
+
+/**
+ * The same stored turn as a server wrote it before `reason_code` existed: its versions'
+ * reasons alone, which were always Catalan then (the client reads their codes from the texts).
+ */
+export function legacyMessages(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    const refine = m.meta.refine;
+    if (!refine || !('role' in refine) || refine.role !== 'version') return m;
+    const legacy = { ...refine };
+    delete legacy.reason_code;
+    return { ...m, meta: { ...m.meta, refine: legacy } };
+  });
+}
+
+/** The same live turn without any `reason_code`: its rounds' and versions' reasons alone. */
+export function legacyEvents(events: TurnEvent[]): TurnEvent[] {
+  return events.map((e) => {
+    if (e.type === 'refine.round') {
+      const legacy: Partial<typeof e> = { ...e };
+      delete legacy.reason_code;
+      return legacy as TurnEvent;
+    }
+    if (e.type === 'stream.completed' && e.refine?.role === 'version') {
+      const refine = { ...e.refine };
+      delete refine.reason_code;
+      return { ...e, refine };
+    }
+    return e;
+  });
 }

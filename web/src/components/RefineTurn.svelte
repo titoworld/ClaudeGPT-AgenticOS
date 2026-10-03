@@ -1,11 +1,12 @@
 <script lang="ts">
-  // A refine turn («Perfecciona», docs/adr/0010-refine-mode.md): both agents answer the
+  // A refine turn (Refine, docs/adr/0010-refine-mode.md): both agents answer the
   // brief, the editor merges the answers into a document, and round after round both review
   // it and the editor writes its next version. The view: the first answers (folded once
   // there is a document), the living document with its versions, every round, and, while
   // it runs, the controls to stop it. The same live and after a reload (lib/refine.ts).
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { prefs } from '../lib/prefs.svelte';
   import { AGENTS } from '../lib/protocol';
   import { refineVersions, roundBlocks, shownDocument } from '../lib/refine';
@@ -23,6 +24,7 @@
 
   let { turn }: Props = $props();
 
+  const t = $derived(i18n.m.refine.turn);
   const active = $derived(!isTerminal(turn.status));
   const answers = $derived(streamsByAgent(turn, 'answer', 0));
   const versions = $derived(refineVersions(turn));
@@ -56,13 +58,13 @@
   <details class="answers" bind:open={answersOpen}>
     <summary onclick={() => (answersTouched = true)}>
       <Icon name="chevron-right" size={16} class="chev" />
-      <span class="title">Respostes inicials</span>
-      <span class="hint">la ronda 0: cada IA respon l'encàrrec pel seu compte</span>
+      <span class="title">{t.answers}</span>
+      <span class="hint">{t.answersHint}</span>
       {#if answering}<StreamStatus status="streaming" />{/if}
     </summary>
     <div class="cols">
       {#each AGENTS as agent (agent)}
-        <AnswerCard {agent} stream={answers[agent] ?? null} active={answering} title="Resposta inicial" />
+        <AnswerCard {agent} stream={answers[agent] ?? null} active={answering} title={t.answer} />
       {/each}
     </div>
   </details>
@@ -74,7 +76,7 @@
   {/if}
 
   {#if blocks.length}
-    <section class="rounds" aria-label="Rondes">
+    <section class="rounds" aria-label={t.rounds}>
       {#each blocks as block, i (block.round)}
         <RefineRound
           {block}

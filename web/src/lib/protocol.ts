@@ -146,6 +146,15 @@ export interface RefineOptions {
 export type RefineStopReason = 'owner' | 'converged' | 'unchanged' | 'max_rounds' | 'budget' | 'failed';
 
 /**
+ * Why a refine round wrote no new version, or why a version did not become the current one
+ * (`reason_code`, next to `reason`, its text in the turn's language): the new version went
+ * over the word limit, the editor wrote no complete version, the new version is the same as
+ * the previous one, neither agent found anything to change, or the models failed and the
+ * round wrote no version. The client's logic reads the code, never the text.
+ */
+export type RefineReasonCode = 'over_budget' | 'incomplete' | 'identical' | 'nothing_to_change' | 'failed_round';
+
+/**
  * A change of a refine round, proposed by a review or applied by a version. `kind`:
  * "defect", "clarity", "simplification" or "requirement"; "merge" for the lines of
  * version 1, which say what it took from each answer.
@@ -164,8 +173,10 @@ export type RefineMeta =
       words: number;
       budget_words: number;
       accepted: boolean;
-      /** Why it did not become the current version (Catalan), as refine.round's `reason`. */
+      /** Why it did not become the current version (in the turn's language), as refine.round's `reason`. */
       reason: string | null;
+      /** The code of `reason` (null when it was accepted); a message stored before the codes has none. */
+      reason_code?: RefineReasonCode | null;
       changelog: RefineChange[];
       /** Version 1 stored without a call (nobody could merge): the id of the answer it copies. */
       copied_from?: number;
@@ -584,8 +595,9 @@ export type TurnEvent =
       /**
        * The end of a refine round (from round 1, the merge). `version`: the current version
        * after it; `accepted`: the round wrote a new one, now the current one; `reason`: why
-       * not (Catalan). `words`: the current version's; `changes`: the new version's
-       * changelog. `proposals` and `scores` per agent: null without a review (round 1 always).
+       * not (in the turn's language), and `reason_code` its code. `words`: the current
+       * version's; `changes`: the new version's changelog. `proposals` and `scores` per
+       * agent: null without a review (round 1 always).
        * `usage`: the round's calls; `total`: the turn so far.
        */
       type: 'refine.round';
@@ -593,6 +605,7 @@ export type TurnEvent =
       version: number;
       accepted: boolean;
       reason: string | null;
+      reason_code: RefineReasonCode | null;
       words: number;
       budget_words: number;
       changes: RefineChange[];
