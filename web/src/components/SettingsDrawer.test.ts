@@ -364,7 +364,7 @@ describe('SettingsDrawer in English and Spanish (ADR 0011)', () => {
     expect(server.puts).toEqual([]);
     expect(e.textOf(field(root, 'Rondas de revisión')!.querySelector('.error-text'))).toBe('Tiene que estar entre 0 y 4.');
     expect(notice(root)).toBe('Revisa los campos marcados.');
-    expect(saveButton(root).textContent?.trim()).toBe('Guarda la configuración');
+    expect(saveButton(root).textContent?.trim()).toBe('Guardar la configuración');
   });
 
   it('repaints itself, the last save included, when the owner picks another language in it', async () => {

@@ -612,7 +612,7 @@ describe('in English and Spanish', () => {
     const three = roundBody(root, 3);
     expect(three).toContain('La nueva versión superaba el límite de palabras.');
     expect(three).toContain('Versión 3 (acortada): rechazada');
-    expect(button(rounds(root)[2]!, 'Muestra la versión 3 (acortada)')).not.toBeNull();
+    expect(button(rounds(root)[2]!, 'Mostrar la versión 3 (acortada)')).not.toBeNull();
   });
 
   it('the controls: «Stop after this round» and «Stop now»', () => {

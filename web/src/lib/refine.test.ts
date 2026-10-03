@@ -354,7 +354,7 @@ describe('in English and Spanish', () => {
     expect(statusAfter('e1')).toBe('Claude fusiona las respuestas en la versión 1');
     expect(statusAfter('r2c')).toBe('Revisan la versión 1');
     expect(statusAfter('s3')).toBe('Claude acorta la versión 3');
-    expect(statusAfter('f')).toBe('Guarda la versión 2 como respuesta final');
+    expect(statusAfter('f')).toBe('Guardando la versión 2 como respuesta final');
   });
 
   it('says why it stopped, and names the kinds of change', () => {
