@@ -1,5 +1,5 @@
 """Attachments: limits, the type from the content, image dimensions from the headers, safe
-display names, the token estimate and the PDF reader's subprocess (docs/adr/0009-adjunts.md)."""
+display names, the token estimate and the PDF reader's subprocess (docs/adr/0009-attachments.md)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from attachment_files import (
 )
 from orchestrator.attachment_fixtures import analysed_pages
 
-from agentic_os import attachments
+from agentic_os import attachments, i18n
 from agentic_os.attachments import (
     AttachmentError,
     PdfReader,
@@ -380,9 +380,9 @@ async def test_the_pdf_reader_gives_the_pages_and_their_text(tmp_path: Path) -> 
     info = await PdfReader().read(path)
     assert info.pages == 3
     assert info.text == (
-        "--- Pàgina 1 ---\nPrimera pàgina\n\n"
-        "--- Pàgina 2 ---\n\n\n"
-        "--- Pàgina 3 ---\nTercera (i última) pàgina"
+        "--- Page 1 ---\nPrimera pàgina\n\n"
+        "--- Page 2 ---\n\n\n"
+        "--- Page 3 ---\nTercera (i última) pàgina"
     )
 
 
@@ -415,11 +415,11 @@ async def test_a_long_text_is_cut_with_a_notice(tmp_path: Path) -> None:
     info = await PdfReader(max_chars=500).read(path)
     assert info.pages == 3
     assert info.text is not None
-    notice = "[Text retallat: el text extret del PDF passava de 500 caràcters.]"
+    notice = "[Text truncated: the text extracted from the PDF was over 500 characters.]"
     kept, _, end = info.text.partition("\n\n" + notice)
     assert end == ""
-    assert kept.startswith("--- Pàgina 1 ---\n" + "a" * 80 + "\n")
-    assert "--- Pàgina 2 ---\nbbb" in kept
+    assert kept.startswith("--- Page 1 ---\n" + "a" * 80 + "\n")
+    assert "--- Page 2 ---\nbbb" in kept
     assert len(kept) <= 500
     assert "c" not in kept
 
@@ -561,4 +561,46 @@ async def test_the_reader_is_the_first_process_the_oom_killer_takes(tmp_path: Pa
     )
     reader = PdfReader(command=[sys.executable, "-c", boot])
     info = await reader.read(write(tmp_path, b"%PDF-"))
-    assert (info.pages, info.text) == (1, "--- Pàgina 1 ---\n1000")
+    assert (info.pages, info.text) == (1, "--- Page 1 ---\n1000")
+
+
+# -- languages (docs/adr/0011-internationalization.md) --------------------------------------
+
+
+def test_a_refusal_is_written_in_the_language_in_force_when_it_is_raised() -> None:
+    with i18n.use("es"):
+        with pytest.raises(AttachmentError) as unsupported:
+            upload_type(b"Hola", "foto.png")
+        with pytest.raises(AttachmentError) as too_big:
+            image_dimensions(png(12001, 600), "image/png")
+        with pytest.raises(AttachmentError) as nameless:
+            display_name("   ")
+        # A constant reason reads as the language in force, wherever it is compared.
+        assert attachments.EMPTY_DETAIL == "El archivo está vacío."
+    assert unsupported.value.message == (
+        "Este tipo de archivo no se admite. Puedes adjuntar imágenes (PNG, JPEG, GIF o WebP), "
+        "PDF y archivos de texto (UTF-8)."
+    )
+    assert too_big.value.message == (
+        "La imagen mide 12.001 x 600 píxeles: como máximo 8000 por lado."
+    )
+    assert nameless.value.message == "Hay que indicar el nombre del archivo (parámetro «name»)."
+    # The message stays as it was written; the constant follows the language in force.
+    assert unsupported.value.message != attachments.UNSUPPORTED_DETAIL
+    assert attachments.EMPTY_DETAIL == "El fitxer és buit."
+    assert str(AttachmentError(422, attachments.EMPTY_DETAIL)) == "El fitxer és buit."
+
+
+def test_the_size_limits_in_english() -> None:
+    with i18n.use("en"):
+        assert [attachments.too_large_detail(kind) for kind in ("image", "pdf", "text")] == [
+            "The file is too large: an image can be at most 7 MB.",
+            "The file is too large: a PDF can be at most 20 MB.",
+            "The file is too large: a text file can be at most 200 kB.",
+        ]
+        assert attachments.size_text(1_500) == "1,500 bytes"
+        assert attachments.pdf_pages_detail(101) == "The PDF has 101 pages: at most 100."
+        assert str(attachments.PDF_TIMEOUT_DETAIL) == (
+            "The PDF could not be read in 60 seconds. Try a simpler or smaller version of it."
+        )
+    assert attachments.size_text(1_500) == "1.500 bytes"

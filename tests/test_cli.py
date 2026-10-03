@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from typing import Any
 import pytest
 
 import agentic_os
-from agentic_os import __version__
+from agentic_os import __version__, i18n
 from agentic_os.cli import log_config, main, run_doctor
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
@@ -688,3 +689,110 @@ def test_cli_version_handles_failures(tmp_path: Path) -> None:
     failing.chmod(0o755)
     assert asyncio.run(cli_version(str(failing), {})) is None
     assert asyncio.run(cli_version(str(tmp_path / "missing"), {})) is None
+
+
+# -- languages (docs/adr/0011-internationalization.md) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("locale", "texts"),
+    [
+        (
+            "en_US.UTF-8",
+            ("usage: agentic-os", "commands:", "show this help and exit", "Start the web server."),
+        ),
+        (
+            "es_ES.UTF-8",
+            ("uso: agentic-os", "órdenes:", "muestra esta ayuda y sale", "Arranca el servidor"),
+        ),
+    ],
+)
+def test_the_help_speaks_the_language_of_the_system(
+    locale: str,
+    texts: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("LANG", locale)
+    assert main([]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(texts[0])
+    for text in texts[1:]:
+        assert text in out
+
+
+def test_the_commands_speak_the_language_of_the_system(
+    env: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    assert main(["reset-sessions"]) == 0
+    assert capsys.readouterr().out.strip() == "There was no open session."
+    monkeypatch.setenv("LC_MESSAGES", "es_ES.UTF-8")  # LC_MESSAGES comes before LANG
+    assert main(["reset-throttle"]) == 0
+    assert capsys.readouterr().out.strip() == (
+        "No había ningún bloqueo ni ningún intento fallido registrado."
+    )
+
+
+def test_invalid_settings_are_described_in_the_language_of_the_system(
+    env: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LANG", "en_GB.UTF-8")
+    monkeypatch.setenv("AOS_LOG_LEVEL", "verbose")
+    monkeypatch.setenv("AOS_PORT", "0")
+    assert main(["doctor"]) == 2
+    assert sorted(capsys.readouterr().err.splitlines()) == [
+        "- AOS_LOG_LEVEL: must be one of these values: critical, error, warning, info, debug, "
+        'trace (value: "verbose").',
+        '- AOS_PORT: must be at least 1 and at most 65535 (value: "0").',
+        "The configuration (AOS_* variables) is not valid:",
+    ]
+
+
+def test_without_a_locale_the_command_line_speaks_english() -> None:
+    """Outside the tests (which choose Catalan), a system without a locale of the three
+    languages gets English."""
+    package_root = Path(agentic_os.__file__).resolve().parents[1]  # the code under test
+    code = (
+        f"import sys; sys.path.insert(0, {str(package_root)!r}); "
+        "from agentic_os.cli import main; sys.exit(main([]))"
+    )
+    environ = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("LANG", "LC_ALL", "LC_MESSAGES")
+    }
+    for locale in ({}, {"LANG": "fr_FR.UTF-8"}, {"LC_ALL": "C.UTF-8", "LANG": "es_ES.UTF-8"}):
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+            env={**environ, **locale},
+        )
+        assert result.stdout.startswith("usage: agentic-os"), (locale, result.stdout)
+        assert "show this help and exit" in result.stdout
+
+
+async def test_doctor_speaks_the_language_of_the_system(tmp_path: Path) -> None:
+    settings = await ready_settings(tmp_path, secure_cookies=False)
+    outputs = {}
+    for lang in ("en", "es"):
+        with i18n.use(lang):
+            code, outputs[lang] = await doctor(settings, fakes())
+        assert code == 0, outputs[lang]
+    english, spanish = outputs["en"], outputs["es"]
+    assert "[ OK ] Owner set up (password and TOTP)." in english
+    assert "[ -- ] Claude Code CLI: not needed (mode fake)." in english
+    assert "       Default model: fake-claude; for summaries: fake-claude-mini." in english
+    assert (
+        "[ -- ] Fallback manual exchange rate: $1 = €0.86 (there is no recent ECB rate yet; "
+        "the server downloads it when it starts)."
+    ) in english
+    assert "[WARN] AOS_SECURE_COOKIES=false: right only for local development." in english
+    assert english.endswith("All good (1 warning).")
+    assert "[ OK ] Propietario configurado (contraseña y TOTP)." in spanish
+    assert "[ -- ] Tipo de cambio manual de reserva: 1 $ = 0,86 € (todavía" in spanish
+    assert "[AVISO] AOS_SECURE_COOKIES=false: correcto solo para desarrollo local." in spanish
+    assert spanish.endswith("Todo correcto (1 aviso).")

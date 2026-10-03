@@ -36,7 +36,8 @@ class FxRate:
 
 
 class FxError(Exception):
-    pass
+    """The ECB rate could not be fetched or read. Its message is for the logs (in
+    English, not localized)."""
 
 
 def parse_ecb_daily(document: str) -> FxRate:
@@ -44,10 +45,10 @@ def parse_ecb_daily(document: str) -> FxRate:
     time_match = _TIME.search(document)
     usd_match = _USD.search(document)
     if not time_match or not usd_match:
-        raise FxError("Format inesperat del fitxer del BCE.")
+        raise FxError("Unexpected format of the ECB file.")
     usd_per_eur = float(usd_match.group(1))
     if not 0.2 < usd_per_eur < 5:
-        raise FxError(f"Tipus de canvi USD fora de rang: {usd_per_eur}.")
+        raise FxError(f"USD exchange rate out of range: {usd_per_eur}.")
     return FxRate(
         eur_per_usd=round(1 / usd_per_eur, 6),
         as_of=date.fromisoformat(time_match.group(1)),
@@ -57,7 +58,7 @@ def parse_ecb_daily(document: str) -> FxRate:
 
 def _download(url: str, timeout: float) -> str:
     if not url.startswith("https://"):
-        raise FxError("Només s'accepten URL https.")
+        raise FxError("Only https URLs are accepted.")
     request = urllib.request.Request(url, headers={"User-Agent": "agentic-os"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body: bytes = response.read(1_000_000)
@@ -68,7 +69,7 @@ async def fetch_ecb_rate(url: str = ECB_DAILY_URL, timeout: float = 10.0) -> FxR
     try:
         document = await asyncio.to_thread(_download, url, timeout)
     except OSError as exc:
-        raise FxError(f"No s'ha pogut obtenir el tipus de canvi del BCE: {exc}") from exc
+        raise FxError(f"Could not fetch the ECB exchange rate: {exc}") from exc
     return parse_ecb_daily(document)
 
 

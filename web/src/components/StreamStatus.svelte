@@ -1,5 +1,6 @@
 <script lang="ts">
   // Compact status of one model stream (text + icon, never color alone).
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { StreamStatus } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
 
@@ -9,21 +10,22 @@
   }
 
   let { status }: Props = $props();
+  const t = $derived(i18n.m.turn.status);
 </script>
 
 <span class="status {status}">
   {#if status === 'streaming'}
-    <span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>Escrivint…
+    <span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>{t.streaming}
   {:else if status === 'waiting'}
-    <span class="dot" aria-hidden="true"></span>Pensant…
+    <span class="dot" aria-hidden="true"></span>{t.waiting}
   {:else if status === 'done'}
-    <Icon name="check" size={13} />Fet
+    <Icon name="check" size={13} />{t.done}
   {:else if status === 'failed'}
-    <Icon name="alert" size={13} />Error
+    <Icon name="alert" size={13} />{t.failed}
   {:else if status === 'truncated'}
-    <Icon name="alert" size={13} />Incompleta
+    <Icon name="alert" size={13} />{t.truncated}
   {:else}
-    <Icon name="x" size={13} />Interromput
+    <Icon name="x" size={13} />{t.interrupted}
   {/if}
 </span>
 

@@ -116,9 +116,9 @@ describe('the length of a question (N19)', () => {
   it('uses the limits the protocol documents, like the server', async () => {
     // tests/test_docs.py checks that these numbers are the server's constants.
     const doc = await protocolDoc();
-    const documented = (pattern: RegExp): number => Number(pattern.exec(doc)?.[1]?.replaceAll('.', ''));
-    expect(documented(/La pregunta \(`text`\) pot tenir com a molt ([\d.]+) caràcters/)).toBe(MAX_QUESTION_CHARS);
-    expect(documented(/Cap missatge del client no pot passar de ([\d.]+) caràcters/)).toBe(MAX_MESSAGE_CHARS);
+    const documented = (pattern: RegExp): number => Number(pattern.exec(doc)?.[1]?.replaceAll(',', ''));
+    expect(documented(/The question \(`text`\) can have at most ([\d,]+) characters/)).toBe(MAX_QUESTION_CHARS);
+    expect(documented(/No client message can exceed ([\d,]+) characters/)).toBe(MAX_MESSAGE_CHARS);
     expect([MAX_QUESTION_CHARS, MAX_MESSAGE_CHARS]).toEqual([100_000, 524_288]);
   });
 

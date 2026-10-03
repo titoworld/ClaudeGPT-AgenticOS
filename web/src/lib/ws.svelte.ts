@@ -19,6 +19,7 @@
 // All public entry points therefore run inside untrack().
 
 import { untrack } from 'svelte';
+import { i18n } from './i18n/index.svelte';
 import {
   WS_CLOSE_FORBIDDEN_ORIGIN,
   WS_CLOSE_UNAUTHORIZED,
@@ -46,8 +47,9 @@ export function backoffDelay(attempt: number, random: () => number = Math.random
   return Math.round(Math.min(BACKOFF_MAX_MS, jittered));
 }
 
+/** The socket of this page, in the interface's language (the server writes its texts in it). */
 export function defaultWsUrl(): string {
-  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`;
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws?lang=${i18n.locale}`;
 }
 
 export interface ConnectionOptions {

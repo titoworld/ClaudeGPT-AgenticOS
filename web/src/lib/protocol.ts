@@ -4,7 +4,7 @@
 export type Agent = 'claude' | 'chatgpt';
 export const AGENTS: readonly Agent[] = ['claude', 'chatgpt'];
 /**
- * refine («Perfecciona», docs/adr/0010-mode-perfecciona.md): both answer, the editor
+ * refine (Refine, docs/adr/0010-refine-mode.md): both answer, the editor
  * merges the answers into one document, and round after round both review it and the
  * editor writes its next version, until the owner stops it or a limit does.
  */
@@ -122,7 +122,7 @@ export interface DebateOptions {
   synthesizer: Agent;
 }
 
-/** Options of a refine turn («Perfecciona», ADR 0010); the server validates the ranges. */
+/** Options of a refine turn (Refine, ADR 0010); the server validates the ranges. */
 export interface RefineOptions {
   /** Rounds that write a version, the merge of round 1 included: 2-50. */
   max_rounds: number;
@@ -146,6 +146,15 @@ export interface RefineOptions {
 export type RefineStopReason = 'owner' | 'converged' | 'unchanged' | 'max_rounds' | 'budget' | 'failed';
 
 /**
+ * Why a refine round wrote no new version, or why a version did not become the current one
+ * (`reason_code`, next to `reason`, its text in the turn's language): the new version went
+ * over the word limit, the editor wrote no complete version, the new version is the same as
+ * the previous one, neither agent found anything to change, or the models failed and the
+ * round wrote no version. The client's logic reads the code, never the text.
+ */
+export type RefineReasonCode = 'over_budget' | 'incomplete' | 'identical' | 'nothing_to_change' | 'failed_round';
+
+/**
  * A change of a refine round, proposed by a review or applied by a version. `kind`:
  * "defect", "clarity", "simplification" or "requirement"; "merge" for the lines of
  * version 1, which say what it took from each answer.
@@ -164,8 +173,10 @@ export type RefineMeta =
       words: number;
       budget_words: number;
       accepted: boolean;
-      /** Why it did not become the current version (Catalan), as refine.round's `reason`. */
+      /** Why it did not become the current version (in the turn's language), as refine.round's `reason`. */
       reason: string | null;
+      /** The code of `reason` (null when it was accepted); a message stored before the codes has none. */
+      reason_code?: RefineReasonCode | null;
       changelog: RefineChange[];
       /** Version 1 stored without a call (nobody could merge): the id of the answer it copies. */
       copied_from?: number;
@@ -236,7 +247,7 @@ export type AttachmentKind = 'image' | 'pdf' | 'text';
 
 /**
  * The warnings of the server's analysis of an attached PDF's pages (docs/PROTOCOL.md
- * «Adjunts»), by kind: page numbers, from 1. Warnings, not verdicts.
+ * "Attachments"), by kind: page numbers, from 1. Warnings, not verdicts.
  */
 export interface PdfNotes {
   /** Pages without text: scans, or text drawn as an image. */
@@ -247,7 +258,7 @@ export interface PdfNotes {
   hidden: number[];
 }
 
-/** A file attached to a question (docs/PROTOCOL.md «Adjunts»). */
+/** A file attached to a question (docs/PROTOCOL.md "Attachments"). */
 export interface Attachment {
   id: number;
   /** Display name, cleaned by the server (no path, no control or invisible characters). */
@@ -275,7 +286,7 @@ export interface Attachment {
 }
 
 /**
- * Where Claude's check of a PDF for ChatGPT with the subscription is (docs/adr/0009-adjunts.md):
+ * Where Claude's check of a PDF for ChatGPT with the subscription is (docs/adr/0009-attachments.md):
  * running, done with at least one page checked, or done with none (it failed, took too
  * long, the PDF was not analysed or there is no Claude).
  */
@@ -296,7 +307,7 @@ export interface PdfReading {
   hidden_pages: number[];
   /** Pages nobody checked: ChatGPT read their extracted text as it is. */
   unchecked_pages: number[];
-  /** Why pages remain unchecked (Catalan); null when none does. */
+  /** Why pages remain unchecked, in the language of the turn; null when none does. */
   reason: string | null;
 }
 
@@ -444,7 +455,10 @@ export interface AuthState {
 
 export interface ErrorInfo {
   kind: string;
+  /** For people, in the language of the client that started the turn (docs/adr/0011-internationalization.md). */
   message: string;
+  /** The attachment that no longer exists, when that is the error. */
+  attachment_id?: number;
 }
 
 export interface Consensus {
@@ -497,7 +511,7 @@ export type ClientMessage =
       /** Ids of uploaded attachments, in order: at most MAX_ATTACHMENTS, each once. */
       attachments?: number[];
     }
-  /** «Atura en acabar la ronda»: a refine turn ends after the round in course (turn.stopping answers). */
+  /** "Stop after this round": a refine turn ends after the round in course (turn.stopping answers). */
   | { type: 'turn.stop'; request_id: string }
   | { type: 'turn.cancel'; request_id: string }
   | { type: 'turn.subscribe'; request_id: string; after_seq: number }
@@ -537,7 +551,7 @@ export type TurnEvent =
       reused: boolean;
       /** What this turn's calls for the PDF billed, with the cost (null while checking, or reused). */
       usage: Usage | null;
-      /** Why pages remain unchecked (Catalan); null when none does. */
+      /** Why pages remain unchecked, in the language of the turn; null when none does. */
       reason: string | null;
     })
   | (TurnEventBase & {
@@ -581,8 +595,9 @@ export type TurnEvent =
       /**
        * The end of a refine round (from round 1, the merge). `version`: the current version
        * after it; `accepted`: the round wrote a new one, now the current one; `reason`: why
-       * not (Catalan). `words`: the current version's; `changes`: the new version's
-       * changelog. `proposals` and `scores` per agent: null without a review (round 1 always).
+       * not (in the turn's language), and `reason_code` its code. `words`: the current
+       * version's; `changes`: the new version's changelog. `proposals` and `scores` per
+       * agent: null without a review (round 1 always).
        * `usage`: the round's calls; `total`: the turn so far.
        */
       type: 'refine.round';
@@ -590,6 +605,7 @@ export type TurnEvent =
       version: number;
       accepted: boolean;
       reason: string | null;
+      reason_code: RefineReasonCode | null;
       words: number;
       budget_words: number;
       changes: RefineChange[];

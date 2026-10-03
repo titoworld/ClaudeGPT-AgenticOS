@@ -26,10 +26,13 @@
 //   get one mark each: they are removed and one mark with the count stands in for
 //   them, so a smuggled payload cannot turn into megabytes of spans.
 //
-// Standalone on purpose, with no imports: markdown.ts uses it for the screen and
-// the answer's copy button for the clipboard, without either one pulling in the
-// other (the entry chunk, with the login screen, needs neither). No regex
-// lookbehind: Safari before 16.4 throws a SyntaxError when a module with one loads.
+// Standalone on purpose, with no imports but the texts of the language in force
+// (lib/i18n, already in the entry chunk): markdown.ts uses it for the screen and the
+// answer's copy button for the clipboard, without either one pulling in the other (the
+// entry chunk, with the login screen, needs neither). No regex lookbehind: Safari before
+// 16.4 throws a SyntaxError when a module with one loads.
+
+import { i18n } from './i18n/index.svelte';
 
 /** Explicit bidi embeddings, overrides and isolates: they reorder what is shown. */
 const BIDI_CONTROLS = String.raw`\u202A-\u202E\u2066-\u2069`;
@@ -136,18 +139,12 @@ export interface HiddenMark {
 
 function markFor(char: string): HiddenMark {
   const cp = codePoint(char);
-  return { text: `⟨${cp}⟩`, title: `Caràcter invisible o de control de direcció (${cp})`, collapsed: false };
+  return { text: `⟨${cp}⟩`, title: i18n.m.turn.hidden.mark(cp), collapsed: false };
 }
 
 function collapsedMark(count: number): HiddenMark {
-  const what = count === 1 ? '1 caràcter invisible eliminat' : `${count} caràcters invisibles eliminats`;
-  return {
-    text: `⟨${what}⟩`,
-    title:
-      'Hi havia massa caràcters invisibles o de control de direcció per marcar-los un per un: ' +
-      `${count === 1 ? "se n'ha eliminat 1" : `se n'han eliminat ${count}`} d'aquest bloc, que tampoc no es copien.`,
-    collapsed: true,
-  };
+  const texts = i18n.m.turn.hidden;
+  return { text: `⟨${texts.collapsed(count)}⟩`, title: texts.collapsedTitle(count), collapsed: true };
 }
 
 /** A piece of text and the block it belongs to (a code element or span, a paragraph). */
@@ -288,17 +285,11 @@ export function answerForClipboard(src: string): { text: string; notice: string 
 export function hiddenCopyNotice(revealed: number, removed: number): string | null {
   const total = revealed + removed;
   if (!total) return null;
-  if (total === 1) {
-    return removed
-      ? "La resposta tenia 1 caràcter invisible: no s'ha copiat."
-      : "La resposta tenia 1 caràcter invisible: s'ha copiat com a ⟨U+…⟩.";
-  }
-  if (!removed) return `La resposta tenia ${total} caràcters invisibles: s'han copiat com a ⟨U+…⟩.`;
-  if (!revealed) return `La resposta tenia ${total} caràcters invisibles: no s'han copiat.`;
-  return (
-    `La resposta tenia ${total} caràcters invisibles: ` +
-    `${revealed} s'han copiat com a ⟨U+…⟩ i ${removed} no s'han copiat.`
-  );
+  const texts = i18n.m.turn.hidden;
+  if (total === 1) return removed ? texts.removedOne : texts.copiedOne;
+  if (!removed) return texts.copiedAll(total);
+  if (!revealed) return texts.removedAll(total);
+  return texts.copiedSome(total, revealed, removed);
 }
 
 // ------------------------------------------------------------------ DOM

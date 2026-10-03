@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from agentic_os.domain import Usage
+from agentic_os.i18n import t
 
 PriceSource = Literal["default", "custom"]
 
@@ -45,13 +46,12 @@ class ModelPrice:
     def from_wire(cls, value: Mapping[str, object]) -> ModelPrice:
         def number(key: str) -> float:
             raw = value.get(key)
-            error = f"Preu invàlid per a «{key}»: ha de ser un nombre ≥ 0."
             if isinstance(raw, bool) or not isinstance(raw, int | float) or raw < 0:
-                raise ValueError(error)
+                raise ValueError(t("storage.settings.bad_price", key=key))
             try:
                 return float(raw)
             except OverflowError:  # a JSON integer too large for a float
-                raise ValueError(error) from None
+                raise ValueError(t("storage.settings.bad_price", key=key)) from None
 
         return cls(
             input=number("input"),

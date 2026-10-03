@@ -1,4 +1,4 @@
-"""Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-adjunts.md).
+"""Files attached to a question (docs/PROTOCOL.md and docs/adr/0009-attachments.md).
 
 - The limits, in one place: the server, the store and the engine use these constants.
 - What a file is comes from its content, never from its name or its ``Content-Type``:
@@ -18,6 +18,9 @@
   the subscription reads starts from these facts.
 - The display name of an upload is sanitized: no path, no control or invisible format
   characters (bidirectional overrides...), bounded length.
+- A refused file's reason is for the owner, in the language in force when it is refused
+  (docs/adr/0011-internationalization.md); the notes inside the extracted text of a PDF
+  are for the models, in English.
 - ``estimated_tokens``: an approximation shown before sending (see :func:`estimate_tokens`).
 """
 
@@ -37,6 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
+from agentic_os.i18n import Lazy, number, t
 from agentic_os.orchestrator.store import JsonValue
 from agentic_os.pdf_facts import PdfNotes, PdfPage, pages_from_data
 from agentic_os.providers.base import Attachment, AttachmentKind
@@ -153,92 +157,88 @@ TEXT_FILE: Final = FileType("text", TEXT)
 
 class AttachmentError(Exception):
     """A file that is refused. ``status`` is the HTTP status of the answer (413 too
-    big, 415 a type that is not accepted, 422 not valid) and ``message`` the reason, in
-    Catalan, fit to show to the owner as it is."""
+    big, 415 a type that is not accepted, 422 not valid) and ``message`` the reason, fit
+    to show to the owner as it is, made in the language in force when it is raised (it may
+    be given as a :class:`~agentic_os.i18n.Lazy` text, such as :data:`EMPTY_DETAIL`)."""
 
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
+    def __init__(self, status: int, message: str | Lazy) -> None:
+        text = str(message)
+        super().__init__(text)
         self.status = status
-        self.message = message
+        self.message = text
 
 
-def _number(value: int) -> str:
-    """Catalan thousands: ``100.000``."""
-    return f"{value:,}".replace(",", ".")
+@dataclass(frozen=True, slots=True, eq=False)
+class Detail(Lazy):
+    """The reason of a refusal that is the same for every file (:data:`EMPTY_DETAIL`...):
+    made in the language in force when it is shown, or when an :class:`AttachmentError`
+    is raised with it. It equals the text it reads as then, so a check written against
+    the reason (``response == {"detail": EMPTY_DETAIL}``) holds in any language; it is
+    unhashable, since what it equals depends on the language."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return str(self) == other
+        if isinstance(other, Lazy):
+            return (self.key, self.params) == (other.key, other.params)
+        return NotImplemented
 
 
 def size_text(size: int) -> str:
-    """A decimal size as the messages write it: ``20 MB``, ``200 kB``."""
+    """A decimal size as the messages write it, in the language in force: ``20 MB``,
+    ``200 kB``, ``1.500 bytes`` (``1,500 bytes`` in English)."""
     if size >= 1_000_000 and size % 1_000_000 == 0:
-        return f"{size // 1_000_000} MB"
+        return f"{number(size // 1_000_000)} MB"
     if size >= 1000 and size % 1000 == 0:
-        return f"{size // 1000} kB"
-    return f"{_number(size)} bytes"
+        return f"{number(size // 1000)} kB"
+    return f"{number(size)} bytes"
 
 
-UNSUPPORTED_DETAIL: Final = (
-    "Aquest tipus de fitxer no s'admet. Pots adjuntar imatges (PNG, JPEG, GIF o WebP), "
-    "PDF i fitxers de text (UTF-8)."
+UNSUPPORTED_DETAIL: Final = Detail("attachments.unsupported")
+SVG_DETAIL: Final = Detail("attachments.svg")
+HEIC_DETAIL: Final = Detail("attachments.heic")
+EMPTY_DETAIL: Final = Detail("attachments.empty")
+NAME_REQUIRED_DETAIL: Final = Detail("attachments.name_required")
+BAD_NAME_DETAIL: Final = Detail("attachments.bad_name")
+BAD_IMAGE_DETAIL: Final = Detail("attachments.bad_image")
+PDF_INVALID_DETAIL: Final = Detail("attachments.pdf_invalid")
+PDF_ENCRYPTED_DETAIL: Final = Detail("attachments.pdf_encrypted")
+PDF_EMPTY_DETAIL: Final = Detail("attachments.pdf_empty")
+PDF_TIMEOUT_DETAIL: Final = Detail(
+    "attachments.pdf_timeout", (("seconds", int(PDF_TIMEOUT_SECONDS)),)
 )
-SVG_DETAIL: Final = (
-    "Les imatges SVG no s'admeten, perquè poden portar codi. Converteix-la a PNG i torna-la "
-    "a adjuntar."
-)
-HEIC_DETAIL: Final = (
-    "Les imatges HEIC no s'admeten. Converteix-la a JPEG (o fes-ne una captura) i torna-la "
-    "a adjuntar."
-)
-EMPTY_DETAIL: Final = "El fitxer és buit."
-NAME_REQUIRED_DETAIL: Final = "Cal indicar el nom del fitxer (paràmetre «name»)."
-BAD_NAME_DETAIL: Final = "El nom del fitxer no és vàlid."
-BAD_IMAGE_DETAIL: Final = (
-    "No s'han pogut llegir les dimensions de la imatge: el fitxer no és vàlid."
-)
-PDF_INVALID_DETAIL: Final = "El PDF no és vàlid o està malmès."
-PDF_ENCRYPTED_DETAIL: Final = (
-    "El PDF està xifrat o protegit amb contrasenya. Treu-ne la protecció i torna'l a adjuntar."
-)
-PDF_EMPTY_DETAIL: Final = "El PDF no té cap pàgina."
-PDF_TIMEOUT_DETAIL: Final = (
-    f"No s'ha pogut llegir el PDF en {int(PDF_TIMEOUT_SECONDS)} segons. Prova'n una versió "
-    "més senzilla o més petita."
-)
-THUMBNAIL_TYPE_DETAIL: Final = "La miniatura ha de ser una imatge PNG o WebP."
-THUMBNAIL_BAD_DETAIL: Final = "No s'han pogut llegir les dimensions de la miniatura."
-_KIND_NAMES: Final[Mapping[AttachmentKind, str]] = {
-    "image": "una imatge",
-    "pdf": "un PDF",
-    "text": "un fitxer de text",
-}
+THUMBNAIL_TYPE_DETAIL: Final = Detail("attachments.thumbnail_type")
+THUMBNAIL_BAD_DETAIL: Final = Detail("attachments.thumbnail_bad")
 
 
 def too_large_detail(kind: AttachmentKind) -> str:
-    return (
-        f"El fitxer és massa gran: {_KIND_NAMES[kind]} pot tenir com a molt "
-        f"{size_text(KIND_LIMITS[kind])}."
-    )
+    return t(f"attachments.too_large.{kind}", size=size_text(KIND_LIMITS[kind]))
 
 
 def thumbnail_too_large_detail() -> str:
-    return f"La miniatura és massa gran: com a molt {size_text(MAX_THUMBNAIL_BYTES)}."
+    return t("attachments.thumbnail_too_large", size=size_text(MAX_THUMBNAIL_BYTES))
 
 
 def image_too_big_detail(width: int, height: int) -> str:
-    return (
-        f"La imatge fa {_number(width)} x {_number(height)} píxels: com a molt "
-        f"{_number(MAX_IMAGE_SIDE)} per costat."
+    return t(
+        "attachments.image_too_big",
+        width=number(width),
+        height=number(height),
+        max=number(MAX_IMAGE_SIDE),
     )
 
 
 def thumbnail_too_big_detail(width: int, height: int) -> str:
-    return (
-        f"La miniatura fa {_number(width)} x {_number(height)} píxels: com a molt "
-        f"{MAX_THUMBNAIL_SIDE} per costat."
+    return t(
+        "attachments.thumbnail_too_big",
+        width=number(width),
+        height=number(height),
+        max=number(MAX_THUMBNAIL_SIDE),
     )
 
 
 def pdf_pages_detail(pages: int) -> str:
-    return f"El PDF té {_number(pages)} pàgines: com a molt {MAX_PDF_PAGES}."
+    return t("attachments.pdf_pages", pages=number(pages), max=number(MAX_PDF_PAGES))
 
 
 # -- names -------------------------------------------------------------------------------
@@ -585,19 +585,21 @@ def snapshot(attachment_id: int, attachment: Attachment) -> dict[str, JsonValue]
 class PdfInfo:
     pages: int
     text: str | None
-    """The extracted text, one block per page introduced by «--- Pàgina N ---»; ``None``
+    """The extracted text, one block per page introduced by «--- Page N ---»; ``None``
     when it could not be extracted or no page has any (a scanned PDF)."""
     pdf_pages: tuple[PdfPage, ...] | None = None
     """What the reader found on each page (``text[start:end]`` is a page's text); ``None``
     when the PDF could not be analysed (it is then read as before, unchecked)."""
 
 
+# The extracted text of a PDF is for the models: its page headers and its notice of a
+# cut are in English, whatever the language of whoever uploaded it.
 def page_header(number: int) -> str:
-    return f"--- Pàgina {number} ---"
+    return f"--- Page {number} ---"
 
 
 def cut_notice(limit: int) -> str:
-    return f"[Text retallat: el text extret del PDF passava de {_number(limit)} caràcters.]"
+    return f"[Text truncated: the text extracted from the PDF was over {limit:,} characters.]"
 
 
 def clean_text(text: str) -> str:
@@ -613,7 +615,7 @@ it is stored) and whether the text's limit cut any of it off (``pdf_facts.PdfPag
 
 
 class StoredText:
-    """The stored text of a PDF, built page by page: a block per page, «--- Pàgina N ---»
+    """The stored text of a PDF, built page by page: a block per page, «--- Page N ---»
     and the page's text (without the line breaks it starts with or the white space it
     ends with), blocks apart by a blank line, and the whole cut at ``limit`` characters
     with :func:`cut_notice`. Once past the limit a page's text is no longer kept (only
@@ -791,7 +793,8 @@ def has_images(resources: object, depth: int = 0, seen: set[int] | None = None) 
     forms' (:data:`MAX_FORM_DEPTH` levels down): a page that draws a scan or a picture.
     It counts the images a page could draw, which is enough to tell a scan with its
     recognized text in an invisible layer from a page that hides text; an image that the
-    page lists and never draws counts too (a limit of the analysis, docs/adr/0009-adjunts.md)."""
+    page lists and never draws counts too (a limit of the analysis,
+    docs/adr/0009-attachments.md)."""
     seen = set() if seen is None else seen
     xobjects = _entry(_resolved(resources), "/XObject")
     if not isinstance(xobjects, dict) or id(xobjects) in seen:

@@ -3,20 +3,28 @@
   import BrandMark from '../components/BrandMark.svelte';
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
+  import LanguagePicker from '../components/LanguagePicker.svelte';
   import { ApiError, app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
+
+  /** What went wrong: a kind of ours, whose text follows the language, or the server's own words. */
+  type LoginError = 'noPassword' | 'codeDigits' | 'wrong' | 'origin' | 'failed' | 'offline' | { server: string };
 
   const SETUP_COMMAND = 'docker compose exec -it app agentic-os init';
   const uid = $props.id();
 
   let password = $state('');
   let code = $state('');
-  let error: string | null = $state(null);
+  let error = $state<LoginError | null>(null);
   let busy = $state(false);
   let lockedUntil: number | null = $state(null);
   let now = $state(Date.now());
   let passwordInput: HTMLInputElement | undefined = $state();
   let codeInput: HTMLInputElement | undefined = $state();
 
+  const m = $derived(i18n.m.app);
+  const t = $derived(m.login);
+  const errorText = $derived(error === null ? null : typeof error === 'string' ? t[error] : error.server);
   const remaining = $derived(lockedUntil ? Math.max(0, Math.ceil((lockedUntil - now) / 1000)) : 0);
   const throttled = $derived(remaining > 0);
   const countdown = $derived(
@@ -57,12 +65,12 @@
   async function submit(): Promise<void> {
     if (busy || throttled) return;
     if (!password) {
-      error = 'Escriu la contrasenya.';
+      error = 'noPassword';
       passwordInput?.focus();
       return;
     }
     if (code.length !== 6) {
-      error = "El codi de l'aplicació d'autenticació té 6 xifres.";
+      error = 'codeDigits';
       codeInput?.focus();
       return;
     }
@@ -77,13 +85,13 @@
         now = Date.now();
         error = null;
       } else if (err instanceof ApiError && err.status === 401) {
-        error = 'La contrasenya o el codi no són correctes.';
+        error = 'wrong';
       } else if (err instanceof ApiError && err.status === 403) {
-        error = "Aquest origen no té permís per iniciar sessió. Revisa l'adreça que fas servir.";
+        error = 'origin';
       } else if (err instanceof ApiError) {
-        error = err.message || "No s'ha pogut iniciar la sessió.";
+        error = err.message ? { server: err.message } : 'failed';
       } else {
-        error = 'No es pot connectar amb el servidor. Comprova la connexió.';
+        error = 'offline';
       }
       busy = false;
       await tick(); // the input is enabled again only after this render
@@ -95,53 +103,51 @@
 </script>
 
 <main class="login">
+  <div class="language">
+    <LanguagePicker compact />
+  </div>
   <div class="card glass">
     <div class="head">
       <div class="mark"><BrandMark size={56} /></div>
       <h1>ClaudeGPT <span>OS</span></h1>
-      <p class="tagline">El teu consell privat de Claude i ChatGPT</p>
+      <p class="tagline">{t.tagline}</p>
     </div>
 
     {#if app.auth === 'setup'}
       <div class="setup">
-        <h2><Icon name="terminal" size={18} />Cal configurar l'accés</h2>
-        <p>
-          Encara no hi ha cap contrasenya ni codi TOTP. Executa aquesta ordre al servidor i segueix els passos:
-        </p>
+        <h2><Icon name="terminal" size={18} />{t.setupTitle}</h2>
+        <p>{t.setupText}</p>
         <div class="command">
           <code>{SETUP_COMMAND}</code>
-          <CopyButton text={SETUP_COMMAND} label="Copia l'ordre" />
+          <CopyButton text={SETUP_COMMAND} label={t.copyCommand} />
         </div>
         <button type="button" class="btn primary wide" onclick={() => void app.checkAuth()}>
-          <Icon name="refresh" size={16} />Ja està, torna-ho a comprovar
+          <Icon name="refresh" size={16} />{t.setupDone}
         </button>
       </div>
     {:else if app.auth === 'unreachable'}
       <div class="setup">
-        <h2><Icon name="alert" size={18} />No es pot connectar amb el servidor</h2>
-        <p>Comprova que el servei està en marxa i que tens connexió a internet.</p>
+        <h2><Icon name="alert" size={18} />{t.unreachableTitle}</h2>
+        <p>{t.unreachableText}</p>
         <button type="button" class="btn primary wide" onclick={() => void app.checkAuth()}>
-          <Icon name="refresh" size={16} />Torna-ho a provar
+          <Icon name="refresh" size={16} />{m.retry}
         </button>
       </div>
     {:else if app.auth === 'locked' && app.logoutBusy}
-      <p class="closing" role="status"><span class="spinner" aria-hidden="true"></span>Tancant la sessió…</p>
+      <p class="closing" role="status"><span class="spinner" aria-hidden="true"></span>{t.closing}</p>
     {:else}
       {#if app.auth === 'locked'}
         <div class="lock">
           <div role="alert">
-            <h2><Icon name="lock" size={18} />La sessió encara no s'ha pogut tancar al servidor</h2>
-            <p>
-              Aquest bloqueig només és local: aquesta pàgina ja no mostra res de la sessió, però al servidor la
-              sessió continua oberta fins que es pugui tancar o caduqui.
-            </p>
-            {#if app.logoutError}<p class="reason">Motiu: {app.logoutError}</p>{/if}
+            <h2><Icon name="lock" size={18} />{t.lockTitle}</h2>
+            <p>{t.lockText}</p>
+            {#if app.logoutError}<p class="reason">{t.lockReason(app.logoutError)}</p>{/if}
           </div>
           <button type="button" class="btn primary wide" disabled={busy} onclick={() => void app.retryLogout()}>
-            <Icon name="refresh" size={16} />Torna-ho a provar
+            <Icon name="refresh" size={16} />{m.retry}
           </button>
         </div>
-        <p class="again">O torna a entrar: en iniciar sessió es tanca la sessió anterior.</p>
+        <p class="again">{t.lockAgain}</p>
       {/if}
       <form
         onsubmit={(e) => {
@@ -150,7 +156,7 @@
         }}
         novalidate>
         <label class="field">
-          <span>Contrasenya</span>
+          <span>{t.password}</span>
           <input
             bind:this={passwordInput}
             bind:value={password}
@@ -163,7 +169,7 @@
         </label>
 
         <label class="field">
-          <span>Codi de verificació</span>
+          <span>{t.code}</span>
           <input
             bind:this={codeInput}
             value={code}
@@ -182,30 +188,37 @@
           <span class="digits" aria-hidden="true">
             {#each Array.from({ length: 6 }, (_, i) => i) as i (i)}<i class:on={i < code.length}></i>{/each}
           </span>
-          <small class="hint" id="{uid}-code-hint">Les 6 xifres de la teva aplicació d'autenticació. S'envia sol.</small>
+          <small class="hint" id="{uid}-code-hint">{t.codeHint}</small>
         </label>
 
         <div class="messages" aria-live="assertive">
           {#if throttled}
             <p class="error" role="alert">
-              <Icon name="clock" size={16} />Massa intents. Torna-ho a provar d'aquí a {countdown}.
+              <Icon name="clock" size={16} />{t.throttled(countdown)}
             </p>
-          {:else if error}
-            <p class="error" role="alert"><Icon name="alert" size={16} />{error}</p>
+          {:else if errorText}
+            <p class="error" role="alert"><Icon name="alert" size={16} />{errorText}</p>
           {/if}
         </div>
 
         <button type="submit" class="btn primary wide" disabled={busy || throttled}>
-          {#if busy}<span class="spinner" aria-hidden="true"></span>Entrant…{:else}<Icon name="lock" size={16} />Entra{/if}
+          {#if busy}<span class="spinner" aria-hidden="true"></span>{t.loggingIn}{:else}<Icon name="lock" size={16} />{t.logIn}{/if}
         </button>
       </form>
     {/if}
 
-    <p class="foot">Accés privat: només el propietari pot entrar.</p>
+    <p class="foot">{t.foot}</p>
   </div>
 </main>
 
 <style>
+  .language {
+    position: absolute;
+    top: max(0.9rem, env(safe-area-inset-top));
+    right: max(0.9rem, env(safe-area-inset-right));
+    z-index: 2;
+  }
+
   .login {
     position: relative;
     z-index: 1;

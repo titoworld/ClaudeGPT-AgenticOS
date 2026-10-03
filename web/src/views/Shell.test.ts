@@ -1,8 +1,9 @@
 // The sidebar drawer on phones (audit N21) is modal: while it is open the rest of the
 // page is inert (keyboard and screen readers stay in the menu), the focus moves into
 // it, Escape closes it, and closing it gives the focus back to the menu button.
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { conversations, ConversationServer } from '../lib/test-conversations';
+import { textOf } from '../lib/test-render';
 import { polyfillDialog } from '../lib/test-server';
 
 async function load() {
@@ -132,5 +133,56 @@ describe('the drawer on a phone (N21)', () => {
     expect(e.prefs.sidebarCollapsed).toBe(false);
     expect(document.activeElement).toBe(search);
     expect(isInert(main(root))).toBe(false);
+  });
+});
+
+describe('the shell in English and Spanish', () => {
+  beforeEach(() => {
+    // jsdom has no ResizeObserver (the chat follows its content's height).
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} unobserve(): void {} disconnect(): void {} });
+  });
+  afterEach(() => localStorage.removeItem('aos.lang'));
+
+  it('names the menu, the search, the connection and the page in the language in force', async () => {
+    const { e, root } = await shell(true);
+    const { i18n } = await import('../lib/i18n/index.svelte');
+    const menu = () => root.querySelector<HTMLButtonElement>('header button.icon-btn')!;
+
+    i18n.set('en');
+    e.flushSync();
+    expect(menu().getAttribute('aria-label')).toBe('Open the menu');
+    expect(textOf(root.querySelector('.palette-text'))).toBe('Search and commands');
+    expect(textOf(root.querySelector('header h1'))).toBe('New conversation');
+    expect(textOf(root.querySelector('.conn [role=status]'))).toBe('Disconnected');
+    expect(document.title).toBe('ClaudeGPT OS');
+    menu().click();
+    e.flushSync();
+    expect(drawer(root).getAttribute('aria-label')).toBe('Menu');
+    expect(root.querySelector('button.backdrop')!.getAttribute('aria-label')).toBe('Close the menu');
+
+    i18n.set('es');
+    e.flushSync();
+    expect(drawer(root).getAttribute('aria-label')).toBe('Menú');
+    expect(root.querySelector('button.backdrop')!.getAttribute('aria-label')).toBe('Cerrar el menú');
+    expect(textOf(root.querySelector('.palette-text'))).toBe('Búsqueda y comandos');
+    expect(textOf(root.querySelector('header h1'))).toBe('Nueva conversación');
+    expect(textOf(root.querySelector('.conn [role=status]'))).toBe('Desconectado');
+  });
+
+  it("the page's title is the conversation's, even one called like a new conversation", async () => {
+    const server = new ConversationServer(conversations(3, { 2: 'New conversation' }));
+    vi.stubGlobal('fetch', server.fetch);
+    env = await load();
+    await env.app.convs.refresh();
+    const { i18n } = await import('../lib/i18n/index.svelte');
+    i18n.set('en');
+    env.render(env.Shell, {});
+    expect(document.title).toBe('ClaudeGPT OS');
+    env.app.convs.currentId = 2;
+    env.flushSync();
+    expect(document.title).toBe('New conversation · ClaudeGPT OS');
+    env.app.convs.currentId = 3;
+    env.flushSync();
+    expect(document.title).toBe('Conversa número 3 · ClaudeGPT OS');
   });
 });

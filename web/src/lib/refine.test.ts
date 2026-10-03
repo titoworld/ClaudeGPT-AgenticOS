@@ -1,14 +1,16 @@
-// What the refine view («Perfecciona», docs/adr/0010-mode-perfecciona.md) shows of a turn:
+// What the refine view («Perfecciona», docs/adr/0010-refine-mode.md) shows of a turn:
 // the versions of the living document, each round's block, the live status and why it
 // stopped, the same live and after a reload.
-import { describe, expect, it } from 'vitest';
-import type { TurnEvent } from './protocol';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n } from './i18n/index.svelte';
+import type { Message, TurnEvent } from './protocol';
 import {
   changeKindLabel,
   currentVersion,
   keptVersion,
   liveStatus,
   previousAccepted,
+  reasonText,
   refineVersions,
   roundBlocks,
   shownDocument,
@@ -22,6 +24,7 @@ import {
   cancelledRefineMessages,
   countWords,
   INTERNAL_ERROR,
+  legacyMessages,
   mergeCancelledEvents,
   OVER_BUDGET,
   REFINE_TURN_OPTIONS,
@@ -37,7 +40,7 @@ import {
   V3_LONG,
   V3_SHORT,
 } from './test-refine';
-import { applyTurnEvent, createLiveTurn, turnsFromMessages, type TurnView } from './turns.svelte';
+import { applyTurnEvent, createLiveTurn, REFINE_REASON_CODES, turnsFromMessages, type TurnView } from './turns.svelte';
 
 function live(events: TurnEvent[]): TurnView {
   const turn = createLiveTurn({ requestId: events[0]!.request_id, question: 'q', mode: 'refine', options: REFINE_TURN_OPTIONS, conversationId: 12 });
@@ -285,6 +288,95 @@ describe('changeKindLabel', () => {
   it('names each kind of change, and keeps one it does not know', () => {
     expect(['defect', 'clarity', 'simplification', 'requirement', 'merge', 'other'].map(changeKindLabel)).toEqual([
       'Defecte', 'Claredat', 'Simplificació', 'Requisit', 'Fusió', 'other',
+    ]);
+  });
+});
+
+describe('reasonText: why a version was not accepted, or a round wrote none', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it("is the client's own text for a code it knows, in the language of the interface", () => {
+    // The server wrote the reason in the turn's language (Catalan here), with its code.
+    const rejected = refineVersions(live(refineEvents())).at(-1)!;
+    expect([rejected.reason, rejected.reasonCode]).toEqual([OVER_BUDGET, 'over_budget']);
+    expect(reasonText(rejected)).toBe(OVER_BUDGET);
+    i18n.set('en');
+    expect(reasonText(rejected)).toBe('The new version went over the word limit.');
+    expect(reasonText(live(refineEvents()).refineRounds.at(-1)!)).toBe('The new version went over the word limit.');
+    i18n.set('es');
+    expect(reasonText(rejected)).toBe('La nueva versión superaba el límite de palabras.');
+    expect(REFINE_REASON_CODES.map((code) => reasonText({ reason: null, reasonCode: code }))).toEqual([
+      'La nueva versión superaba el límite de palabras.',
+      'El editor no ha escrito ninguna versión completa.',
+      'La nueva versión es igual a la anterior.',
+      'Ninguno de los dos ha encontrado nada que cambiar.',
+      'Los modelos han fallado y la ronda no ha escrito ninguna versión.',
+    ]);
+  });
+
+  it('is the reason as it came for a code it does not know, and null without a reason', () => {
+    i18n.set('en');
+    expect(reasonText({ reason: 'Massa lenta.', reasonCode: null })).toBe('Massa lenta.');
+    expect(reasonText({ reason: null, reasonCode: null })).toBeNull();
+  });
+
+  it('finds the shortening of a version over the word limit by its code, not by its text', () => {
+    // The same turn run in English: its reasons in English, with their codes.
+    const english: Message[] = refineMessages().map((m) => {
+      const refine = m.meta.refine;
+      if (!refine || !('role' in refine) || refine.role !== 'version' || !refine.reason) return m;
+      return { ...m, meta: { ...m.meta, refine: { ...refine, reason: 'The new version went over the word limit.' } } };
+    });
+    expect(listed(turnsFromMessages(english, 12)[0]!)).toEqual(listed(stored()));
+    // A turn stored before the codes: its Catalan reasons stand for them.
+    const legacy = turnsFromMessages(legacyMessages(refineMessages()), 12)[0]!;
+    expect(listed(legacy)).toEqual(listed(stored()));
+    expect(refineVersions(legacy).map((v) => v.reasonCode)).toEqual([null, null, 'over_budget', 'over_budget']);
+  });
+});
+
+describe('in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  const statusAfter = (stream: string) => liveStatus(until((e) => e.type === 'stream.completed' && e.stream_id === stream)).text;
+
+  it('says what the turn is doing', () => {
+    i18n.set('en');
+    expect(statusAfter('c0')).toBe('Both AIs are answering the brief');
+    expect(statusAfter('e1')).toBe('Claude is merging the answers into version 1');
+    expect(statusAfter('r2c')).toBe('Reviewing version 1');
+    expect(statusAfter('e2')).toBe('Claude is writing version 2');
+    expect(statusAfter('s3')).toBe('Claude is shortening version 3');
+    expect(statusAfter('f')).toBe('Saving version 2 as the final answer');
+    expect(liveStatus(until((e) => e.type === 'phase' && e.phase === 'review' && e.round === 3)).text).toBe('Round finished');
+    i18n.set('es');
+    expect(statusAfter('c0')).toBe('Las dos IA responden al encargo');
+    expect(statusAfter('e1')).toBe('Claude fusiona las respuestas en la versión 1');
+    expect(statusAfter('r2c')).toBe('Revisan la versión 1');
+    expect(statusAfter('s3')).toBe('Claude acorta la versión 3');
+    expect(statusAfter('f')).toBe('Guardando la versión 2 como respuesta final');
+  });
+
+  it('says why it stopped, and names the kinds of change', () => {
+    i18n.set('en');
+    expect(stopReasonText(live(refineEvents()))).toBe('You stopped it');
+    expect(stopReasonText(live(refineEvents('req-p', 'converged')))).toBe('Both score it above the threshold (90)');
+    expect(stopReasonText(live(refineEvents('req-p', 'max_rounds')))).toBe('Maximum number of rounds (6)');
+    expect(['defect', 'clarity', 'simplification', 'requirement', 'merge', 'other'].map(changeKindLabel)).toEqual([
+      'Defect', 'Clarity', 'Simplification', 'Requirement', 'Merge', 'other',
+    ]);
+    i18n.set('es');
+    expect(STOP_REASON_LABEL).toEqual({
+      owner: 'Lo has parado',
+      unchanged: 'Ninguno de los dos encuentra nada que cambiar',
+      converged: 'Los dos lo puntúan por encima del umbral',
+      max_rounds: 'Máximo de rondas',
+      budget: 'Presupuesto agotado',
+      failed: 'Los dos modelos han fallado',
+    });
+    expect(stopReasonText(live(refineEvents('req-p', 'failed')))).toBe('Los dos modelos han fallado');
+    expect(['defect', 'clarity', 'simplification', 'requirement', 'merge'].map(changeKindLabel)).toEqual([
+      'Defecto', 'Claridad', 'Simplificación', 'Requisito', 'Fusión',
     ]);
   });
 });

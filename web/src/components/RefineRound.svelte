@@ -1,5 +1,5 @@
 <script lang="ts">
-  // A round of a refine turn («Perfecciona»): how it ended (the version it wrote, or why
+  // A round of a refine turn (Refine): how it ended (the version it wrote, or why
   // not; the changes it applied and their kinds; the words against the limit; what each
   // agent proposed and how it scored the document; what the round and the turn cost), its
   // reviews in a collapsible part, and the versions the editor wrote in it. While the round
@@ -8,13 +8,15 @@
   import { untrack } from 'svelte';
   import { approxEur } from '../lib/costs';
   import { AGENT_LABEL, formatInt } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { critiqueMarkdown } from '../lib/markdown';
   import { AGENTS, type Agent } from '../lib/protocol';
-  import { changeKindLabel, type RoundBlock, type VersionView } from '../lib/refine';
+  import { changeKindLabel, reasonText, type RoundBlock, type VersionView } from '../lib/refine';
   import AgentLabel from './AgentLabel.svelte';
   import Icon from './Icon.svelte';
   import Markdown from './Markdown.svelte';
   import PlainText from './PlainText.svelte';
+  import RichText from './RichText.svelte';
   import StreamStatus from './StreamStatus.svelte';
 
   interface Props {
@@ -34,7 +36,10 @@
 
   let { block, versions, live, latest, active, eurPerUsd, onshow }: Props = $props();
 
+  const t = $derived(i18n.m.refine.round);
   const summary = $derived(block.summary);
+  /** Why the round wrote no new version, in the language of the interface. */
+  const reason = $derived(summary ? reasonText(summary) : null);
   const running = $derived(active && !summary);
   const roundCost = $derived(approxEur(summary?.usage?.cost_usd, eurPerUsd));
   const totalCost = $derived(approxEur(summary?.total?.cost_usd, eurPerUsd));
@@ -58,13 +63,13 @@
   /** What an agent proposed this round, in words. */
   function proposals(agent: Agent): string {
     const n = summary ? summary.proposals[agent] : (review(agent)?.changes.length ?? null);
-    if (n === 0) return 'Sense canvis';
-    if (n != null) return n === 1 ? '1 proposta' : `${formatInt(n)} propostes`;
+    if (n === 0) return t.noChanges;
+    if (n != null) return t.proposals(n, formatInt(n));
     const s = block.reviews[agent];
-    if (s?.status === 'streaming') return 'Revisant…';
-    if (s?.status === 'failed') return 'Ha fallat';
-    if (s?.status === 'interrupted') return 'Interrompuda';
-    return 'Sense revisió';
+    if (s?.status === 'streaming') return t.reviewing;
+    if (s?.status === 'failed') return t.failed;
+    if (s?.status === 'interrupted') return t.interrupted;
+    return t.noReview;
   }
 
   const score = (agent: Agent): number | null => (summary ? summary.scores[agent] : (review(agent)?.score ?? null));
@@ -75,45 +80,46 @@
   );
 
   function editText(version: VersionView): string {
-    const name = `Versió ${version.number}${version.retry ? ' (escurçada)' : ''}`;
-    if (version.state === 'writing') return `${name}: s'està escrivint (${formatInt(version.words)} paraules)`;
-    if (version.state === 'interrupted') return `${name}: interrompuda`;
+    const name = version.retry ? t.shortened(version.number) : i18n.m.refine.version(version.number);
+    const edit = t.edit;
+    if (version.state === 'writing') return edit.writing(name, i18n.m.refine.words(version.words, formatInt(version.words)));
+    if (version.state === 'interrupted') return edit.interrupted(name);
     // Cut off before its end (ADR 0005): never complete, accepted or not.
-    const cut = version.stream.truncated ? ', incompleta' : '';
-    return `${name}: ${version.state === 'accepted' ? 'acceptada' : 'rebutjada'}${cut}`;
+    if (version.stream.truncated) return version.state === 'accepted' ? edit.acceptedIncomplete(name) : edit.rejectedIncomplete(name);
+    return version.state === 'accepted' ? edit.accepted(name) : edit.rejected(name);
   }
 </script>
 
 <details class="refine-round" class:running bind:open>
   <summary onclick={() => (touched = true)}>
     <Icon name="chevron-right" size={16} class="chev" />
-    <span class="title">Ronda {block.round}</span>
-    {#if block.round === 1}<span class="tag">Fusió</span>{/if}
+    <span class="title">{t.title(block.round)}</span>
+    {#if block.round === 1}<span class="tag">{t.merge}</span>{/if}
     {#if summary}
       {#if summary.accepted}
-        <span class="chip good">Versió {summary.version}</span>
+        <span class="chip good">{i18n.m.refine.version(summary.version)}</span>
       {:else}
-        <span class="chip warn">Sense versió nova</span>
+        <span class="chip warn">{t.noNewVersion}</span>
       {/if}
-      {#if summary.converged}<span class="chip good">Convergeix</span>{/if}
-      <span class="meta">{formatInt(summary.words)} paraules</span>
+      {#if summary.converged}<span class="chip good">{t.converges}</span>{/if}
+      <span class="meta">{i18n.m.refine.words(summary.words, formatInt(summary.words))}</span>
       {#if roundCost}<span class="meta cost">{roundCost}</span>{/if}
     {:else if running}
-      <span class="chip">En curs</span>
+      <span class="chip">{t.inProgress}</span>
       <StreamStatus status="streaming" />
     {:else}
-      <span class="chip">Interrompuda</span>
+      <span class="chip">{t.interrupted}</span>
     {/if}
   </summary>
 
   <div class="round-body">
     {#if summary}
-      {#if summary.reason}
-        <p class="reason"><Icon name="info" size={14} /><span>{summary.reason}</span></p>
+      {#if reason}
+        <p class="reason"><Icon name="info" size={14} /><span>{reason}</span></p>
       {/if}
       {#if summary.changes.length}
         <div class="applied">
-          <h4>Canvis aplicats</h4>
+          <h4>{t.applied}</h4>
           <ul class="changes">
             {#each summary.changes as change, i (i)}
               <li><span class="kind {change.kind}">{changeKindLabel(change.kind)}</span> <PlainText text={change.text} /></li>
@@ -123,20 +129,20 @@
       {/if}
       <dl class="facts">
         <div>
-          <dt>Paraules</dt>
+          <dt>{t.words}</dt>
           <dd class:over={summary.words > summary.budgetWords}>
-            {formatInt(summary.words)} de {formatInt(summary.budgetWords)}
+            {t.ofLimit(formatInt(summary.words), formatInt(summary.budgetWords))}
           </dd>
         </div>
         {#if roundCost}
           <div>
-            <dt>Cost de la ronda</dt>
+            <dt>{t.cost}</dt>
             <dd>{roundCost}</dd>
           </div>
         {/if}
         {#if totalCost}
           <div>
-            <dt>Total del torn</dt>
+            <dt>{t.total}</dt>
             <dd>{totalCost}</dd>
           </div>
         {/if}
@@ -144,24 +150,24 @@
     {/if}
 
     {#if block.round >= 2}
-      <ul class="agents" aria-label="Revisions de la ronda {block.round}">
+      <ul class="agents" aria-label={t.reviewsOf(block.round)}>
         {#each AGENTS as agent (agent)}
           {@const value = score(agent)}
           <li class={agent}>
             <AgentLabel {agent} size={15} />
             <span class="proposals">{proposals(agent)}</span>
-            {#if value != null}<span class="score">Puntuació <b>{value}</b></span>{/if}
+            {#if value != null}<span class="score"><RichText text={t.score(value)} /></span>{/if}
           </li>
         {/each}
       </ul>
 
       <details class="reviews" bind:open={reviewsOpen}>
-        <summary>Revisions</summary>
+        <summary>{t.reviews}</summary>
         <div class="cols">
           {#each AGENTS as agent (agent)}
             {@const s = block.reviews[agent]}
             {@const done = review(agent)}
-            <section class="review {agent}" aria-label="Revisió de {AGENT_LABEL[agent]}">
+            <section class="review {agent}" aria-label={t.reviewBy(AGENT_LABEL[agent])}>
               <header>
                 <AgentLabel {agent} size={15} />
                 {#if s && s.status !== 'done'}<StreamStatus status={s.status} />{/if}
@@ -174,14 +180,14 @@
                     {/each}
                   </ul>
                 {:else}
-                  <p class="unchanged"><Icon name="check" size={14} />Sense canvis</p>
+                  <p class="unchanged"><Icon name="check" size={14} />{t.noChanges}</p>
                 {/if}
               {:else if s?.status === 'failed'}
-                <p class="problem"><Icon name="alert" size={14} /><span>{s.error?.message ?? 'Error'}</span></p>
+                <p class="problem"><Icon name="alert" size={14} /><span>{s.error?.message ?? t.error}</span></p>
               {:else if s?.critique}
                 <Markdown text={critiqueMarkdown(s.critique)} streaming={s.status === 'streaming'} />
               {:else if !s}
-                <p class="empty">{running ? 'Encara no ha començat.' : 'Sense revisió.'}</p>
+                <p class="empty">{running ? t.notStarted : t.noReviewDone}</p>
               {/if}
             </section>
           {/each}
@@ -196,12 +202,12 @@
             {#if edit.version}
               <span>{editText(edit.version)}</span>
               <button type="button" class="link-btn" onclick={() => onshow(edit.version!.key)}>
-                Mostra la versió {edit.version.number}{edit.version.retry ? ' (escurçada)' : ''}
+                {edit.version.retry ? t.showShortened(edit.version.number) : t.show(edit.version.number)}
               </button>
             {:else}
               <span class="problem">
-                <Icon name="alert" size={14} />{AGENT_LABEL[edit.stream.agent]} no ha pogut escriure la versió:
-                {edit.stream.error?.message ?? 'error'}
+                <Icon name="alert" size={14} />{t.editFailed(AGENT_LABEL[edit.stream.agent])}
+                {edit.stream.error?.message ?? t.errorInline}
               </span>
             {/if}
           </li>
@@ -371,7 +377,8 @@
     color: var(--text-muted);
   }
 
-  .score b {
+  /* The score's figure, which RichText draws. */
+  .score :global(b) {
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }

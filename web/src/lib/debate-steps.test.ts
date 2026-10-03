@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { debateSteps } from './debate-steps';
+import { i18n } from './i18n/index.svelte';
 import type { TurnEvent } from './protocol';
 import {
   cancelledDebateEvents,
@@ -97,5 +98,41 @@ describe('debateSteps', () => {
       ]);
       expect(debateSteps(storedDegraded!, 0)).toEqual(debateSteps(degraded, 0));
     });
+  });
+});
+
+describe('debateSteps in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('names each step and its state in the language in force', () => {
+    const live = createLiveTurn({
+      requestId: 'req-x',
+      question: 'A long debate',
+      mode: 'debate',
+      conversationId: 5,
+      options: { debate: { rounds: 3, consensus_threshold: 85, synthesizer: 'claude' }, use_cache: false },
+    });
+    for (const ev of cancelledDebateEvents()) applyTurnEvent(live, ev);
+    i18n.set('en');
+    expect(states(live)).toEqual(['Answers: done', 'Review 1: stopped', 'Review 2: pending', 'Review 3: pending', 'Synthesis: pending']);
+    i18n.set('es');
+    expect(states(live)).toEqual(['Respuestas: hecho', 'Revisión 1: detenido', 'Revisión 2: pendiente', 'Revisión 3: pendiente', 'Síntesis: pendiente']);
+  });
+
+  it('says that a round was skipped by consensus', () => {
+    const [stored] = turnsFromMessages(debateMessages(), 7);
+    i18n.set('es');
+    expect(states(stored!, 3)).toEqual([
+      'Respuestas: hecho',
+      'Revisión 1: hecho',
+      'Revisión 2: hecho',
+      'Síntesis: hecho',
+    ]);
+    const live = createLiveTurn({ requestId: 'req-1', question: 'Question?', mode: 'debate', conversationId: 7, options: { debate: { rounds: 3, consensus_threshold: 85, synthesizer: 'claude' }, use_cache: true } });
+    for (const ev of debateEvents()) applyTurnEvent(live, ev);
+    i18n.set('en');
+    expect(states(live).at(-2)).toBe('Review 3: skipped by consensus');
+    i18n.set('es');
+    expect(states(live).at(-2)).toBe('Revisión 3: omitido por consenso');
   });
 });

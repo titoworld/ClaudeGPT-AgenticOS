@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from agentic_os.domain import Purpose, SavingKind, Usage
+from agentic_os.i18n import number, t
 from agentic_os.orchestrator.events import Savings
 from agentic_os.orchestrator.store import SavingRecord
 from agentic_os.orchestrator.tokens import estimate_tokens
@@ -232,18 +233,30 @@ class TurnAccounting:
         return replace(saved, cost_usd=sum(known))
 
     def saving_records(self, conversation_id: int, turn_id: int) -> list[SavingRecord]:
-        """One record per kind with a positive saving (details in Catalan), each with
-        its own value, so the records add up to ``savings().cost_usd``."""
+        """One record per kind with a positive saving (details for people, in the turn's
+        language), each with its own value, so the records add up to ``savings().cost_usd``."""
         values = self._values()
         entries: list[tuple[SavingKind, int, str]] = [
-            ("cache", self.cache, "Resposta servida des de la memòria cau"),
+            ("cache", self.cache, t("engine.saving.cache")),
             (
                 "compaction",
                 self.compaction,
-                f"{self.compaction_per_request} tokens menys en {self.context_requests} crides",
+                t(
+                    "engine.saving.compaction",
+                    tokens=number(self.compaction_per_request),
+                    calls=number(self.context_requests),
+                ),
             ),
-            ("early_stop", self.early_stop, f"{self.rounds_skipped} rondes omeses per consens"),
-            ("unchanged", self.unchanged, f"{self.unchanged_count} respostes sense reescriure"),
+            (
+                "early_stop",
+                self.early_stop,
+                t("engine.saving.early_stop", rounds=number(self.rounds_skipped)),
+            ),
+            (
+                "unchanged",
+                self.unchanged,
+                t("engine.saving.unchanged", count=number(self.unchanged_count)),
+            ),
         ]
         return [
             SavingRecord(

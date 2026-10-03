@@ -1,9 +1,11 @@
-// The view of a refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md): the living
+// The view of a refine turn («Perfecciona», docs/adr/0010-refine-mode.md): the living
 // document with its versions and their diff, each round's summary and reviews, the stop
 // buttons and what they say, why it stopped, the same view after a reload, and the
 // layout that stacks on a phone.
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { formatMoney } from '../lib/costs';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { TurnEvent } from '../lib/protocol';
 import { withOutcome } from '../lib/test-fixtures';
 import {
@@ -13,8 +15,10 @@ import {
   editorFallbackEvents,
   editorFallbackMessages,
   INTERNAL_ERROR,
+  legacyMessages,
   mergeCancelledEvents,
   mergeCancelledMessages,
+  OVER_BUDGET,
   REFINE_TURN_OPTIONS,
   refineEvents,
   refineEventsUntil,
@@ -470,5 +474,238 @@ describe('keyboard focus and the sticky stop bar (WCAG 2.2, 2.4.11)', () => {
   it('a turn that ended has no bar to keep the focus above', () => {
     view(liveRefine(refineEvents()));
     expect(stopBars.height).toBe(0);
+  });
+});
+
+describe('in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  /** Unfolds every round of the view. */
+  function openRounds(root: HTMLElement): void {
+    for (const details of rounds(root)) details.open = true;
+    flushSync();
+  }
+
+  it('the document panel, in English', () => {
+    i18n.set('en');
+    const root = view(liveRefine(refineEvents()));
+    const doc = panel(root);
+    expect(textOf(doc.querySelector('h3'))).toBe('Version 2');
+    expect(textOf(doc.querySelector('.chip'))).toBe('Final');
+    expect([...select(root).options].map((o) => o.textContent)).toEqual([
+      'v1',
+      'v2 · final',
+      'v3 · rejected',
+      'v3 · shortened · rejected',
+    ]);
+    expect(textOf(doc)).toContain(`${countWords(V2)} of 300 words`);
+    expect(doc.querySelector('[role=meter]')?.getAttribute('aria-label')).toBe('Words in the version');
+    expect(doc.querySelector('[role=meter]')?.getAttribute('aria-valuetext')).toBe(`${countWords(V2)} of 300 words`);
+    expect(textOf(doc.querySelector('.by'))).toBe('by Claude');
+    expect(textOf(doc.querySelector('.doc-end'))).toBe('Stopped at round 3: You stopped it. The final answer is version 2.');
+    expect(diffButton(root).title).toBe('Show what changed since version 1');
+    expect(textOf(diffButton(root))).toBe('Changes');
+    // The server wrote its reason in Catalan; its code gives the English one.
+    pick(root, /^v3 · rejected/);
+    expect(textOf(doc.querySelector('.doc-note'))).toBe('This version was not accepted: The new version went over the word limit.');
+    pick(root, /^v1$/);
+    expect(textOf(doc.querySelector('.doc-note'))).toBe('This is an earlier version: the final one is version 2.');
+  });
+
+  it('the document panel, in Spanish', () => {
+    i18n.set('es');
+    const root = view(liveRefine(refineEvents()));
+    const doc = panel(root);
+    expect(textOf(doc.querySelector('h3'))).toBe('Versión 2');
+    expect([...select(root).options].map((o) => o.textContent)).toEqual([
+      'v1',
+      'v2 · final',
+      'v3 · rechazada',
+      'v3 · acortada · rechazada',
+    ]);
+    expect(textOf(doc)).toContain(`${countWords(V2)} de 300 palabras`);
+    expect(textOf(doc.querySelector('.by'))).toBe('por Claude');
+    expect(textOf(doc.querySelector('.doc-end'))).toBe(
+      'Se ha detenido en la ronda 3: Lo has parado. La respuesta final es la versión 2.',
+    );
+    pick(root, /^v3 · rechazada/);
+    expect(textOf(doc.querySelector('.doc-note'))).toBe(
+      'Esta versión no se ha aceptado: La nueva versión superaba el límite de palabras.',
+    );
+  });
+
+  it('the diff, in English and Spanish', () => {
+    i18n.set('en');
+    let root = view(until((e) => e.type === 'phase' && e.phase === 'review' && e.round === 3));
+    diffButton(root).click();
+    flushSync();
+    let diff = panel(root).querySelector('.line-diff')!;
+    expect(diff.querySelector('ol')?.getAttribute('aria-label')).toBe('Changes in version 2 since version 1');
+    expect([...diff.querySelectorAll('li.del')].map(textOf)).toEqual(['Removed: - Fase 2: llançament públic']);
+    expect(textOf(diff.querySelector('li.add'))).toBe('Added: - Fase 2: llançament públic, abans del 15 de novembre');
+    expect(textOf(diff.querySelector('.diff-stats'))).toBe('+1 −1 lines');
+    expect(textOf(diff.querySelector('.applied'))).toBe('Changes applied: Defect La fase 2 té data');
+    // A rejected version 3 adds lines at the end: the first ones, further away, fold.
+    root = view(liveRefine(refineEvents()));
+    pick(root, /^v3 · rejected/);
+    diffButton(root).click();
+    flushSync();
+    expect(textOf(panel(root).querySelector('.line-diff li.skip'))).toBe('3 unchanged lines');
+    cleanup();
+
+    i18n.set('es');
+    root = view(until((e) => e.type === 'phase' && e.phase === 'review' && e.round === 3));
+    diffButton(root).click();
+    flushSync();
+    diff = panel(root).querySelector('.line-diff')!;
+    expect(diff.querySelector('ol')?.getAttribute('aria-label')).toBe('Cambios de la versión 2 respecto a la versión 1');
+    expect(textOf(diff.querySelector('li.del'))).toBe('Quitado: - Fase 2: llançament públic');
+    expect(textOf(diff.querySelector('.diff-stats'))).toBe('+1 −1 líneas');
+    expect(textOf(diff.querySelector('.applied'))).toBe('Cambios aplicados: Defecto La fase 2 té data');
+    root = view(liveRefine(refineEvents()));
+    pick(root, /^v3 · rechazada/);
+    diffButton(root).click();
+    flushSync();
+    expect(textOf(panel(root).querySelector('.line-diff li.skip'))).toBe('3 líneas sin cambios');
+  });
+
+  it('a round, in English', () => {
+    i18n.set('en');
+    const root = view(liveRefine(refineEvents()));
+    expect(roundSummary(root, 1)).toBe(`Round 1 Merge Version 1 ${countWords(V1)} words ≈ €0.008`);
+    expect(roundSummary(root, 3)).toBe(`Round 3 No new version ${countWords(V2)} words ≈ €0.0318`);
+    openRounds(root);
+    const two = roundBody(root, 2);
+    expect(two).toContain('Changes applied Defect La fase 2 té data');
+    expect(two).toContain(`Words ${countWords(V2)} of 300`);
+    expect(two).toContain('Round cost ≈ €0.0144');
+    expect(two).toContain('Turn total ≈ €0.0305');
+    expect(two).toContain('Claude 1 proposal Score 70');
+    expect(two).toContain('ChatGPT No changes Score 85');
+    expect(rounds(root)[1]!.querySelector('ul.agents')?.getAttribute('aria-label')).toBe('Reviews of round 2');
+    const reviews = rounds(root)[1]!.querySelector<HTMLDetailsElement>('details.reviews')!;
+    expect(textOf(reviews.querySelector('summary'))).toBe('Reviews');
+    expect(reviews.querySelector('[aria-label="Review by ChatGPT"]')).not.toBeNull();
+    // Round 3: why it wrote no version (the server's code, in English), and its versions.
+    const three = roundBody(root, 3);
+    expect(three).toContain('The new version went over the word limit.');
+    expect(three).not.toContain(OVER_BUDGET);
+    expect(three).toContain('Version 3: rejected');
+    expect(three).toContain('Version 3 (shortened): rejected');
+    button(rounds(root)[2]!, 'Show version 3 (shortened)')!.click();
+    flushSync();
+    expect(select(root).selectedOptions[0]?.textContent).toBe('v3 · shortened · rejected');
+  });
+
+  it('a round, in Spanish', () => {
+    i18n.set('es');
+    const root = view(liveRefine(refineEvents()));
+    expect(roundSummary(root, 1)).toBe(`Ronda 1 Fusión Versión 1 ${countWords(V1)} palabras ≈ 0,008 €`);
+    expect(roundSummary(root, 3)).toBe(`Ronda 3 Sin versión nueva ${countWords(V2)} palabras ≈ 0,0318 €`);
+    openRounds(root);
+    const two = roundBody(root, 2);
+    expect(two).toContain(`Palabras ${countWords(V2)} de 300`);
+    expect(two).toContain('Coste de la ronda ≈ 0,0144 €');
+    expect(two).toContain('Total del turno ≈ 0,0305 €');
+    expect(two).toContain('Claude 1 propuesta Puntuación 70');
+    expect(two).toContain('ChatGPT Sin cambios Puntuación 85');
+    const three = roundBody(root, 3);
+    expect(three).toContain('La nueva versión superaba el límite de palabras.');
+    expect(three).toContain('Versión 3 (acortada): rechazada');
+    expect(button(rounds(root)[2]!, 'Mostrar la versión 3 (acortada)')).not.toBeNull();
+  });
+
+  it('the controls: «Stop after this round» and «Stop now»', () => {
+    i18n.set('en');
+    let bar = controls(view(until((e) => e.type === 'turn.stopping')))!;
+    expect(bar.getAttribute('aria-label')).toBe('Refine turn controls');
+    expect(plain(textOf(bar.querySelector('.status')))).toBe(
+      `Round 3 of 6 · Reviewing version 2 ≈ €0.0305 of ${plain(formatMoney(2))}`,
+    );
+    button(bar, 'Stop after this round')!.click();
+    expect(mocks.stopAfterRound).toHaveBeenCalledTimes(1);
+    expect(button(bar, 'Stop now')!.title).toBe('Cuts off the calls in progress; the last complete version is kept');
+    button(bar, 'Stop now')!.click();
+    expect(mocks.cancel).toHaveBeenCalledTimes(1);
+    const asked = until((e) => e.type === 'turn.stopping');
+    asked.stopRequested = true;
+    bar = controls(view(asked))!;
+    expect(textOf(bar.querySelector('button.stopping'))).toBe('Stopping after round 3');
+    expect(textOf(bar.querySelector('[role=status]'))).toBe('Stopping after round 3');
+    cleanup();
+
+    i18n.set('es');
+    bar = controls(view(until((e) => e.type === 'turn.stopping')))!;
+    expect(plain(textOf(bar.querySelector('.status')))).toBe(
+      `Ronda 3 de 6 · Revisan la versión 2 ≈ 0,0305 € de ${plain(formatMoney(2))}`,
+    );
+    expect(button(bar, 'Parar al acabar la ronda')).not.toBeNull();
+    expect(button(bar, 'Parar ahora')).not.toBeNull();
+    const again = until((e) => e.type === 'turn.stopping');
+    again.stopRequested = true;
+    expect(textOf(controls(view(again))!.querySelector('button.stopping'))).toBe('Parará al acabar la ronda 3');
+  });
+
+  it('a change of language repaints the panel', () => {
+    const root = view(liveRefine(refineEvents()));
+    expect(textOf(panel(root).querySelector('h3'))).toBe('Versió 2');
+    i18n.set('en');
+    flushSync();
+    expect(textOf(panel(root).querySelector('h3'))).toBe('Version 2');
+    expect(textOf(panel(root).querySelector('.doc-end'))).toBe('Stopped at round 3: You stopped it. The final answer is version 2.');
+    expect(roundSummary(root, 1)).toBe(`Round 1 Merge Version 1 ${countWords(V1)} words ≈ €0.008`);
+  });
+});
+
+describe('why a round wrote no version: the code the server sends (reason_code)', () => {
+  afterEach(() => i18n.set('ca'));
+
+  /** The events of `refineEvents` with round 3's end, and its first version's meta, changed by `change`. */
+  function withRoundThree(change: Record<string, unknown>): TurnEvent[] {
+    return refineEvents().map((e) => {
+      if (e.type === 'refine.round' && e.round === 3) return { ...e, ...change } as unknown as TurnEvent;
+      if (e.type === 'stream.completed' && e.stream_id === 'e3' && e.refine?.role === 'version') {
+        return { ...e, refine: { ...e.refine, ...change } } as unknown as TurnEvent;
+      }
+      return e;
+    });
+  }
+
+  it('shows the text of a code it knows in the language of the interface, whatever the reason says', () => {
+    i18n.set('en');
+    const root = view(liveRefine(withRoundThree({ reason: 'Una altra cosa.' })));
+    rounds(root)[2]!.open = true;
+    flushSync();
+    expect(roundBody(root, 3)).toContain('The new version went over the word limit.');
+    expect(roundBody(root, 3)).not.toContain('Una altra cosa.');
+  });
+
+  it('shows the reason as it came for a code it does not know', () => {
+    i18n.set('en');
+    const root = view(liveRefine(withRoundThree({ reason_code: 'too_slow', reason: 'Massa lenta per acabar.' })));
+    rounds(root)[2]!.open = true;
+    flushSync();
+    expect(roundBody(root, 3)).toContain('Massa lenta per acabar.');
+    pick(root, /^v3 · rejected/);
+    expect(textOf(panel(root).querySelector('.doc-note'))).toBe('This version was not accepted: Massa lenta per acabar.');
+  });
+
+  it('still understands a turn stored before the codes, by its Catalan reasons', () => {
+    const legacy = storedTurn(legacyMessages(refineMessages()));
+    const coded = view(storedTurn());
+    const old = view(legacy);
+    expect(textOf(panel(old))).toBe(textOf(panel(coded)));
+    expect([...select(old).options].map((o) => o.textContent)).toEqual([...select(coded).options].map((o) => o.textContent));
+    cleanup();
+
+    i18n.set('en');
+    const root = view(legacy);
+    // The shortening of a version over the word limit, found by the code its text stands for.
+    expect([...select(root).options].map((o) => o.textContent)).toContain('v3 · shortened · rejected');
+    pick(root, /^v3 · rejected/);
+    expect(textOf(panel(root).querySelector('.doc-note'))).toBe('This version was not accepted: The new version went over the word limit.');
+    rounds(root)[2]!.open = true;
+    flushSync();
+    expect(roundBody(root, 3)).toContain('The new version went over the word limit.');
   });
 });

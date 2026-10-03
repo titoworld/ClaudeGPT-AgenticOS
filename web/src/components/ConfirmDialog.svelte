@@ -1,16 +1,19 @@
 <script lang="ts">
   import { lightDismiss, syncDialog } from '../lib/dialog';
+  import { i18n } from '../lib/i18n/index.svelte';
 
   interface Props {
     open: boolean;
     title: string;
     message: string;
+    /** The confirming button; «Delete» (in the language in force) by default. */
     confirmLabel?: string;
     onConfirm: () => void;
     onClose: () => void;
   }
 
-  let { open, title, message, confirmLabel = 'Elimina', onConfirm, onClose }: Props = $props();
+  let { open, title, message, confirmLabel, onConfirm, onClose }: Props = $props();
+  const t = $derived(i18n.m.app.confirm);
   let dialog: HTMLDialogElement | undefined = $state();
   const uid = $props.id();
 
@@ -28,14 +31,14 @@
     <h2 id="{uid}-title">{title}</h2>
     <p id="{uid}-msg">{message}</p>
     <div class="buttons">
-      <button type="button" class="btn ghost" onclick={() => dialog?.close()}>Cancel·la</button>
+      <button type="button" class="btn ghost" onclick={() => dialog?.close()}>{t.cancel}</button>
       <button
         type="button"
         class="btn danger"
         onclick={() => {
           onConfirm();
           dialog?.close();
-        }}>{confirmLabel}</button>
+        }}>{confirmLabel ?? t.delete}</button>
     </div>
   </div>
 </dialog>

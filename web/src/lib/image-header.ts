@@ -1,5 +1,5 @@
 // The header of an image as it is stored, read in the browser before its upload
-// (lib/media.ts, docs/PROTOCOL.md «Adjunts»):
+// (lib/media.ts, docs/PROTOCOL.md "Attachments"):
 //
 // - the size its pixels are stored at, read as the server reads it
 //   (src/agentic_os/attachments.py: PNG IHDR, JPEG SOF, WebP VP8, VP8L or VP8X);

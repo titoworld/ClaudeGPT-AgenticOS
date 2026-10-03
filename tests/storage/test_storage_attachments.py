@@ -1,4 +1,4 @@
-"""Attachments in the SQLite store and their files (docs/adr/0009-adjunts.md): the
+"""Attachments in the SQLite store and their files (docs/adr/0009-attachments.md): the
 migrations, content-addressed private files, links to questions, deletion, the sweep of
 orphans and leftovers, the engine's contract (get_attachments, link_attachments), the
 facts of a PDF's pages and Claude's stored check of its text."""

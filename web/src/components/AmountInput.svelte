@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Euro amount typed as text: accepts the Catalan decimal comma ("50,5"), and
-  // text that is not an amount binds NaN, which validation reports, instead of the
-  // null a number input gives (that would clear the saved value). See parseAmount.
+  // Euro amount typed as text: accepts a decimal comma ("50,5") or point ("50.5"),
+  // shows the language's own, and text that is not an amount binds NaN, which
+  // validation reports, instead of the null a number input gives (that would clear
+  // the saved value). See parseAmount.
   import type { HTMLInputAttributes } from 'svelte/elements';
   import { amountText, parseAmount } from '../lib/settings';
 

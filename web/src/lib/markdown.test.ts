@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_MARKS, revealHidden, revealHiddenMarkdown } from './hidden-chars';
+import { i18n } from './i18n/index.svelte';
 import { critiqueMarkdown, renderMarkdown } from './markdown';
 
 /** Render into a detached DOM tree and return it for structural assertions. */
@@ -295,5 +296,18 @@ describe('critiqueMarkdown', () => {
 
   it('leaves a single sentence as is', () => {
     expect(critiqueMarkdown('  Tot correcte.  ')).toBe('Tot correcte.');
+  });
+});
+
+describe('renderMarkdown in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('names an image link and the marks of hidden characters in the language in force', () => {
+    i18n.set('en');
+    const links = dom('![chart](https://example.com/c.png) ![](https://example.com/d.png)').querySelectorAll('a');
+    expect([...links].map((a) => a.textContent)).toEqual(['Image: chart', 'Image']);
+    expect(dom('a\u202Eb').querySelector('.invisible-char')?.getAttribute('title')).toBe('Invisible or direction-control character (U+202E)');
+    i18n.set('es');
+    expect(dom('![gráfico](https://example.com/c.png)').querySelector('a')?.textContent).toBe('Imagen: gráfico');
   });
 });

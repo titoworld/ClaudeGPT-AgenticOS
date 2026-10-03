@@ -1,6 +1,7 @@
 <script lang="ts">
   // A PDF in the viewer, page by page, drawn by PDF.js (loaded only now: lib/load-pdf.ts).
   import { contentUrl } from '../lib/attachments';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { loadPdf } from '../lib/load-pdf';
   import type { PdfDocument } from '../lib/pdf';
   import type { Attachment } from '../lib/protocol';
@@ -25,6 +26,7 @@
   let frame: HTMLDivElement | undefined = $state();
 
   const pages = $derived.by(() => doc?.pages ?? attachment.pages ?? 0);
+  const t = $derived(i18n.m.attachments.pdf);
 
   // Opens the document; a closed viewer (or another attachment) closes it.
   $effect(() => {
@@ -91,24 +93,24 @@
 <div class="pdf">
   <div class="frame" bind:this={frame}>
     {#if status === 'error'}
-      <p class="failed" role="alert">No s'ha pogut mostrar el PDF. Pots descarregar-lo.</p>
+      <p class="failed" role="alert">{t.failed}</p>
     {:else}
       {#if status === 'loading'}
-        <p class="loading"><span class="spinner" aria-hidden="true"></span>Carregant el PDF…</p>
+        <p class="loading"><span class="spinner" aria-hidden="true"></span>{t.loading}</p>
       {/if}
       <canvas bind:this={canvas} class:hidden={status !== 'ready'}></canvas>
     {/if}
   </div>
   {#if status !== 'error' && pages > 0}
-    <nav class="pager" aria-label="Pàgines">
-      <button type="button" class="icon-btn" aria-label="Pàgina anterior" disabled={page <= 1} onclick={() => go(page - 1)}>
+    <nav class="pager" aria-label={t.pages}>
+      <button type="button" class="icon-btn" aria-label={t.previous} disabled={page <= 1} onclick={() => go(page - 1)}>
         <Icon name="chevron-left" />
       </button>
-      <span aria-live="polite">Pàgina {page} de {pages}</span>
+      <span aria-live="polite">{t.page(page, pages)}</span>
       <button
         type="button"
         class="icon-btn"
-        aria-label="Pàgina següent"
+        aria-label={t.next}
         disabled={page >= pages}
         onclick={() => go(page + 1)}>
         <Icon name="chevron-right" />

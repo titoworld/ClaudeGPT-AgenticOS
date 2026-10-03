@@ -7,6 +7,7 @@
   // that may be hidden (lib/pdf-pages.ts).
   import { loadLines } from '../lib/attachment-lines';
   import { formatBytes, pagesLabel, typeLabel, type AttachmentView } from '../lib/attachments';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { pdfNoteLines, type PdfNoteKind } from '../lib/pdf-pages';
   import { formatK } from '../lib/text';
   import Icon, { type IconName } from './Icon.svelte';
@@ -37,7 +38,12 @@
   const openable = $derived(!!onopen && view.status === 'ready' && view.id !== null);
   const notes = $derived(view.status === 'ready' ? pdfNoteLines(view.pdfNotes) : []);
 
+  const t = $derived(i18n.m.attachments.card);
+
   const NOTE_ICON: Record<PdfNoteKind, IconName> = { no_text: 'image', garbled: 'info', hidden: 'alert' };
+
+  /** A warning's pages name more than one: several parts, or a run («2–4»). */
+  const manyPages = (parts: readonly string[]): boolean => parts.length > 1 || !/^\d+$/.test(parts[0] ?? '');
 
   $effect(() => {
     const id = view.id;
@@ -70,17 +76,17 @@
     <span class="name" title={view.name}><PlainText text={view.name} /></span>
     <span class="meta"><span class="sr-only">{type}, </span>{meta}</span>
     {#if view.status === 'uploading'}
-      <span class="meta state">Pujant…</span>
+      <span class="meta state">{t.uploading}</span>
     {:else if view.status === 'error'}
       <span class="error-msg" role="alert">{view.error}</span>
     {:else if view.tokens}
-      <span class="meta">≈ {formatK(view.tokens)} tokens</span>
+      <span class="meta">{t.tokens(formatK(view.tokens))}</span>
     {/if}
     {#each notes as note (note.kind)}
       <span class="pdf-note {note.kind}" class:warning={note.kind === 'hidden'} title={note.description}>
         <Icon name={NOTE_ICON[note.kind]} size={11} />
         <span class="note-text"
-          >{note.label}: pàg.&nbsp;{#each note.pages as part, i (i)}{#if i > 0}{', '}{/if}<span class="page-part">{part}</span
+          >{note.label}: {t.pageAbbr(manyPages(note.pages))}&nbsp;{#each note.pages as part, i (i)}{#if i > 0}{', '}{/if}<span class="page-part">{part}</span
             >{/each}</span
         > <span class="sr-only">({note.description})</span>
       </span>
@@ -90,15 +96,15 @@
 
 <div class="att" class:error={view.status === 'error'} class:uploading={view.status === 'uploading'}>
   {#if openable}
-    <button type="button" class="body" title="Obre la vista prèvia" onclick={onopen}>{@render content()}</button>
+    <button type="button" class="body" title={t.open} onclick={onopen}>{@render content()}</button>
   {:else}
     <div class="body">{@render content()}</div>
   {/if}
   {#if view.status === 'error' && view.retryable && onretry}
-    <button type="button" class="retry" onclick={onretry}>Torna-ho a provar</button>
+    <button type="button" class="retry" onclick={onretry}>{t.retry}</button>
   {/if}
   {#if onremove}
-    <button type="button" class="remove" aria-label="Treu {view.name}" title="Treu l'adjunt" onclick={onremove}>
+    <button type="button" class="remove" aria-label={t.remove(view.name)} title={t.removeTitle} onclick={onremove}>
       <Icon name="x" size={12} />
     </button>
   {/if}

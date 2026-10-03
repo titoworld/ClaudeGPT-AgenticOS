@@ -33,6 +33,7 @@ from typing import Final
 
 import aiosqlite
 
+from agentic_os.i18n import t
 from agentic_os.storage.search import FOLD_FUNCTION, sql_fold
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ _V3: Final[tuple[str, ...]] = (
 )
 
 _V4: Final[tuple[str, ...]] = (
-    # Files attached to questions (docs/adr/0009-adjunts.md). The bytes live outside
+    # Files attached to questions (docs/adr/0009-attachments.md). The bytes live outside
     # the database, content-addressed by sha256 (storage/files.py); AUTOINCREMENT so a
     # deleted attachment's id never names another file. `text`: a text file's content
     # or a PDF's extracted text (NULL without one).
@@ -229,7 +230,7 @@ _V4: Final[tuple[str, ...]] = (
 )
 
 _V5: Final[tuple[str, ...]] = (
-    # What the PDF reader found on each page of a PDF (P7b of docs/adr/0009-adjunts.md):
+    # What the PDF reader found on each page of a PDF (P7b of docs/adr/0009-attachments.md):
     # a JSON list of pdf_facts.PdfPage. NULL for images, text files and the PDFs that
     # were not analysed (uploaded before, or the reader could not): those are read as
     # before, unchecked.
@@ -250,7 +251,7 @@ _V5: Final[tuple[str, ...]] = (
 )
 
 _V6: Final[tuple[str, ...]] = (
-    # The refine mode (docs/adr/0010-mode-perfecciona.md) is a turn mode that the CHECK of
+    # The refine mode (docs/adr/0010-refine-mode.md) is a turn mode that the CHECK of
     # conversations.last_mode refuses. SQLite cannot alter a CHECK in place, and rebuilding
     # the table would delete its messages (dropping it runs their ON DELETE CASCADE, and
     # foreign keys cannot be turned off inside the migration's transaction), so the last
@@ -386,10 +387,7 @@ class Database:
     async def _migrate(self) -> None:
         current = await self.schema_version()
         if current > SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"La base de dades té la versió d'esquema {current}, més nova que la "
-                f"{SCHEMA_VERSION} que coneix aquesta versió de l'aplicació. Actualitza-la."
-            )
+            raise SchemaVersionError(t("storage.newer_schema", found=current, known=SCHEMA_VERSION))
         for version in range(current + 1, SCHEMA_VERSION + 1):
             async with self.transaction() as tx:
                 # Re-check under the write lock: another process may have migrated.

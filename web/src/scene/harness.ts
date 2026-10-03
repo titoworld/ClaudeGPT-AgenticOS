@@ -119,5 +119,5 @@ const tick = (now: number) => {
 requestAnimationFrame(tick);
 
 create().catch((err: unknown) => {
-  stats.value = `WebGL no disponible: ${err instanceof Error ? err.message : String(err)}`;
+  stats.value = `WebGL not available: ${err instanceof Error ? err.message : String(err)}`;
 });

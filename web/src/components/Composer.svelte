@@ -4,6 +4,7 @@
   import { ACCEPT } from '../lib/attachments';
   import { charCount, COUNT_FROM, MAX_QUESTION_CHARS } from '../lib/composer.svelte';
   import { AGENT_LABEL, formatInt } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { placeAbove } from '../lib/popover';
   import { prefs } from '../lib/prefs.svelte';
   import { AGENTS, type TurnMode } from '../lib/protocol';
@@ -49,9 +50,10 @@
       c.waitingUploads ||
       (connected && settingsReady && question.length > 0 && !tooLong && !tray.failed),
   );
+  const t = $derived(i18n.m.composer);
   /** Enter makes a new line with a coarse pointer (phones, tablets): the button sends there (N20). */
   const enterSends = $derived(!c.coarsePointer);
-  const sendKeys = $derived(enterSends ? 'Enter' : 'Ctrl+Enter');
+  const sendKeys = $derived(enterSends ? t.keys.enter : `${t.keys.ctrl}+${t.keys.enter}`);
   const supportsFieldSizing = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
 
   function autosize(): void {
@@ -168,15 +170,26 @@
 
   /** The last word limit the owner set, for when they turn the automatic one off again. */
   let lastWords = $state(DEFAULT_WORDS);
-  const refineSummary = $derived(
-    [
-      `com a molt ${c.refineRounds} rondes`,
-      `pressupost de ${formatAmount(c.refineBudget)} €`,
-      c.refineWords == null ? 'límit de paraules automàtic' : `límit de ${c.refineWords} paraules`,
-      `edita ${AGENT_LABEL[c.refineEditor]}`,
-      c.refineConverge ? "s'atura sol quan convergeix" : "no s'atura sol",
-    ].join(', '),
-  );
+  const refineSummary = $derived.by(() => {
+    const s = t.refine.summary;
+    return [
+      s.rounds(c.refineRounds),
+      s.budget(formatAmount(c.refineBudget)),
+      c.refineWords == null ? s.autoWords : s.words(c.refineWords),
+      s.editor(AGENT_LABEL[c.refineEditor]),
+      c.refineConverge ? s.converges : s.neverConverges,
+    ].join(', ');
+  });
+
+  /**
+   * A mode's tooltip: its name, then what it does, its first letter lowercased («Solo: one
+   * AI answers…») unless it starts with a name («Duel: Claude and ChatGPT…»).
+   */
+  function modeTitle(mode: TurnMode): string {
+    const description = MODE_DESCRIPTION[mode];
+    const named = Object.values(AGENT_LABEL).some((name) => description.startsWith(name));
+    return `${MODE_LABEL[mode]}: ${named ? description : description.charAt(0).toLowerCase() + description.slice(1)}`;
+  }
 
   /** The budget typed (a decimal comma or point), kept within the server's range; text that is not an amount changes nothing. */
   function setBudget(e: Event & { currentTarget: HTMLInputElement }): void {
@@ -214,11 +227,12 @@
   <div class="settings-error glass" role="alert">
     <Icon name="alert" size={16} />
     <p>
-      <strong>No s'ha pogut carregar la configuració.</strong>
-      {app.settingsError ?? ''} Mentre no es carregui no es pot enviar cap pregunta; es torna a provar automàticament.
+      <strong>{t.settingsError.title}</strong>
+      {app.settingsError ?? ''}
+      {t.settingsError.detail}
     </p>
     <button type="button" class="btn" disabled={app.settingsLoading} onclick={() => void app.loadSettings()}>
-      <Icon name="refresh" size={14} />{app.settingsLoading ? 'Provant…' : 'Torna-ho a provar'}
+      <Icon name="refresh" size={14} />{app.settingsLoading ? t.settingsError.retrying : t.settingsError.retry}
     </button>
   </div>
 {/if}
@@ -236,7 +250,7 @@
     submit();
   }}>
   {#if tray.items.length}
-    <ul class="attachments" aria-label="Adjunts">
+    <ul class="attachments" aria-label={t.attachments}>
       {#each tray.items as item (item.key)}
         {@const uploaded = item.attachment}
         <li>
@@ -249,7 +263,7 @@
       {/each}
     </ul>
   {/if}
-  <label class="sr-only" for="{uid}-input">Pregunta</label>
+  <label class="sr-only" for="{uid}-input">{t.question}</label>
   <div class="draft">
     <textarea
       id="{uid}-input"
@@ -258,13 +272,13 @@
       onkeydown={onKeydown}
       onpaste={onPaste}
       rows="1"
-      placeholder="Pregunta el que vulguis…"
+      placeholder={t.placeholder}
       aria-describedby={showCount ? `${uid}-hint ${uid}-count` : `${uid}-hint`}
       enterkeyhint={enterSends ? 'send' : 'enter'}
       spellcheck="true"></textarea>
     <!-- Always in the page, so screen readers announce the text when it appears. -->
-    <p class="too-long" role="status">{#if tooLong}<Icon name="alert" size={14} /><span>La pregunta passa del màxim de {formatInt(MAX_QUESTION_CHARS)} caràcters: escurça-la per enviar-la.</span>{/if}</p>
-    <p class="upload-note" role="status">{#if c.waitingUploads}<span class="note-spinner" aria-hidden="true"></span><span>S'enviarà quan s'acabin de pujar els adjunts…</span>{/if}</p>
+    <p class="too-long" role="status">{#if tooLong}<Icon name="alert" size={14} /><span>{t.tooLong(formatInt(MAX_QUESTION_CHARS))}</span>{/if}</p>
+    <p class="upload-note" role="status">{#if c.waitingUploads}<span class="note-spinner" aria-hidden="true"></span><span>{t.waitingUploads}</span>{/if}</p>
   </div>
 
   <div class="toolbar">
@@ -272,17 +286,17 @@
       <button
         type="button"
         class="icon-btn attach"
-        aria-label="Adjunta fitxers"
-        title="Adjunta imatges, PDF o fitxers de text (també pots arrossegar-los o enganxar una imatge)"
+        aria-label={t.attach}
+        title={t.attachTitle}
         onclick={() => fileInput?.click()}>
         <Icon name="paperclip" size={18} />
       </button>
       <input bind:this={fileInput} type="file" multiple accept={ACCEPT} hidden onchange={onFiles} />
 
       <fieldset class="segmented modes">
-        <legend class="sr-only">Mode</legend>
+        <legend class="sr-only">{t.mode}</legend>
         {#each MODES as mode (mode)}
-          <label title="{MODE_LABEL[mode]}: {MODE_DESCRIPTION[mode].charAt(0).toLowerCase()}{MODE_DESCRIPTION[mode].slice(1)}">
+          <label title={modeTitle(mode)}>
             <input type="radio" name="{uid}-mode" value={mode} bind:group={c.mode} />
             <Icon name="mode-{mode}" size={15} />
             <span class="mode-name">{MODE_LABEL[mode]}</span>
@@ -292,7 +306,7 @@
 
       {#if c.mode === 'solo'}
         <fieldset class="segmented targets">
-          <legend class="sr-only">Qui respon</legend>
+          <legend class="sr-only">{t.target}</legend>
           {#each AGENTS as agent (agent)}
             <label class={agent}>
               <input type="radio" name="{uid}-target" value={agent} bind:group={c.target} />
@@ -307,11 +321,9 @@
           class="btn ghost options-btn"
           popovertarget={popoverId}
           bind:this={optionsButton}
-          aria-label="Opcions del consell: {c.rounds} rondes, llindar {c.threshold}, sintetitza {AGENT_LABEL[
-            c.synthesizer
-          ]}">
+          aria-label={t.debate.options(c.rounds, c.threshold, AGENT_LABEL[c.synthesizer])}>
           <Icon name="sliders" size={15} />
-          <span>{c.rounds} {c.rounds === 1 ? 'ronda' : 'rondes'} · {c.threshold}</span>
+          <span>{t.debate.rounds(c.rounds)} · {c.threshold}</span>
         </button>
       {:else if c.mode === 'refine'}
         <button
@@ -319,9 +331,9 @@
           class="btn ghost options-btn refine-options-btn"
           popovertarget={refinePopoverId}
           bind:this={refineButton}
-          aria-label="Opcions de Perfecciona: {refineSummary}">
+          aria-label={t.refine.options(refineSummary)}>
           <Icon name="sliders" size={15} />
-          <span>{c.refineRounds} rondes · {formatAmount(c.refineBudget)} €</span>
+          <span>{t.refine.button(c.refineRounds, formatAmount(c.refineBudget))}</span>
         </button>
       {/if}
 
@@ -329,10 +341,10 @@
 
       {#if c.mode !== 'refine'}
         <!-- A refine turn never uses the turn cache: each round reviews a new version. -->
-        <label class="cache" title="Reutilitza respostes idèntiques anteriors sense cridar cap model">
+        <label class="cache" title={t.cacheTitle}>
           <input type="checkbox" class="switch" bind:checked={c.useCache} />
           <Icon name="cache" size={15} />
-          <span>Memòria cau</span>
+          <span>{t.cache}</span>
         </label>
       {/if}
     </div>
@@ -340,26 +352,24 @@
     <div class="actions">
       {#if showCount}
         <span class="char-count" class:over={tooLong} id="{uid}-count">
-          {formatInt(chars)} / {formatInt(MAX_QUESTION_CHARS)}<span class="sr-only">{' caràcters'}</span>
+          {formatInt(chars)} / {formatInt(MAX_QUESTION_CHARS)}<span class="sr-only">{` ${t.characters}`}</span>
         </span>
       {/if}
       <span class="kbd-hint" class:idle={connected && settingsReady && !question && !tray.items.length} id="{uid}-hint">
         {#if !connected}
-          Sense connexió
+          {t.status.offline}
         {:else if app.settingsStatus === 'loading'}
-          Carregant la configuració…
+          {t.status.loadingSettings}
         {:else if !settingsReady}
-          Sense configuració
+          {t.status.noSettings}
         {:else if question || tray.items.length}
-          ≈ {formatK(tokens)} tokens
+          {t.status.tokens(formatK(tokens))}
         {:else if enterSends}
-          <kbd>Enter</kbd> per enviar
-          <span class="sr-only">. Maj+Enter fa un salt de línia i Esc atura el torn en curs.</span>
+          <kbd>{t.keys.enter}</kbd> {t.status.toSend}
+          <span class="sr-only">{t.status.enterHelp}</span>
         {:else}
-          <kbd>Ctrl</kbd>+<kbd>Enter</kbd> per enviar
-          <span class="sr-only"
-            >. Enter fa un salt de línia. També pots enviar amb el botó Envia, o amb Cmd+Enter en un teclat
-            d'Apple. Esc atura el torn en curs.</span>
+          <kbd>{t.keys.ctrl}</kbd>+<kbd>{t.keys.enter}</kbd> {t.status.toSend}
+          <span class="sr-only">{t.status.ctrlEnterHelp}</span>
         {/if}
       </span>
       <button
@@ -368,20 +378,20 @@
         class:stop={running}
         class:waiting={c.waitingUploads}
         disabled={!canSubmit}
-        aria-label={running ? 'Atura el torn (Esc)' : c.waitingUploads ? "Deixa d'esperar els adjunts" : 'Envia'}
+        aria-label={running ? t.send.stop : c.waitingUploads ? t.send.stopWaiting : t.send.label}
         title={running
-          ? 'Atura (Esc)'
+          ? t.send.stopTitle
           : c.waitingUploads
-            ? "La pregunta s'enviarà quan s'acabin de pujar els adjunts. Torna a prémer (o Esc) per no enviar-la encara."
+            ? t.send.waitingTitle
             : !connected
-              ? 'Sense connexió'
+              ? t.status.offline
               : !settingsReady
-                ? 'Cal la configuració desada per enviar'
+                ? t.send.noSettings
                 : tooLong
-                  ? 'La pregunta és massa llarga'
+                  ? t.send.tooLong
                   : tray.failed
-                    ? 'Treu els adjunts que han fallat per enviar la pregunta'
-                    : `Envia (${sendKeys})`}>
+                    ? t.send.failed
+                    : t.send.title(sendKeys)}>
         {#if c.waitingUploads}
           <span class="send-spinner" aria-hidden="true"></span>
         {:else}
@@ -393,30 +403,30 @@
 
   {#if dragDepth > 0}
     <div class="drop-overlay" aria-hidden="true">
-      <Icon name="paperclip" size={18} />Deixa anar els fitxers per adjuntar-los
+      <Icon name="paperclip" size={18} />{t.drop}
     </div>
   {/if}
 </form>
 
 <div class="popover glass" id={popoverId} popover="auto" {@attach placeAbove(() => optionsButton, 300)}>
-  <h3>Opcions del consell</h3>
+  <h3>{t.debate.title}</h3>
   <label class="field">
-    <span>Rondes de revisió <b>{c.rounds}</b></span>
+    <span>{t.debate.reviewRounds} <b>{c.rounds}</b></span>
     <input type="range" min={LIMITS.rounds.min} max={LIMITS.rounds.max} step="1" bind:value={c.rounds} />
-    <small class="hint">0 = sense revisions: respostes i síntesi directa.</small>
+    <small class="hint">{t.debate.reviewRoundsHint}</small>
   </label>
   <label class="field">
-    <span>Llindar de consens <b>{c.threshold}</b></span>
+    <span>{t.debate.threshold} <b>{c.threshold}</b></span>
     <input
       type="range"
       min={LIMITS.consensus_threshold.min}
       max={LIMITS.consensus_threshold.max}
       step="1"
       bind:value={c.threshold} />
-    <small class="hint">Si tots dos superen aquest acord, s'aturen les rondes.</small>
+    <small class="hint">{t.debate.thresholdHint}</small>
   </label>
   <fieldset class="field">
-    <legend class="field-label">Sintetitzador</legend>
+    <legend class="field-label">{t.debate.synthesizer}</legend>
     <div class="segmented">
       {#each AGENTS as agent (agent)}
         <label>
@@ -430,20 +440,20 @@
 </div>
 
 <div class="popover glass refine-options" id={refinePopoverId} popover="auto" {@attach placeAbove(() => refineButton, 340)}>
-  <h3>Opcions de Perfecciona</h3>
-  <p class="hint">{MODE_DESCRIPTION.refine} L'última versió és la resposta final.</p>
+  <h3>{t.refine.title}</h3>
+  <p class="hint">{MODE_DESCRIPTION.refine} {t.refine.final}</p>
   <label class="field">
-    <span>Rondes màximes <b>{c.refineRounds}</b></span>
+    <span>{t.refine.maxRounds} <b>{c.refineRounds}</b></span>
     <input
       type="range"
       min={LIMITS.refine_rounds.min}
       max={LIMITS.refine_rounds.max}
       step="1"
       bind:value={c.refineRounds} />
-    <small class="hint">La ronda 1 fusiona les respostes; cada ronda següent revisa i escriu una versió.</small>
+    <small class="hint">{t.refine.roundsHint}</small>
   </label>
   <label class="field">
-    <span>Pressupost (€)</span>
+    <span>{t.refine.budget}</span>
     <input
       class="input amount"
       type="text"
@@ -453,17 +463,16 @@
       value={formatAmount(c.refineBudget)}
       onchange={setBudget} />
     <small class="hint">
-      Entre {formatAmount(LIMITS.refine_budget_eur.min)} i {formatAmount(LIMITS.refine_budget_eur.max)} €. En mode subscripció compta el
-      valor a preus d'API.
+      {t.refine.budgetHint(formatAmount(LIMITS.refine_budget_eur.min), formatAmount(LIMITS.refine_budget_eur.max))}
     </small>
   </label>
   <div class="field words">
     <label class="toggle">
       <input type="checkbox" class="switch" checked={c.refineWords == null} onchange={setAutomaticWords} />
-      <span>Límit automàtic de paraules</span>
+      <span>{t.refine.autoWords}</span>
     </label>
     <label class="inline">
-      <span>Límit de paraules</span>
+      <span>{t.refine.words}</span>
       <input
         class="input"
         type="number"
@@ -472,14 +481,14 @@
         max={LIMITS.refine_words.max}
         step="50"
         disabled={c.refineWords == null}
-        placeholder={c.refineWords == null ? 'Automàtic' : ''}
+        placeholder={c.refineWords == null ? t.refine.automatic : ''}
         value={c.refineWords ?? ''}
         onchange={setWords} />
     </label>
-    <small class="hint">Automàtic: 1,2 vegades les paraules de la versió 1 (300 com a mínim).</small>
+    <small class="hint">{t.refine.wordsHint}</small>
   </div>
   <fieldset class="field">
-    <legend class="field-label">Editor</legend>
+    <legend class="field-label">{t.refine.editor}</legend>
     <div class="segmented">
       {#each AGENTS as agent (agent)}
         <label>
@@ -489,25 +498,25 @@
         </label>
       {/each}
     </div>
-    <small class="hint">Fusiona les respostes i escriu cada versió.</small>
+    <small class="hint">{t.refine.editorHint}</small>
   </fieldset>
   <label class="toggle">
     <input type="checkbox" class="switch" bind:checked={c.refineConverge} />
-    <span>S'atura sol quan convergeix</span>
+    <span>{t.refine.converge}</span>
   </label>
   {#if c.refineConverge}
     <label class="field">
-      <span>Llindar de convergència <b>{c.refineThreshold}</b></span>
+      <span>{t.refine.convergeThreshold} <b>{c.refineThreshold}</b></span>
       <input
         type="range"
         min={LIMITS.refine_threshold.min}
         max={LIMITS.refine_threshold.max}
         step="1"
         bind:value={c.refineThreshold} />
-      <small class="hint">Quan tots dos li donen aquesta puntuació o més, sense cap defecte, dues rondes seguides.</small>
+      <small class="hint">{t.refine.convergeHint}</small>
     </label>
   {:else}
-    <small class="hint">Només s'atura quan l'aturis, quan cap dels dos hi troba res a canviar o en arribar a un límit.</small>
+    <small class="hint">{t.refine.neverConvergesHint}</small>
   {/if}
 </div>
 
@@ -886,7 +895,7 @@
     padding: 0.3rem 0.55rem;
   }
 
-  /* The idle "Enter per enviar" hint gives way to the controls first. */
+  /* The idle "Enter to send" hint gives way to the controls first. */
   @container (max-width: 60rem) {
     .kbd-hint.idle {
       display: none;

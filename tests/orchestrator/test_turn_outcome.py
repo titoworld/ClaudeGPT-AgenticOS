@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, TurnMode, TurnOptions, Usage
 from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.events import (
@@ -605,6 +606,22 @@ async def test_a_duel_where_both_agents_fail_stores_both_failures() -> None:
         "claude",
     ]
     assert outcome["usage"] == Usage().to_dict()
+
+
+async def test_a_failed_turn_stores_its_error_in_the_language_it_started_in() -> None:
+    store = InMemoryStore()
+    providers: dict[AgentName, FakeProvider] = {
+        agent: FakeProvider(agent, chunk_delay=0, fail={"answer"}) for agent in AGENTS
+    }
+    with i18n.use("en"):
+        events = await collect(
+            Engine(providers, store, retry_delay=0).run(TurnRequest("r", "Q?", "duel"))
+        )
+    failed = events[-1]
+    assert isinstance(failed, TurnFailed)
+    assert failed.error == ErrorInfo("unavailable", "Neither agent could answer.")
+    outcome = outcome_of(store, turn_id_of(events))
+    assert outcome["error"] == {"kind": "unavailable", "message": "Neither agent could answer."}
 
 
 async def test_a_request_that_fails_before_its_question_reports_no_usage() -> None:

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import DebateOptions, TurnOptions, Usage
 from agentic_os.orchestrator.accounting import TurnAccounting
 from agentic_os.orchestrator.cache import (
@@ -180,6 +181,14 @@ def test_cache_key_normalization_and_sensitivity() -> None:
     assert key() != key(identities={**identities, "claude": "api:claude-opus-5"})
     other_context = build_context("resum", [])
     assert key() != key(context_fingerprint=context_fingerprint(other_context))
+    # The turn's language counts: a hit replays the texts for people the turn wrote.
+    with i18n.use("en"):
+        english = key()
+    with i18n.use("es"):
+        spanish = key()
+    assert len({key(), english, spanish}) == 3
+    with i18n.use("ca"):
+        assert key() == key() != english
 
 
 def test_replayed_message_is_flagged_as_cached_and_costs_nothing() -> None:

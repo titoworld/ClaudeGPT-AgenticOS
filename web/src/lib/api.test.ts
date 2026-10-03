@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, GATING_REQUEST_TIMEOUT_MS, RequestTimeoutError, setUnauthorizedHandler } from './api';
 import { errorMessage } from './conversations.svelte';
+import { i18n } from './i18n/index.svelte';
 import { BACKGROUND_HEADER, type Attachment } from './protocol';
 
 /** A fetch that answers only when told to, and rejects as a browser does when aborted. */
@@ -167,7 +168,7 @@ describe('the background marker', () => {
   });
 });
 
-describe('attachments (docs/PROTOCOL.md «Adjunts»)', () => {
+describe('attachments (docs/PROTOCOL.md "Attachments")', () => {
   const ATTACHMENT: Attachment = {
     id: 12,
     name: 'informe final.pdf',
@@ -264,5 +265,21 @@ describe('attachments (docs/PROTOCOL.md «Adjunts»)', () => {
 
     recording(() => json({ detail: "L'adjunt no existeix." }, 404));
     await expect(api.attachmentText(9)).rejects.toMatchObject({ status: 404, message: "L'adjunt no existeix." });
+  });
+});
+
+describe("the client's own error texts, in English and Spanish", () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('for a request out of time, an answer without a reason and no connection', async () => {
+    i18n.set('en');
+    expect(new RequestTimeoutError().message).toBe('The server did not answer in time.');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not JSON', { status: 404 })));
+    await expect(api.settings()).rejects.toMatchObject({ status: 404, message: 'Error 404' });
+    expect(errorMessage(new TypeError('Failed to fetch'), 'fallback')).toBe('Cannot connect to the server.');
+
+    i18n.set('es');
+    expect(new RequestTimeoutError().message).toBe('El servidor no ha respondido a tiempo.');
+    expect(errorMessage(new TypeError('Failed to fetch'), 'fallback')).toBe('No se puede conectar con el servidor.');
   });
 });

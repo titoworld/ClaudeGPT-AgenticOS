@@ -14,6 +14,7 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agentic_os.domain import ProviderMode
+from agentic_os.i18n import t
 
 LOG_LEVELS: Final = ("critical", "error", "warning", "info", "debug", "trace")
 """uvicorn's log levels."""
@@ -83,7 +84,7 @@ class Settings(BaseSettings):
     def _known_log_level(cls, value: str) -> str:
         level = value.strip().lower()
         if level not in LOG_LEVELS:
-            raise ValueError(f"ha de ser un d'aquests valors: {', '.join(LOG_LEVELS)}")
+            raise ValueError(t("cli.settings.one_of", values=", ".join(LOG_LEVELS)))
         return level
 
     @property

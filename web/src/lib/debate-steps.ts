@@ -1,7 +1,8 @@
-// Steps of a Consell turn for the stepper: Respostes -> Revisió 1..N -> Síntesi.
-// The same function serves live turns and stored ones, so a reloaded debate
-// reads like it did live.
+// Steps of a Council turn for the stepper: Answers -> Review 1..N -> Synthesis, in the
+// language in force. The same function serves live turns and stored ones, so a reloaded
+// debate reads like it did live.
 
+import { i18n } from './i18n/index.svelte';
 import { isTerminal, type TurnView } from './turns.svelte';
 
 export type StepState = 'done' | 'active' | 'pending' | 'skipped' | 'failed';
@@ -10,27 +11,20 @@ export interface DebateStep {
   key: string;
   label: string;
   state: StepState;
-  /** State for screen readers ("fet", "omès per consens"...). */
+  /** State for screen readers ("done", "skipped by consensus"...). */
   stateLabel: string;
   /** Progress inside the step (0..1) from finished streams (the synthesis: its last attempt done). */
   progress: number;
 }
-
-const STATE_LABEL: Record<StepState, string> = {
-  done: 'fet',
-  active: 'en curs',
-  pending: 'pendent',
-  skipped: 'omès',
-  failed: 'aturat',
-};
 
 /** Steps of a debate; `plannedRounds` applies when the turn does not carry its options. */
 export function debateSteps(turn: TurnView, plannedRounds: number): DebateStep[] {
   const maxSeen = Math.max(0, ...turn.streams.filter((s) => s.kind === 'revision').map((s) => s.round));
   const rounds = Math.max(turn.options?.debate.rounds ?? plannedRounds, maxSeen);
   const terminal = isTerminal(turn.status);
+  const texts = i18n.m.turn.steps;
   // Rounds left out are "skipped by consensus" only when the debate reached it.
-  const skippedLabel = turn.consensus?.reached ? 'omès per consens' : STATE_LABEL.skipped;
+  const skippedLabel = turn.consensus?.reached ? texts.skippedByConsensus : texts.states.skipped;
 
   // Index of the step in progress: 0 answers, r revision r, rounds+1 synthesis.
   let current = 0;
@@ -45,7 +39,7 @@ export function debateSteps(turn: TurnView, plannedRounds: number): DebateStep[]
   const list: DebateStep[] = [];
   for (let i = 0; i <= rounds + 1; i++) {
     const synthesis = i === rounds + 1;
-    const label = i === 0 ? 'Respostes' : synthesis ? 'Síntesi' : `Revisió ${i}`;
+    const label = i === 0 ? texts.answers : synthesis ? texts.synthesis : texts.review(i);
     const own = streamsOf(i);
     const expected = synthesis ? 1 : 2;
     // The synthesis follows its last attempt: each attempt has its own stream, and
@@ -69,7 +63,7 @@ export function debateSteps(turn: TurnView, plannedRounds: number): DebateStep[]
       key: `s${i}`,
       label,
       state,
-      stateLabel: state === 'skipped' ? skippedLabel : STATE_LABEL[state],
+      stateLabel: state === 'skipped' ? skippedLabel : texts.states[state],
       progress: Math.min(1, finished / expected),
     });
   }

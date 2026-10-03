@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import TurnOptions, Usage
 from agentic_os.orchestrator.accounting import TurnAccounting, failed_call_usage
 from agentic_os.orchestrator.cache import context_fingerprint, normalize_question, turn_cache_key
@@ -112,6 +113,33 @@ def test_early_stop_without_priced_revisions_has_no_value() -> None:
     # The only kind with saved tokens has no price, so the turn's saving has no value
     # (not 0 €), even though the answer call was priced.
     assert accounting.savings().cost_usd is None
+
+
+def test_saving_details_are_written_in_the_turns_language() -> None:
+    accounting = TurnAccounting()
+    accounting.add_call(CACHED_CALL, "answer")
+    accounting.add_call(CACHED_CALL, "revision")
+    accounting.add_early_stop(2)
+    for _ in range(2):
+        accounting.add_unchanged("x" * 400, OPUS_55)
+        accounting.add_context_request(OPUS_55)
+    accounting.compaction_per_request = 12_345
+    accounting.cache = 10
+    with i18n.use("en"):
+        english = {record.kind: record.detail for record in accounting.saving_records(1, 2)}
+    catalan = {record.kind: record.detail for record in accounting.saving_records(1, 2)}
+    assert english == {
+        "cache": "Answer served from the cache",
+        "compaction": "Tokens saved per call: 12,345; calls: 2",
+        "early_stop": "Rounds skipped by consensus: 2",
+        "unchanged": "Answers not rewritten: 2",
+    }
+    assert catalan == {
+        "cache": "Resposta servida des de la memòria cau",
+        "compaction": "12.345 tokens menys en 2 crides",
+        "early_stop": "2 rondes omeses per consens",
+        "unchanged": "2 respostes sense reescriure",
+    }
 
 
 def test_saving_records_carry_their_own_value() -> None:

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AGENT_LABEL } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { critiqueMarkdown } from '../lib/markdown';
   import { AGENTS, type Agent } from '../lib/protocol';
   import type { StreamView } from '../lib/turns.svelte';
@@ -35,18 +36,19 @@
   const running = $derived(streams.some((s) => s.status === 'streaming'));
   // Open while it runs (live), collapsed when reloaded from history.
   let open = $state(untrack(() => active));
+  const t = $derived(i18n.m.turn.review);
 </script>
 
 <details class="round" class:running bind:open>
   <summary>
     <Icon name="chevron-right" size={16} class="chev" />
-    <span class="title">Revisió {round}</span>
+    <span class="title">{i18n.m.turn.steps.review(round)}</span>
     <span class="scores">
       {#each AGENTS as agent (agent)}
         {@const s = byAgent[agent]}
         <span class="score {agent}">
           <i aria-hidden="true"></i>{AGENT_LABEL[agent]}
-          <b>{s?.agreement ?? '—'}</b>{#if s?.unchanged}<span class="sr-only"> (sense canvis)</span>{/if}
+          <b>{s?.agreement ?? '—'}</b>{#if s?.unchanged}<span class="sr-only"> ({t.unchangedScore})</span>{/if}
         </span>
       {/each}
     </span>
@@ -59,14 +61,14 @@
       {@const keeps = !!s && (s.unchanged || kept.has(s.id))}
       {@const from = s ? kept.get(s.id) : undefined}
       {@const cut = s?.status === 'done' && s.truncated}
-      <section class="col {agent}" aria-label="Revisió de {AGENT_LABEL[agent]}">
+      <section class="col {agent}" aria-label={t.of(AGENT_LABEL[agent])}>
         <header>
           <AgentLabel {agent} size={16} />
           {#if s?.unchanged}
-            <span class="chip good"><Icon name="check" size={12} />Sense canvis</span>
+            <span class="chip good"><Icon name="check" size={12} />{t.unchanged}</span>
             {#if s.unchangedNote}
               <span class="unchanged-note"
-                ><span class="sr-only">Nota del model:</span> «<PlainText text={s.unchangedNote} />»</span>
+                ><span class="sr-only">{t.modelNote}</span> {t.quote.open}<PlainText text={s.unchangedNote} />{t.quote.close}</span>
             {/if}
           {/if}
           {#if s?.pdfReading.length}
@@ -82,33 +84,29 @@
         <AgreementMeter {agent} value={s?.agreement ?? null} {threshold} />
         {#if s?.critique}
           <div class="critique">
-            <h4>Crítica</h4>
+            <h4>{t.critique}</h4>
             <Markdown text={critiqueMarkdown(s.critique)} streaming={s.status === 'streaming' && !s.text} />
           </div>
         {/if}
         {#if s?.status === 'failed'}
-          <p class="problem"><Icon name="alert" size={14} />{s.error?.message ?? 'Error'}</p>
+          <p class="problem"><Icon name="alert" size={14} />{s.error?.message ?? t.error}</p>
         {/if}
         {#if s?.text && !keeps}
           <details class="revised" open={s.status === 'streaming'}>
-            <summary>Resposta revisada</summary>
+            <summary>{t.revised}</summary>
             <Markdown text={s.text} streaming={s.status === 'streaming'} />
           </details>
         {/if}
         {#if cut && keeps}
           <!-- What was cut is the critique or the new answer: the answer kept is not. -->
-          <TruncationNote
-            lead="Revisió incompleta"
-            reason={s.finishReason}
-            detail="Es manté la resposta anterior."
-            compact />
+          <TruncationNote lead={t.incomplete} reason={s.finishReason} detail={t.keepsPrevious} compact />
         {:else if cut}
           <TruncationNote reason={s.finishReason} compact />
         {:else if keeps && !s.unchanged}
-          <p class="kept-note"><Icon name="info" size={14} />Es manté la resposta anterior.</p>
+          <p class="kept-note"><Icon name="info" size={14} />{t.keepsPrevious}</p>
         {/if}
         {#if s?.status === 'done' && keeps && from?.truncated}
-          <TruncationNote lead="La resposta que es manté és incompleta" reason={from.finishReason} compact />
+          <TruncationNote lead={t.keptIncomplete} reason={from.finishReason} compact />
         {/if}
       </section>
     {/each}

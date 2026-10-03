@@ -71,6 +71,7 @@ from typing import Any, Final
 from agentic_os import __version__
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.i18n import Lazy, lazy, t
 from agentic_os.orchestrator.tokens import tokens_for_chars
 from agentic_os.providers.base import (
     Attachment,
@@ -187,8 +188,8 @@ STABLE_UPTIME = 60.0
 DETAIL_MAX_CHARS = 300
 MAX_SUB_AGENT_RUNS = 3
 """Sub-agent runs (spawns and follow-ups) one call tolerates; the next one stops it."""
-SUB_AGENT_LIMIT_MESSAGE = "ChatGPT ha intentat obrir massa subagents; s'ha aturat la resposta."
-INTERRUPTED_MESSAGE = "La resposta de ChatGPT s'ha interromput."
+SUB_AGENT_LIMIT_MESSAGE = lazy("providers.codex.too_many_subagents")
+INTERRUPTED_MESSAGE = lazy("providers.chatgpt.interrupted")
 _SUB_AGENT_RUN_KINDS = frozenset({"started", "interacted"})
 """``subAgentActivity`` kinds that start a turn on a sub-agent's thread."""
 _COLLAB_RUN_TOOLS = frozenset({"spawnAgent", "sendInput", "resumeAgent", "followupTask"})
@@ -196,7 +197,7 @@ _COLLAB_RUN_TOOLS = frozenset({"spawnAgent", "sendInput", "resumeAgent", "follow
 _LOG_DATABASE_RE = re.compile(r"logs_\w+\.sqlite(?:-wal|-shm|-journal)?")
 """Codex's log databases (``logs_2.sqlite`` and its WAL files): every prompt, at DEBUG."""
 
-LOGIN_HINT = "executa «codex login --device-auth» al servidor"
+LOGIN_HINT = lazy("providers.codex.login_hint")
 
 _PLAN_LABELS: dict[str, str] = {
     "free": "Free",
@@ -210,12 +211,12 @@ _PLAN_LABELS: dict[str, str] = {
     "edu": "Edu",
 }
 
-MODEL_DESCRIPTIONS: dict[str, str] = {
-    "gpt-6-astra": "El més capaç, per a la feina més exigent.",
-    "gpt-6-sol": "Equilibrat, per a la feina de cada dia.",
-    "gpt-6-luna": "Ràpid i econòmic, per a tasques senzilles.",
+MODEL_DESCRIPTIONS: dict[str, Lazy] = {
+    "gpt-6-astra": lazy("providers.model.gpt_6_astra"),
+    "gpt-6-sol": lazy("providers.model.gpt_6_sol"),
+    "gpt-6-luna": lazy("providers.model.gpt_6_luna"),
 }
-"""Catalan descriptions of known models (other models keep Codex's own description)."""
+"""Descriptions of known models (other models keep Codex's own description)."""
 
 _DENIED_REVIEW: JsonObject = {"denied": {"rejection": "Not available in this environment."}}
 _DECLINED_REQUESTS: dict[str, JsonObject] = {
@@ -588,14 +589,18 @@ def redact(text: str) -> str:
     return _SECRET_RE.sub(lambda m: f"{m.group(1) or m.group(2) or m.group(3)}***", text)
 
 
-def _with_detail(text: str, detail: str) -> str:
-    """``text`` plus the vendor's own message (redacted, shortened) in parentheses."""
+def _clean_detail(detail: str) -> str:
+    """The vendor's own message, redacted and shortened ("" when there is none)."""
     detail = redact(detail.strip())
-    if not detail:
-        return text
     if len(detail) > DETAIL_MAX_CHARS:
         detail = detail[: DETAIL_MAX_CHARS - 1] + "…"
-    return f"{text} ({detail})"
+    return detail
+
+
+def _with_detail(text: str, detail: str) -> str:
+    """``text`` plus the vendor's own message (redacted, shortened) in parentheses."""
+    detail = _clean_detail(detail)
+    return f"{text} ({detail})" if detail else text
 
 
 def usage_from_breakdown(breakdown: Any) -> Usage:
@@ -634,46 +639,44 @@ def turn_error(error: Any) -> ProviderError:
     name, status = _error_info(data.get("codexErrorInfo"))
     if name in ("usageLimitExceeded", "sessionBudgetExceeded"):
         return ProviderError(
-            _with_detail("Has arribat al límit d'ús de la subscripció de ChatGPT.", detail),
-            kind="rate_limit",
+            _with_detail(t("providers.codex.usage_limit"), detail), kind="rate_limit"
         )
     if name == "rateLimitExceeded" or status == 429:
         return ProviderError(
-            _with_detail(
-                "ChatGPT ha limitat les peticions; torna-ho a provar d'aquí a poc.", detail
-            ),
+            _with_detail(t("providers.codex.rate_limited"), detail),
             kind="rate_limit",
             retryable=True,
         )
     if name == "unauthorized" or status in (401, 403):
-        return ProviderError(f"La sessió de Codex no és vàlida: {LOGIN_HINT}.", kind="auth")
+        return ProviderError(lazy("providers.codex.session_invalid", hint=LOGIN_HINT), kind="auth")
     if name == "contextWindowExceeded":
-        return ProviderError("La conversa és massa llarga per al model de ChatGPT.", kind="invalid")
+        return ProviderError(lazy("providers.codex.conversation_too_long"), kind="invalid")
     if name in ("cyberPolicy", "misalignmentPolicyViolation"):
         return ProviderError(
-            _with_detail("ChatGPT ha rebutjat la petició per la seva política d'ús.", detail),
-            kind="invalid",
+            _with_detail(t("providers.codex.usage_policy"), detail), kind="invalid"
         )
     if name == "badRequest":
-        return ProviderError(_with_detail("Codex ha rebutjat la petició.", detail), kind="invalid")
+        return ProviderError(_with_detail(t("providers.codex.rejected"), detail), kind="invalid")
     if name in _RETRYABLE_ERROR_INFOS:
         return ProviderError(
-            _with_detail("ChatGPT no està disponible ara mateix.", detail),
+            _with_detail(t("providers.codex.unavailable"), detail),
             kind="unavailable",
             retryable=True,
         )
-    return ProviderError(_with_detail("Codex ha fallat.", detail), kind="internal")
+    return ProviderError(_with_detail(t("providers.codex.failed"), detail), kind="internal")
 
 
 def _rpc_error(exc: CodexRpcError) -> ProviderError:
     lowered = exc.message.lower()
     if "authentication" in lowered or "not logged in" in lowered or "login" in lowered:
-        return ProviderError(f"Codex no té sessió: {LOGIN_HINT}.", kind="auth")
+        return ProviderError(lazy("providers.codex.no_session", hint=LOGIN_HINT), kind="auth")
     if exc.code == -32602:
         return ProviderError(
-            _with_detail("Codex ha rebutjat la petició.", exc.message), kind="invalid"
+            _with_detail(t("providers.codex.rejected"), exc.message), kind="invalid"
         )
-    return ProviderError(_with_detail("Error del servidor de Codex.", exc.message), kind="internal")
+    return ProviderError(
+        _with_detail(t("providers.codex.server_error"), exc.message), kind="internal"
+    )
 
 
 def _window_label(minutes: Any, fallback: str) -> str:
@@ -783,7 +786,7 @@ def input_items(
 ) -> list[JsonObject]:
     """``UserInput`` items of a call's turn: one per attachment, in order (an image as a
     ``localImage``, at its path in ``images`` (by SHA-256, see :func:`named_image`) or
-    else its stored path; a PDF as ``prompt_format.pdf_view``; a text file as its ``[Fitxer: ...]``
+    else its stored path; a PDF as ``prompt_format.pdf_view``; a text file as its ``[File: ...]``
     text), then the rendered transcript."""
     items: list[JsonObject] = []
     for attachment in request.attachments:
@@ -1045,14 +1048,10 @@ class CodexAppServerProvider:
                         raise asyncio.CancelledError("Codex interrupted the turn")
                     raise turn_error(turn.get("error"))
         except TimeoutError:
-            raise ProviderError(
-                "ChatGPT (Codex) ha superat el temps màxim de resposta.", kind="timeout"
-            ) from None
+            raise ProviderError(lazy("providers.codex.timeout"), kind="timeout") from None
         except ProcessGone:
             raise ProviderError(
-                "El procés de Codex s'ha aturat inesperadament.",
-                kind="unavailable",
-                retryable=True,
+                lazy("providers.codex.process_stopped"), kind="unavailable", retryable=True
             ) from None
         except CodexRpcError as exc:
             raise _rpc_error(exc) from None
@@ -1221,17 +1220,20 @@ class CodexAppServerProvider:
     # -- process lifecycle ---------------------------------------------------------------
 
     async def _connection(self, *, wait_backoff: bool) -> _AppServerConnection:
-        """The running app-server, started (once, shared by concurrent callers) if needed."""
+        """The running app-server, started (once, shared by concurrent callers) if needed.
+        Its errors carry lazy texts (``ProviderError.text``): the status keeps them for
+        every client."""
         while True:
             if self._closed:
-                raise ProviderError("El proveïdor de Codex està tancat.", kind="unavailable")
+                raise ProviderError(lazy("providers.codex.closed"), kind="unavailable")
             conn = self._conn
             if conn is not None and conn.alive:
                 return conn
             delay = self._backoff_delay()
             if delay > 0 and not wait_backoff:
+                # At most BACKOFF_MAX seconds: no thousands separator in any language.
                 raise ProviderError(
-                    f"Codex s'ha aturat; es reiniciarà d'aquí a {math.ceil(delay)} s.",
+                    lazy("providers.codex.restarting", seconds=math.ceil(delay)),
                     kind="unavailable",
                     retryable=True,
                 )
@@ -1242,12 +1244,17 @@ class CodexAppServerProvider:
             try:
                 # Shielded: a cancelled caller must not abort a start other calls wait for.
                 await asyncio.shield(self._starting)
+            except ProviderError as exc:
+                # The start is shared, and its error was made in the language of the
+                # caller that began it (the status monitor's, say): each caller gets it in
+                # its own language, from the error's lazy text.
+                raise ProviderError(exc.text, kind=exc.kind, retryable=exc.retryable) from exc
             except asyncio.CancelledError:
                 current = asyncio.current_task()
                 if self._closed and current is not None and not current.cancelling():
                     # The start was cancelled by aclose(), not this caller.
                     raise ProviderError(
-                        "El proveïdor de Codex està tancat.", kind="unavailable"
+                        lazy("providers.codex.closed"), kind="unavailable"
                     ) from None
                 raise
 
@@ -1266,8 +1273,7 @@ class CodexAppServerProvider:
             state_dir = await asyncio.to_thread(_private_dir, self._state_dir)
         except OSError as exc:
             raise ProviderError(
-                f"No s'han pogut preparar els directoris de Codex: {exc}",
-                kind="unavailable",
+                lazy("providers.codex.dirs_failed", reason=str(exc)), kind="unavailable"
             ) from None
         self._cwd = cwd
         await self._wait_dying()
@@ -1294,10 +1300,12 @@ class CodexAppServerProvider:
                 limit=LINE_LIMIT,
             )
         except FileNotFoundError:
-            raise ProviderError(f"CLI de Codex no trobada: {cli}", kind="unavailable") from None
+            raise ProviderError(
+                lazy("providers.codex.cli_not_found", path=cli), kind="unavailable"
+            ) from None
         except OSError as exc:
             raise ProviderError(
-                f"No s'ha pogut executar la CLI de Codex: {exc}", kind="unavailable"
+                lazy("providers.codex.cli_failed", reason=str(exc)), kind="unavailable"
             ) from None
         conn = _AppServerConnection(
             process, on_notification=self._on_notification, on_exit=self._on_exit
@@ -1322,8 +1330,11 @@ class CodexAppServerProvider:
             await conn.close()
             if isinstance(exc, Exception):
                 tail = " | ".join(list(conn.stderr_tail)[-3:])
+                detail = _clean_detail(tail or str(exc))
                 raise ProviderError(
-                    _with_detail("No s'ha pogut iniciar Codex.", tail or str(exc)),
+                    lazy("providers.codex.start_failed_detail", detail=detail)
+                    if detail
+                    else lazy("providers.codex.start_failed"),
                     kind="unavailable",
                     retryable=True,
                 ) from exc
@@ -1511,7 +1522,7 @@ class CodexAppServerProvider:
         the engine keys its turn cache on it."""
         model = self._settings.chatgpt_model or self._default_model or ""
 
-        def remember(available: bool, detail: str, ttl: float) -> ProviderStatus:
+        def remember(available: bool, detail: str | Lazy, ttl: float) -> ProviderStatus:
             status = ProviderStatus(
                 agent="chatgpt",
                 mode="cli",
@@ -1529,31 +1540,36 @@ class CodexAppServerProvider:
                 await conn.request("account/read", {"refreshToken": False}, STATUS_REQUEST_TIMEOUT)
             )
         except ProviderError as exc:
-            return remember(False, exc.message, STATUS_TTL_UNAVAILABLE)
+            return remember(False, exc.text, STATUS_TTL_UNAVAILABLE)
         except (TimeoutError, ProcessGone, CodexRpcError):
             logger.warning("Could not read the Codex account", exc_info=True)
-            return remember(False, "No s'ha pogut llegir l'estat de Codex.", STATUS_TTL_UNAVAILABLE)
+            unreadable = lazy("providers.codex.status.unreadable")
+            return remember(False, unreadable, STATUS_TTL_UNAVAILABLE)
 
         account = answer.get("account")
         subscription = False
+        detail: Lazy
         if not isinstance(account, dict):
             if answer.get("requiresOpenaiAuth") is not False:
                 # A fresh process re-reads auth.json, so a later `codex login` is picked up.
                 if self._active_calls == 0:
                     self._retire(conn)
-                return remember(False, f"Sense sessió: {LOGIN_HINT}", STATUS_TTL_UNAVAILABLE)
-            detail = "Codex amb un proveïdor de models propi"
+                no_session = lazy("providers.no_session", hint=LOGIN_HINT)
+                return remember(False, no_session, STATUS_TTL_UNAVAILABLE)
+            detail = lazy("providers.codex.status.own_provider")
         elif account.get("type") == "chatgpt":
             subscription = True
             plan = account.get("planType")
             label = _PLAN_LABELS.get(plan, str(plan).replace("_", " ").title()) if plan else ""
             detail = (
-                f"Subscripció ChatGPT activa ({label})" if label else "Subscripció ChatGPT activa"
+                lazy("providers.codex.status.subscription_plan", plan=label)
+                if label
+                else lazy("providers.codex.status.subscription")
             )
         elif account.get("type") == "apiKey":
-            detail = "Codex amb clau d'API (es factura per ús)"
+            detail = lazy("providers.codex.status.api_key")
         else:
-            detail = "Codex amb un compte extern"
+            detail = lazy("providers.codex.status.external_account")
 
         if not self._settings.chatgpt_model and self._default_model is None:
             model = await self._read_default_model(conn) or model
@@ -1617,7 +1633,7 @@ class CodexAppServerProvider:
                     break
                 cursor = next_cursor
         except Exception as exc:  # never raise: the owner can still type any model id
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the Codex models (%s); using the default", reason)
         models: list[ModelInfo] = []
         catalog_default: str | None = None

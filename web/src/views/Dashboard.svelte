@@ -6,6 +6,7 @@
    * api.providers().
    */
   import { onMount, untrack } from 'svelte';
+  import RichText from '../components/RichText.svelte';
   import { api, ApiError } from '../lib/api';
   import { app } from '../lib/app.svelte';
   import ChartCard from '../lib/charts/ChartCard.svelte';
@@ -37,7 +38,6 @@
     kpis,
     latencyData,
     MODE_LABEL,
-    plural,
     resetLabel,
     SAVING_KINDS,
     SAVING_LABEL,
@@ -46,35 +46,31 @@
     turnsData,
   } from '../lib/charts/usage';
   import { AGENT_LABEL, formatInt, formatMs, formatPercent, formatTime, formatTokens } from '../lib/format';
-  import { AGENTS, type ProviderStatus, type SavingKind, type Stats } from '../lib/protocol';
+  import { i18n } from '../lib/i18n/index.svelte';
+  import { AGENTS, type ProviderStatus, type Stats } from '../lib/protocol';
 
   const RANGES = [7, 30, 90] as const;
   type Range = (typeof RANGES)[number];
 
-  const TECHNIQUE_TEXT: Record<SavingKind, string> = {
-    cache:
-      'Una pregunta idèntica (mateix mode, agents i context) es respon des de la memòria cau, sense cridar cap model.',
-    compaction:
-      'Quan l’historial creix massa, els missatges antics es resumeixen amb un model ràpid i només es conserven els últims.',
-    early_stop: 'Si tots dos agents superen el llindar d’acord, s’ometen les rondes de debat que quedaven.',
-    unchanged: 'Un agent que ja està d’acord ho indica en lloc de reescriure tota la resposta.',
-  };
-
-  const decimal = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 1 });
+  const t = $derived(i18n.m.dashboard);
+  const decimal = $derived(new Intl.NumberFormat(i18n.tag, { maximumFractionDigits: 1 }));
 
   let days = $state<Range>(30);
   let stats = $state.raw<Stats | null>(null);
   let providers = $state.raw<ProviderStatus[] | null>(null);
-  let statsError = $state<string | null>(null);
-  let providersError = $state<string | null>(null);
+  // Why the last load failed (null when it worked): the message is made when shown, in the language in force.
+  let statsFailure = $state.raw<{ reason: unknown } | null>(null);
+  let providersFailure = $state.raw<{ reason: unknown } | null>(null);
+  const statsError = $derived(statsFailure ? messageOf(statsFailure.reason) : null);
+  const providersError = $derived(providersFailure ? messageOf(providersFailure.reason) : null);
   let loading = $state(false);
   let updatedAt = $state<Date | null>(null);
   let now = $state(new Date());
   let seq = 0;
 
   function messageOf(err: unknown): string {
-    if (err instanceof ApiError) return err.status === 401 ? 'La sessió ha caducat.' : err.message;
-    return 'Comprova la connexió i torna-ho a provar.';
+    if (err instanceof ApiError) return err.status === 401 ? t.sessionExpired : err.message;
+    return t.checkConnection;
   }
 
   async function load(range: number, withProviders: boolean): Promise<void> {
@@ -84,16 +80,16 @@
     if (id !== seq) return; // a newer request superseded this one
     if (s.status === 'fulfilled') {
       stats = s.value;
-      statsError = null;
+      statsFailure = null;
     } else {
-      statsError = messageOf(s.reason);
+      statsFailure = { reason: s.reason };
     }
     if (withProviders) {
       if (p.status === 'fulfilled') {
         providers = p.value;
-        providersError = null;
+        providersFailure = null;
       } else {
-        providersError = messageOf(p.reason);
+        providersFailure = { reason: p.reason };
       }
     }
     now = new Date();
@@ -127,10 +123,10 @@
   const tokenParts = $derived(
     k
       ? [
-          { key: 'input', label: 'Entrada', value: k.processed.input },
-          { key: 'cache-read', label: 'Lectura de memòria cau', value: k.processed.cacheRead },
-          { key: 'cache-write', label: 'Escriptura a memòria cau', value: k.processed.cacheWrite },
-          { key: 'output', label: 'Sortida', value: k.processed.output },
+          { key: 'input', label: t.kpis.parts.input, value: k.processed.input },
+          { key: 'cache-read', label: t.kpis.parts.cacheRead, value: k.processed.cacheRead },
+          { key: 'cache-write', label: t.kpis.parts.cacheWrite, value: k.processed.cacheWrite },
+          { key: 'output', label: t.kpis.parts.output, value: k.processed.output },
         ]
       : [],
   );
@@ -145,8 +141,8 @@
 
   const tokensTable = $derived(
     chartTable(tokenDays, AGENT_SERIES, {
-      caption: 'Tokens processats per dia i agent',
-      categoryLabel: 'Dia',
+      caption: t.charts.tokens.label,
+      categoryLabel: t.charts.day,
       format: formatInt,
       total: true,
       skipEmpty: true,
@@ -154,8 +150,8 @@
   );
   const costTable = $derived(
     chartTable(costDays, AGENT_SERIES, {
-      caption: 'Cost per dia i agent, en euros',
-      categoryLabel: 'Dia',
+      caption: t.charts.cost.label,
+      categoryLabel: t.charts.day,
       format: formatCost,
       total: true,
       skipEmpty: true,
@@ -163,22 +159,22 @@
   );
   const savingsTable = $derived(
     chartTable(savingDays, SAVING_SERIES, {
-      caption: 'Tokens estalviats per dia i tècnica',
-      categoryLabel: 'Dia',
+      caption: t.charts.savings.label,
+      categoryLabel: t.charts.day,
       format: formatInt,
       total: true,
       skipEmpty: true,
     }),
   );
   const latencyTable = $derived(
-    chartTable(latency, AGENT_SERIES, { caption: 'Latència per agent', categoryLabel: 'Mesura', format: formatMs }),
+    chartTable(latency, AGENT_SERIES, { caption: t.charts.latency.title, categoryLabel: t.charts.measure, format: formatMs }),
   );
   const turnsTable = $derived(
-    chartTable(turns, COUNT_SERIES, { caption: 'Torns per mode', categoryLabel: 'Mode', format: formatInt }),
+    chartTable(turns, COUNT_SERIES, { caption: t.charts.turns.title, categoryLabel: t.charts.mode, format: formatInt }),
   );
 
   const updatedText = $derived(
-    loading ? 'Actualitzant…' : updatedAt ? `Actualitzat a les ${formatTime(updatedAt.toISOString())}` : '',
+    loading ? t.updating : updatedAt ? t.updatedAt(formatTime(updatedAt.toISOString())) : '',
   );
 </script>
 
@@ -232,16 +228,16 @@
 <section class="dashboard" aria-labelledby="dashboard-title" aria-busy={loading}>
   <header class="top">
     <div class="heading">
-      <h2 id="dashboard-title">Ús i estalvi</h2>
-      <p>Consum, cost, estalvi i rendiment de Claude i ChatGPT</p>
+      <h2 id="dashboard-title">{t.title}</h2>
+      <p>{t.subtitle}</p>
     </div>
     <div class="controls">
       <fieldset class="range">
-        <legend class="sr-only">Període</legend>
+        <legend class="sr-only">{t.period}</legend>
         {#each RANGES as r (r)}
           <label>
             <input type="radio" name="dashboard-range" value={r} bind:group={days} />
-            <span>{r} dies</span>
+            <span>{t.days(r)}</span>
           </label>
         {/each}
       </fieldset>
@@ -249,7 +245,7 @@
         <svg viewBox="0 0 16 16" class:spin={loading} aria-hidden="true">
           <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" />
         </svg>
-        Actualitza
+        {t.refresh}
       </button>
     </div>
   </header>
@@ -257,39 +253,37 @@
 
   {#if statsError && stats}
     <div class="banner" role="alert">
-      <span>No s’han pogut actualitzar les estadístiques. {statsError}</span>
-      <button type="button" onclick={refresh}>Torna-ho a provar</button>
+      <span>{t.refreshFailed(statsError)}</span>
+      <button type="button" onclick={refresh}>{t.retry}</button>
     </div>
   {/if}
 
   {#if !stats || !k}
     <div class="state" class:error={!!statsError}>
       {#if statsError}
-        <p role="alert">No s’han pogut carregar les estadístiques. {statsError}</p>
-        <button type="button" onclick={refresh}>Torna-ho a provar</button>
+        <p role="alert">{t.loadFailed(statsError)}</p>
+        <button type="button" onclick={refresh}>{t.retry}</button>
       {:else}
         <span class="loader" aria-hidden="true"></span>
-        <p>Carregant les estadístiques…</p>
+        <p>{t.loading}</p>
       {/if}
     </div>
   {:else}
     <div class="content" class:stale={loading}>
       <!-- KPI tiles: tokens -->
-      <section class="kpis" aria-label="Resum del període">
+      <section class="kpis" aria-label={t.kpis.label}>
         <article class="tile hero">
-          <h3>Tokens estalviats</h3>
+          <h3>{t.kpis.saved}</h3>
           <p class="value">{formatTokens(k.saved.total)}</p>
           {#if k.saved.ratio != null}
-            <p class="sub">
-              <strong>{formatPercent(k.saved.ratio)}</strong> menys tokens dels que s’haurien processat sense optimitzacions
-            </p>
+            <p class="sub"><RichText text={t.kpis.savedShare(formatPercent(k.saved.ratio))} /></p>
             <Meter
               value={k.saved.ratio * 100}
               tone="neutral"
-              label="Proporció estalviada"
-              valueText="{formatPercent(k.saved.ratio)} estalviat"
+              label={t.kpis.savedMeter}
+              valueText={t.kpis.savedMeterValue(formatPercent(k.saved.ratio))}
             />
-            <ul class="breakdown" aria-label="Estalvi per tècnica">
+            <ul class="breakdown" aria-label={t.kpis.byTechnique}>
               {#each SAVING_KINDS as kind (kind)}
                 <li>
                   <span class="swatch" style:background="var(--saving-{kind.replace('_', '-')})"></span>
@@ -299,12 +293,12 @@
               {/each}
             </ul>
           {:else}
-            <p class="sub">Encara no hi ha consum en aquest període.</p>
+            <p class="sub">{t.noUsage}</p>
           {/if}
         </article>
 
         <article class="tile">
-          <h3>Tokens processats</h3>
+          <h3>{t.kpis.processed}</h3>
           <p class="value">{formatTokens(k.processed.total)}</p>
           {#if k.processed.total > 0}
             <div class="split" aria-hidden="true">
@@ -320,23 +314,21 @@
               <li><span class="dot" style:background="var(--{a})"></span>{AGENT_LABEL[a]} <strong>{formatTokens(k.processed.byAgent[a])}</strong></li>
             {/each}
           </ul>
-          <ul class="parts" aria-label="Tokens processats per tipus">
+          <ul class="parts" aria-label={t.kpis.byKind}>
             {#each tokenParts as part (part.key)}
               <li><span>{part.label}</span> <strong>{formatTokens(part.value)}</strong></li>
             {/each}
           </ul>
           <p class="sub">
-            {plural(k.processed.calls, 'crida', 'crides', formatInt(k.processed.calls))} · {plural(
+            {t.kpis.calls(k.processed.calls, formatInt(k.processed.calls))} · {t.kpis.errors(
               k.processed.errors,
-              'error',
-              'errors',
               formatInt(k.processed.errors),
             )}
           </p>
         </article>
 
         <article class="tile">
-          <h3>Torns</h3>
+          <h3>{t.turns}</h3>
           <p class="value">{formatInt(k.turns.total)}</p>
           <p class="sub">
             {TURN_MODES.map((m) => `${MODE_LABEL[m]} ${formatInt(k.turns.byMode[m])}`).join(' · ')}
@@ -344,29 +336,29 @@
         </article>
 
         <article class="tile">
-          <h3>Debats amb consens</h3>
+          <h3>{t.kpis.consensus}</h3>
           <p class="value">{k.consensus.rate == null ? '—' : formatPercent(k.consensus.rate)}</p>
           {#if k.consensus.debates > 0}
             <p class="sub">
-              {formatInt(k.consensus.reached)} de {plural(k.consensus.debates, 'debat', 'debats', formatInt(k.consensus.debates))}
+              {t.kpis.reachedOf(formatInt(k.consensus.reached), k.consensus.debates, formatInt(k.consensus.debates))}
               {#if k.consensus.avgRounds != null}
-                · {plural(k.consensus.avgRounds, 'ronda', 'rondes', decimal.format(k.consensus.avgRounds))} de mitjana
+                · {t.kpis.avgRounds(k.consensus.avgRounds, decimal.format(k.consensus.avgRounds))}
               {/if}
             </p>
           {:else}
-            <p class="sub">Encara no hi ha debats en aquest període.</p>
+            <p class="sub">{t.kpis.noDebates}</p>
           {/if}
         </article>
 
         <article class="tile latency">
-          <h3>Latència</h3>
+          <h3>{t.kpis.latency}</h3>
           <table>
             <thead>
               <tr>
-                <th scope="col"><span class="sr-only">Agent</span></th>
+                <th scope="col"><span class="sr-only">{t.kpis.agent}</span></th>
                 <th scope="col">p50</th>
                 <th scope="col">p95</th>
-                <th scope="col"><abbr title="Temps fins al primer token (p50)">1r token</abbr></th>
+                <th scope="col"><abbr title={t.kpis.firstTokenTitle}>{t.kpis.firstToken}</abbr></th>
               </tr>
             </thead>
             <tbody>
@@ -385,45 +377,36 @@
 
       <!-- KPI tiles: euros -->
       {#if money}
-        <section class="money" aria-label="Cost en euros del període">
+        <section class="money" aria-label={t.money.label}>
           <div class="money-tiles">
             <article class="tile">
-              <h3>Cost API</h3>
+              <h3>{t.money.api}</h3>
               <p class="value">{formatAmount(money.api.total)}</p>
               {#if money.api.total > 0}
                 {@render agentAmounts(money.api.byAgent)}
               {/if}
-              <p class="sub">
-                {money.api.total > 0
-                  ? 'Cost real de les crides amb clau d’API.'
-                  : 'Cap crida de pagament en aquest període.'}
-              </p>
+              <p class="sub">{money.api.total > 0 ? t.money.apiSub : t.money.apiNone}</p>
             </article>
 
             <article class="tile">
-              <h3>Valor equivalent de les subscripcions</h3>
+              <h3>{t.money.equivalent}</h3>
               <p class="value">{formatAmount(money.equivalent.total)}</p>
               {#if money.equivalent.total > 0}
                 {@render agentAmounts(money.equivalent.byAgent)}
               {/if}
-              <p class="sub">
-                {money.equivalent.total > 0
-                  ? 'Ús amb subscripció a preus d’API, sense cost afegit.'
-                  : 'Cap crida amb subscripció en aquest període.'}
-              </p>
+              <p class="sub">{money.equivalent.total > 0 ? t.money.equivalentSub : t.money.equivalentNone}</p>
             </article>
 
             <article class="tile">
-              <h3>Estalviat</h3>
+              <h3>{t.money.saved}</h3>
               <p class="value">{money.saved == null ? '—' : formatAmount(money.saved)}</p>
               <p class="sub">
                 {#if k.saved.total <= 0}
-                  Encara no hi ha estalvis en aquest període.
+                  {t.money.noSavings}
                 {:else if money.saved == null}
-                  Sense valor calculat per als {formatTokens(k.saved.total)} tokens estalviats.
+                  {t.money.savedNoValue(formatTokens(k.saved.total))}
                 {:else}
-                  Valor aproximat dels <strong>{formatTokens(k.saved.total)}</strong> tokens estalviats, cada tipus al preu
-                  del que s'ha evitat.
+                  <RichText text={t.money.savedValue(formatTokens(k.saved.total))} />
                 {/if}
               </p>
             </article>
@@ -435,15 +418,15 @@
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 7.2v4M8 4.8v.01" />
                 </svg>
-                Imports en euros · {fxNote(money.fx)}
+                {t.money.inEuros(fxNote(money.fx) ?? '')}
               </p>
             {/if}
             {#if money.unpriced.total > 0}
               <p class="note unpriced">
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5l6 11H2zM8 6.5v3.5M8 12v.01" /></svg>
                 <span>
-                  {unpricedText(money.unpriced.total)}: afegeix-ne el preu a
-                  <button type="button" class="link" onclick={openSettings}>Configuració</button>
+                  {t.money.unpriced.before(unpricedText(money.unpriced.total))}
+                  <button type="button" class="link" onclick={openSettings}>{t.money.unpriced.link}</button>
                 </span>
               </p>
             {/if}
@@ -454,19 +437,15 @@
       <!-- This month: subscription windows, API budgets, subscription value -->
       <section class="panel" aria-labelledby="month-title">
         <div class="panel-head">
-          <h3 id="month-title">Aquest mes</h3>
-          <p>
-            Límits de subscripció en temps real, pressupost d’API i valor obtingut{monthName
-              ? ` al ${monthName}`
-              : ''}.
-          </p>
+          <h3 id="month-title">{t.month.title}</h3>
+          <p>{monthName ? t.month.introIn(monthName) : t.month.intro}</p>
         </div>
         {#if providersError}
-          <p class="muted" role="alert">No s’ha pogut consultar l’estat dels agents. {providersError}</p>
+          <p class="muted" role="alert">{t.month.providersFailed(providersError)}</p>
         {/if}
         {#if month.length === 0}
           {#if !providersError}
-            <p class="muted">{providers === null ? 'Consultant els agents…' : 'No hi ha cap agent configurat.'}</p>
+            <p class="muted">{providers === null ? t.month.checking : t.month.noAgents}</p>
           {/if}
         {:else}
           <div class="providers">
@@ -483,7 +462,7 @@
                       <svg viewBox="0 0 16 16" aria-hidden="true">
                         {#if p.available}<path d="M3.5 8.5l3 3 6-7" />{:else}<path d="M4.5 4.5l7 7m0-7l-7 7" />{/if}
                       </svg>
-                      {p.available ? 'Disponible' : 'No disponible'}
+                      {p.available ? t.month.available : t.month.unavailable}
                     </span>
                   {/if}
                 </header>
@@ -491,13 +470,13 @@
                 {#if p?.detail}<p class="detail">{p.detail}</p>{/if}
 
                 {#if limits.length > 0}
-                  <ul class="limits" aria-label="Finestres d’ús de la subscripció">
+                  <ul class="limits" aria-label={t.month.windows}>
                     {#each limits as l (l.key)}
                       {@const reset = resetLabel(l.resetsAt, now)}
                       <li>
                         <div class="limit-head">
                           <span>{l.window}</span>
-                          <span class="pct">{l.usedPercent == null ? 'Ús desconegut' : `${Math.round(l.usedPercent)} %`}</span>
+                          <span class="pct">{l.usedPercent == null ? t.month.usageUnknown : t.month.percent(Math.round(l.usedPercent))}</span>
                         </div>
                         {#if l.usedPercent != null}
                           <Meter value={l.usedPercent} tone={l.tone} label="{c.name}, {l.window.toLowerCase()}" />
@@ -510,23 +489,19 @@
                     {/each}
                   </ul>
                 {:else if p?.mode === 'cli'}
-                  <p class="muted">Encara no hi ha informació de límits. Apareixerà després de la primera resposta.</p>
+                  <p class="muted">{t.month.noLimitsYet}</p>
                 {/if}
 
                 {#if c.budget || c.plan}
-                  <ul class="limits money-rows" aria-label="Despesa del mes">
+                  <ul class="limits money-rows" aria-label={t.month.spend}>
                     {#if c.budget}{@render moneyRow(c.budget)}{/if}
                     {#if c.plan}{@render moneyRow(c.plan)}{/if}
                   </ul>
                 {:else if p && limits.length === 0 && p.mode !== 'cli'}
-                  <p class="muted">
-                    {p.mode === 'api'
-                      ? 'Amb clau d’API no hi ha límits de subscripció: es paga per token.'
-                      : 'Mode simulat: sense límits ni cost real.'}
-                  </p>
+                  <p class="muted">{p.mode === 'api' ? t.month.apiNoLimits : t.month.demoNoLimits}</p>
                 {/if}
                 {#if c.unpriced > 0}
-                  <p class="muted small">Aquest mes, {unpricedText(c.unpriced)} no hi compten.</p>
+                  <p class="muted small">{t.month.unpriced(c.unpriced, unpricedText(c.unpriced))}</p>
                 {/if}
               </article>
             {/each}
@@ -535,23 +510,21 @@
       </section>
 
       <!-- Charts -->
-      <section class="charts" aria-label="Gràfics">
+      <section class="charts" aria-label={t.charts.label}>
         {#if money}
           <div class="wide">
             <ChartCard
-              title="Cost per dia"
-              subtitle="Cost d’API i valor de l’ús amb subscripció, a preus d’API"
+              title={t.charts.cost.title}
+              subtitle={t.charts.cost.subtitle}
               legend={AGENT_SERIES}
               table={costTable}
               empty={isEmpty(costDays)}
-              emptyText={money.unpriced.total > 0
-                ? 'Encara no hi ha cost en aquest període: les crides fetes no tenen preu conegut.'
-                : 'Encara no hi ha cost en aquest període.'}
+              emptyText={money.unpriced.total > 0 ? t.charts.cost.emptyUnpriced : t.charts.cost.empty}
             >
               <StackedColumns
                 data={costDays}
                 series={AGENT_SERIES}
-                label="Cost per dia i agent, en euros"
+                label={t.charts.cost.label}
                 format={formatCost}
                 tickFormat={formatEurTick}
                 integer={false}
@@ -561,66 +534,66 @@
         {/if}
 
         <ChartCard
-          title="Tokens per dia"
-          subtitle="Tokens processats per cada agent: entrada, memòria cau i sortida"
+          title={t.charts.tokens.title}
+          subtitle={t.charts.tokens.subtitle}
           legend={AGENT_SERIES}
           table={tokensTable}
           empty={isEmpty(tokenDays)}
-          emptyText="Encara no hi ha consum en aquest període."
+          emptyText={t.noUsage}
         >
           <StackedColumns
             data={tokenDays}
             series={AGENT_SERIES}
-            label="Tokens processats per dia i agent"
+            label={t.charts.tokens.label}
             format={formatInt}
             tickFormat={formatCompact}
           />
         </ChartCard>
 
         <ChartCard
-          title="Estalvi per dia"
-          subtitle="Tokens estalviats per cada tècnica"
+          title={t.charts.savings.title}
+          subtitle={t.charts.savings.subtitle}
           legend={SAVING_SERIES}
           table={savingsTable}
           empty={isEmpty(savingDays)}
-          emptyText="Encara no hi ha estalvis en aquest període. Apareixeran amb la memòria cau, la compactació o el consens."
+          emptyText={t.charts.savings.empty}
         >
           <StackedColumns
             data={savingDays}
             series={SAVING_SERIES}
-            label="Tokens estalviats per dia i tècnica"
+            label={t.charts.savings.label}
             format={formatInt}
             tickFormat={formatCompact}
           />
         </ChartCard>
 
         <ChartCard
-          title="Latència per agent"
-          subtitle="Temps de resposta complet: mediana i percentil 95"
+          title={t.charts.latency.title}
+          subtitle={t.charts.latency.subtitle}
           legend={AGENT_SERIES}
           table={latencyTable}
           empty={isEmpty(latency)}
-          emptyText="Encara no hi ha respostes per mesurar la latència."
+          emptyText={t.charts.latency.empty}
         >
-          <HBars data={latency} series={AGENT_SERIES} label="Latència per agent" format={formatMs} />
+          <HBars data={latency} series={AGENT_SERIES} label={t.charts.latency.title} format={formatMs} />
         </ChartCard>
 
         <ChartCard
-          title="Torns per mode"
-          subtitle="Quantes vegades has fet servir cada mode"
+          title={t.charts.turns.title}
+          subtitle={t.charts.turns.subtitle}
           table={turnsTable}
           empty={isEmpty(turns)}
-          emptyText="Encara no hi ha torns en aquest període."
+          emptyText={t.charts.turns.empty}
         >
-          <HBars data={turns} series={COUNT_SERIES} label="Torns per mode" format={formatInt} />
+          <HBars data={turns} series={COUNT_SERIES} label={t.charts.turns.title} format={formatInt} />
         </ChartCard>
       </section>
 
       <!-- Saving techniques -->
       <section class="panel" aria-labelledby="techniques-title">
         <div class="panel-head">
-          <h3 id="techniques-title">Com estalviem tokens</h3>
-          <p>Les tècniques que redueixen el consum sense perdre qualitat.</p>
+          <h3 id="techniques-title">{t.techniques.title}</h3>
+          <p>{t.techniques.intro}</p>
         </div>
         <ul class="techniques">
           {#each SAVING_KINDS as kind (kind)}
@@ -628,19 +601,20 @@
               <span class="swatch" style:background="var(--saving-{kind.replace('_', '-')})"></span>
               <div>
                 <h4>{SAVING_LABEL[kind]}</h4>
-                <p>{TECHNIQUE_TEXT[kind]}</p>
+                <p>{t.techniques.kinds[kind]}</p>
               </div>
             </li>
           {/each}
           <li>
             <span class="swatch neutral"></span>
             <div>
-              <h4>Memòria cau del proveïdor</h4>
+              <h4>{t.techniques.providerCache}</h4>
               <p>
-                El prompt de sistema va primer i no canvia, així Anthropic i OpenAI en reaprofiten el càlcul. En aquest
-                període s’han llegit <strong>{formatTokens(k.processed.cacheRead)}</strong> tokens de la seva memòria cau i
-                se n’hi han escrit <strong>{formatTokens(k.processed.cacheWrite)}</strong>. Compten com a tokens processats,
-                cadascun al seu preu, i no com a estalvi.
+                <RichText
+                  text={t.techniques.providerCacheText(
+                    formatTokens(k.processed.cacheRead),
+                    formatTokens(k.processed.cacheWrite),
+                  )} />
               </p>
             </div>
           </li>

@@ -1,5 +1,5 @@
 // A line diff of two texts, for what changed between two versions of a refine turn's
-// document (docs/adr/0010-mode-perfecciona.md: the owner sees every version's diff, so
+// document (docs/adr/0010-refine-mode.md: the owner sees every version's diff, so
 // growth is visible). Small on purpose, instead of a dependency: Myers' O(ND) algorithm
 // (the fewest lines removed and added) on the lines between a common start and end.
 // A round changes at most a few lines, so D is small and a long document stays quick;

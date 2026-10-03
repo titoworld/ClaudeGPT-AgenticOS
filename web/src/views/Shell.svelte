@@ -6,6 +6,7 @@
   import Sidebar from '../components/Sidebar.svelte';
   import TopBar from '../components/TopBar.svelte';
   import { app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { prefs } from '../lib/prefs.svelte';
   import { router } from '../lib/router.svelte';
   import Chat from './Chat.svelte';
@@ -20,6 +21,7 @@
     return dashboard;
   }
 
+  const t = $derived(i18n.m.app);
   const collapsed = $derived(!prefs.narrow && prefs.sidebarCollapsed);
   const drawerOpen = $derived(prefs.narrow && app.sidebarOpen);
 
@@ -47,7 +49,7 @@
   });
 
   async function drawerClosed(composerAsked: boolean): Promise<void> {
-    // E.g. «Nova conversa» asked for the composer while the page behind was inert.
+    // E.g. «New conversation» asked for the composer while the page behind was inert.
     if (composerAsked) app.focusComposer();
     await tick();
     const active = document.activeElement;
@@ -74,12 +76,12 @@
     inert={collapsed || (prefs.narrow && !app.sidebarOpen)}
     role={drawerOpen ? 'dialog' : undefined}
     aria-modal={drawerOpen ? 'true' : undefined}
-    aria-label={drawerOpen ? 'Menú' : undefined}>
+    aria-label={drawerOpen ? t.shell.menu : undefined}>
     <Sidebar />
   </div>
   {#if drawerOpen}
     <!-- Pointer only: Escape and the drawer's own button close it from the keyboard. -->
-    <button type="button" class="backdrop" tabindex="-1" aria-label="Tanca el menú" onclick={() => (app.sidebarOpen = false)}></button>
+    <button type="button" class="backdrop" tabindex="-1" aria-label={t.closeMenu} onclick={() => (app.sidebarOpen = false)}></button>
   {/if}
 
   <main class="main" inert={drawerOpen}>
@@ -87,20 +89,20 @@
     <div class="view">
       {#if router.route.name === 'dashboard'}
         {#await getDashboard()}
-          <div class="pending" aria-live="polite"><span class="spinner" aria-hidden="true"></span>Carregant el tauler…</div>
+          <div class="pending" aria-live="polite"><span class="spinner" aria-hidden="true"></span>{t.shell.dashboardLoading}</div>
         {:then mod}
           {@const Dashboard = mod.default}
           <div class="dashboard-wrap"><Dashboard /></div>
         {:catch}
           <div class="pending" role="alert">
-            No s'ha pogut carregar el tauler.
+            {t.shell.dashboardFailed}
             <button
               type="button"
               class="btn"
               onclick={() => {
                 dashboard = null;
                 router.go({ name: 'chat', id: app.convs.currentId });
-              }}>Torna a les converses</button>
+              }}>{t.shell.backToConversations}</button>
           </div>
         {/await}
       {:else}

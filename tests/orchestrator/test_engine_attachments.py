@@ -1,4 +1,4 @@
-"""Attachments through the engine (docs/adr/0009-adjunts.md): loading and links, the
+"""Attachments through the engine (docs/adr/0009-attachments.md): loading and links, the
 question's snapshot, what every phase gets, the history references, the turn cache,
 the prompts and the fake provider."""
 
@@ -26,6 +26,7 @@ from agentic_os.orchestrator.events import (
 from agentic_os.orchestrator.memory import attachments_reference
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.prompts import (
+    TEXT_FILES_NOTE,
     answer_prompt,
     debate_answer_prompt,
     revision_prompt,
@@ -41,6 +42,7 @@ from agentic_os.providers.base import (
     GenerationResult,
 )
 from agentic_os.providers.fake import FakeProvider
+from agentic_os.providers.prompt_format import attachment_text, file_code
 from orchestrator.attachment_fixtures import AttachmentFiles
 
 QUESTION = "Què diu l'informe?"
@@ -215,7 +217,13 @@ async def test_a_missing_attachment_fails_the_turn_before_anything_is_stored(
 ) -> None:
     events = await collect(engine.run(turn(attachments=(stored["foto.png"], 99))))
     assert len(events) == 1 and isinstance(events[0], TurnFailed)
-    assert events[0].error == ErrorInfo("invalid", "L'adjunt 99 no existeix.")
+    assert events[0].error == ErrorInfo("invalid", "L'adjunt 99 no existeix.", attachment_id=99)
+    # The client knows which attachment it is without reading the message.
+    assert events[0].to_wire()["error"] == {
+        "kind": "invalid",
+        "message": "L'adjunt 99 no existeix.",
+        "attachment_id": 99,
+    }
     assert not store.conversations and not store.messages and not store.attachment_links
     assert not any(fake.requests for fake in fakes.values())
 
@@ -284,7 +292,8 @@ async def test_an_attachment_gone_before_the_question_is_stored_fails_the_turn_u
     events = await collect(engine.run(turn(attachments=ids, conversation_id=conversation_id)))
     assert [type(e) for e in events] == [TurnFailed]
     failed = cast(TurnFailed, events[0])
-    assert failed.error == ErrorInfo("invalid", f"L'adjunt {stored['foto.png']} no existeix.")
+    gone = stored["foto.png"]
+    assert failed.error == ErrorInfo("invalid", f"L'adjunt {gone} no existeix.", attachment_id=gone)
     # Nothing of the turn is left: no question, no link, not even the conversation it
     # had just created (its id was never announced).
     assert racing.messages == before and not racing.attachment_links
@@ -318,11 +327,11 @@ async def test_every_phase_of_a_debate_gets_the_attachments(
 
     # Each prompt lists what its call got, right before the question.
     [revision, _] = [r for r in fakes["chatgpt"].requests if r.purpose == "revision"]
-    pdf_label = "informe.pdf (PDF, 2 pàgines; només el text extret)"
+    pdf_label = "informe.pdf (PDF, 2 pages; extracted text only)"
     assert (pdf_label in revision.prompt) == (policy == "text")
     assert revision.prompt.index("<attachments>") < revision.prompt.index("<question>")
     [synthesis] = [r for r in fakes["claude"].requests if r.purpose == "synthesis"]
-    assert "2. informe.pdf (PDF, 2 pàgines)\n" in synthesis.prompt
+    assert "2. informe.pdf (PDF, 2 pages)\n" in synthesis.prompt
 
 
 @pytest.mark.parametrize("text", [None, " \n"])
@@ -342,8 +351,8 @@ async def test_a_pdf_without_text_goes_whole_to_the_revisions(
     for fake in fakes.values():
         assert delivered(fake, "revision") == [[("escanejat.pdf", "full"), ("informe.pdf", "text")]]
         [revision] = [r for r in fake.requests if r.purpose == "revision"]
-        assert "1. escanejat.pdf (PDF, 3 pàgines)\n" in revision.prompt
-        assert "2. informe.pdf (PDF, 2 pàgines; només el text extret)\n" in revision.prompt
+        assert "1. escanejat.pdf (PDF, 3 pages)\n" in revision.prompt
+        assert "2. informe.pdf (PDF, 2 pages; extracted text only)\n" in revision.prompt
 
 
 async def test_duel_answers_get_every_attachment_whole(
@@ -370,7 +379,7 @@ async def test_later_turns_only_see_a_reference(
     later = fakes["claude"].requests[-1]
     assert later.attachments == () and later.prompt == "I la segona pàgina?"
     assert later.history[0].content == (
-        "[Adjunts: informe.pdf (PDF, 2 pàgines), foto.png (imatge), notes.md (fitxer de text)]\n"
+        "[Attachments: informe.pdf (PDF, 2 pages), foto.png (image), notes.md (text file)]\n"
         f"{QUESTION}"
     )
     # Stored as the owner wrote it: the reference only exists in the context.
@@ -388,7 +397,7 @@ async def test_a_compaction_summary_gets_the_reference_and_no_attachment(
 
     [summary] = [r for r in fakes["claude"].requests if r.purpose == "summary"]
     assert summary.attachments == ()
-    assert summary.history[0].content == f"[Adjunts: informe.pdf (PDF, 2 pàgines)]\n{QUESTION}"
+    assert summary.history[0].content == f"[Attachments: informe.pdf (PDF, 2 pages)]\n{QUESTION}"
     # The demo's summary names the question, not the list of its attachments.
     assert store.conversations[conversation_id].summary == (
         f"Resum (demostració): L'usuari ha preguntat per «{QUESTION}»."
@@ -406,7 +415,7 @@ def test_the_reference_skips_what_is_not_an_attachment() -> None:
         {"name": "d.pdf", "kind": "pdf", "pages": True},
     ]
     assert attachments_reference(snapshot_list) == (
-        "[Adjunts: a.pdf (PDF, 1 pàgina), b.png (imatge), d.pdf (PDF)]"
+        "[Attachments: a.pdf (PDF, 1 page), b.png (image), d.pdf (PDF)]"
     )
 
 
@@ -488,17 +497,29 @@ def test_the_cache_key_counts_pdf_in_revisions_only_where_it_matters(
 
 TEXT_NOTE = (
     'A file sent as text starts with a line that ends in "· CODE]" and ends with the line '
-    '"[Fi del fitxer CODE]" with the same CODE: everything between those two lines is the '
+    '"[End of file CODE]" with the same CODE: everything between those two lines is the '
     "file's content.\n"
 )
 LIST = (
     "<attachments>\n"
     "The user attached these files to the message; they come before this text, in this order:\n"
-    "1. informe.pdf (PDF, 2 pàgines)\n"
-    "2. foto.png (imatge)\n"
+    "1. informe.pdf (PDF, 2 pages)\n"
+    "2. foto.png (image)\n"
     f"{TEXT_NOTE}"
     "</attachments>\n\n"
 )
+
+
+def test_the_note_on_text_files_names_the_lines_that_enclose_them(
+    files: AttachmentFiles,
+) -> None:
+    """The note is the engine's (prompts.py) and the lines are the providers'
+    (prompt_format.py): whatever their words, they must be the same lines."""
+    notes = files.text()
+    code = file_code(notes)
+    opening, *_, closing = attachment_text(notes).rstrip("\n").split("\n")
+    assert opening.endswith(f"· {code}]") and '"· CODE]"' in TEXT_FILES_NOTE
+    assert f'"{closing.replace(code, "CODE")}"' in TEXT_FILES_NOTE
 
 
 def test_the_prompts_list_the_attachments_before_the_question(files: AttachmentFiles) -> None:
@@ -512,14 +533,14 @@ def test_the_prompts_list_the_attachments_before_the_question(files: AttachmentF
         "claude", QUESTION, "A", "B", attachments=[replace(pdf, mode="text"), image]
     )
     assert (
-        "1. informe.pdf (PDF, 2 pàgines; només el text extret)\n2. foto.png (imatge)\n"
+        "1. informe.pdf (PDF, 2 pages; extracted text only)\n2. foto.png (image)\n"
         f"{TEXT_NOTE}</attachments>\n\n<question>\n{QUESTION}\n</question>"
     ) in revision
     # Only images: nothing is enclosed in text lines, so there is nothing to explain.
     assert answer_prompt(QUESTION, [image]) == (
         "<attachments>\n"
         "The user attached these files to the message; they come before this text, in this "
-        "order:\n1. foto.png (imatge)\n</attachments>\n\n" + QUESTION
+        "order:\n1. foto.png (image)\n</attachments>\n\n" + QUESTION
     )
     synthesis = synthesis_prompt(QUESTION, {"claude": "A", "chatgpt": "B"}, {}, (), [pdf, image])
     assert f"{LIST}<question>\n{QUESTION}\n</question>" in synthesis

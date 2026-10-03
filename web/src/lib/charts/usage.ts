@@ -1,8 +1,10 @@
 // Transforms from the API's Stats / ProviderStatus into what the usage
-// dashboard renders (KPIs, chart data, subscription limits).
+// dashboard renders (KPIs, chart data, subscription limits), with its texts in the
+// language in force (lib/i18n).
 
 import { processedTokens } from '../costs';
 import { AGENT_LABEL } from '../format';
+import { i18n, textRecord } from '../i18n/index.svelte';
 import { limitLevel } from '../limits';
 import {
   AGENTS,
@@ -15,41 +17,44 @@ import {
   type TurnMode,
 } from '../protocol';
 import { axisDayLabel, dayRange, fullDayLabel, rangeEnd, utcDay } from './dates';
+import { perLocale } from './intl';
 import { positive } from './stack';
 import type { Datum, SeriesDef } from './types';
 
 export const SAVING_KINDS: readonly SavingKind[] = ['cache', 'compaction', 'early_stop', 'unchanged'];
 export { TURN_MODES };
 
-export const SAVING_LABEL: Record<SavingKind, string> = {
-  cache: 'Memòria cau',
-  compaction: 'Compactació',
-  early_stop: 'Parada per consens',
-  unchanged: 'Sense canvis',
-};
+export const SAVING_LABEL: Record<SavingKind, string> = textRecord(SAVING_KINDS, (k) => i18n.m.dashboard.savingKinds[k]);
 
-export const MODE_LABEL: Record<TurnMode, string> = { solo: 'Solo', duel: 'Duel', debate: 'Debat', refine: 'Perfecciona' };
+export const MODE_LABEL: Record<TurnMode, string> = textRecord(TURN_MODES, (m) => i18n.m.dashboard.modes[m]);
+
+// A series' label is read when it is shown (a getter), so it follows a change of language.
 
 /** Fixed categorical order (validated palette in tokens.css). */
 export const AGENT_SERIES: SeriesDef[] = AGENTS.map((a) => ({ key: a, label: AGENT_LABEL[a], color: `var(--${a})` }));
 export const SAVING_SERIES: SeriesDef[] = SAVING_KINDS.map((k) => ({
   key: k,
-  label: SAVING_LABEL[k],
+  get label() {
+    return SAVING_LABEL[k];
+  },
   color: `var(--saving-${k.replace('_', '-')})`,
 }));
 /** Single, identity-free series (turn counts): neutral ink, never a categorical hue. */
-export const COUNT_SERIES: SeriesDef[] = [{ key: 'count', label: 'Torns', color: 'var(--text-muted)' }];
+export const COUNT_SERIES: SeriesDef[] = [
+  {
+    key: 'count',
+    get label() {
+      return i18n.m.dashboard.turns;
+    },
+    color: 'var(--text-muted)',
+  },
+];
 
-const compactFmt = new Intl.NumberFormat('ca-ES', { notation: 'compact', maximumFractionDigits: 1 });
+const compactFmt = perLocale((tag) => new Intl.NumberFormat(tag, { notation: 'compact', maximumFractionDigits: 1 }));
 
-/** Axis ticks: always compact ('0', '500', '5 k', '10 k', '1,2 M'). */
+/** Axis ticks: always compact ('0', '500', '5k', '1.2m' in British English; '5 k', '1,2 M' in Catalan). */
 export function formatCompact(n: number): string {
-  return compactFmt.format(n);
-}
-
-/** '1 crida' / '3 crides' (the number formatted by the caller). */
-export function plural(n: number, one: string, many: string, formatted: string = String(n)): string {
-  return `${formatted} ${n === 1 ? one : many}`;
+  return compactFmt().format(n);
 }
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -133,9 +138,10 @@ export function dailyCost(stats: Stats, eurPerUsd: number, today: string = utcDa
 export function latencyData(stats: Stats): Datum[] {
   const lat = (a: Agent) => stats.latency?.[a];
   const pick = (v: number | null | undefined) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const t = i18n.m.dashboard.chart;
   return [
-    { key: 'p50', label: 'p50', fullLabel: 'Mediana (p50)', values: {} },
-    { key: 'p95', label: 'p95', fullLabel: 'Percentil 95 (p95)', values: {} },
+    { key: 'p50', label: 'p50', fullLabel: t.median, values: {} },
+    { key: 'p95', label: 'p95', fullLabel: t.p95, values: {} },
   ].map((row) => ({
     ...row,
     values: Object.fromEntries(AGENTS.map((a) => [a, pick(row.key === 'p50' ? lat(a)?.p50_ms : lat(a)?.p95_ms)])),
@@ -249,35 +255,27 @@ export interface ProviderCard {
   limits: LimitRow[];
 }
 
-export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = {
-  cli: 'Subscripció (CLI)',
-  api: 'Clau d’API',
-  fake: 'Simulat',
-};
+export const PROVIDER_MODE_LABEL: Record<ProviderMode, string> = textRecord(
+  ['cli', 'api', 'fake'],
+  (mode) => i18n.m.dashboard.providerModes[mode],
+);
 
-/** '5h' -> 'Finestra de 5 hores', '7d' -> 'Finestra de 7 dies'. */
+/** '5h' -> '5-hour window', '7d' -> '7-day window' (in the language in force). */
 export function windowLabel(window: string): string {
+  const t = i18n.m.dashboard.window;
   const m = /^(\d+)\s*([mhdw])$/i.exec(window.trim());
-  if (!m) return window ? `Finestra ${window}` : 'Finestra';
-  const n = Number(m[1]);
-  const unit = m[2]!.toLowerCase();
-  const words: Record<string, [string, string]> = {
-    m: ['minut', 'minuts'],
-    h: ['hora', 'hores'],
-    d: ['dia', 'dies'],
-    w: ['setmana', 'setmanes'],
-  };
-  const [one, many] = words[unit]!;
-  return `Finestra de ${n} ${n === 1 ? one : many}`;
+  if (!m) return window ? t.named(window) : t.unnamed;
+  return t.of(Number(m[1]), m[2]!.toLowerCase() as 'm' | 'h' | 'd' | 'w');
 }
 
 /** Same thresholds as the sidebar badges (limitLevel); an unknown status stays unknown below them. */
 export function limitTone(status: string, usedPercent: number | null): { tone: LimitTone; label: string } {
+  const t = i18n.m.dashboard.limitStatus;
   const level = limitLevel(status, usedPercent);
-  if (level === 'bad') return { tone: 'critical', label: 'Límit exhaurit' };
-  if (level === 'warn') return { tone: 'warning', label: 'A prop del límit' };
-  if (status === 'allowed') return { tone: 'ok', label: 'Dins del límit' };
-  return { tone: 'unknown', label: 'Estat desconegut' };
+  if (level === 'bad') return { tone: 'critical', label: t.critical };
+  if (level === 'warn') return { tone: 'warning', label: t.warning };
+  if (status === 'allowed') return { tone: 'ok', label: t.ok };
+  return { tone: 'unknown', label: t.unknown };
 }
 
 export function providerCards(providers: ProviderStatus[] | null | undefined): ProviderCard[] {
@@ -308,24 +306,26 @@ export function providerCards(providers: ProviderStatus[] | null | undefined): P
     }));
 }
 
-const resetClock = new Intl.DateTimeFormat('ca-ES', { hour: '2-digit', minute: '2-digit' });
-const resetDay = new Intl.DateTimeFormat('ca-ES', { weekday: 'short', day: 'numeric' });
-const relative = new Intl.RelativeTimeFormat('ca-ES', { numeric: 'auto' });
+const resetClock = perLocale((tag) => new Intl.DateTimeFormat(tag, { hour: '2-digit', minute: '2-digit' }));
+const resetDay = perLocale((tag) => new Intl.DateTimeFormat(tag, { weekday: 'short', day: 'numeric' }));
+const relative = perLocale((tag) => new Intl.RelativeTimeFormat(tag, { numeric: 'auto' }));
 
-/** 'Es restableix d’aquí a 2 hores (19:30)' or '… d’aquí a 3 dies (dl. 6 a les 09:00)'. */
+/** 'Resets in 2 hours (19:30)' or '… in 3 days (Mon 6 at 09:00)', in the language in force. */
 export function resetLabel(iso: string | null, now: Date = new Date()): string | null {
   if (!iso) return null;
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return null;
+  const texts = i18n.m.dashboard.resets;
   const diff = t - now.getTime();
-  if (diff <= 0) return 'Es restableix en breu';
+  if (diff <= 0) return texts.soon;
   const minutes = Math.round(diff / 60_000);
   const rel =
     minutes < 60
-      ? relative.format(Math.max(1, minutes), 'minute')
+      ? relative().format(Math.max(1, minutes), 'minute')
       : minutes < 60 * 36
-        ? relative.format(Math.round(minutes / 60), 'hour')
-        : relative.format(Math.round(minutes / 1440), 'day');
-  const clock = diff < 20 * 3_600_000 ? resetClock.format(t) : `${resetDay.format(t)} a les ${resetClock.format(t)}`;
-  return `Es restableix ${rel} (${clock})`;
+        ? relative().format(Math.round(minutes / 60), 'hour')
+        : relative().format(Math.round(minutes / 1440), 'day');
+  const time = resetClock().format(t);
+  const clock = diff < 20 * 3_600_000 ? time : texts.dayAt(resetDay().format(t), time);
+  return texts.in(rel, clock);
 }

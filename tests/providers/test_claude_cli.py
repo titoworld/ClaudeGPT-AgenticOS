@@ -23,6 +23,7 @@ import pytest
 from orchestrator.attachment_fixtures import HOSTILE_TEXT, AttachmentFiles, reserved_tags
 from portability import alive, reaped, without_platform_variables
 
+from agentic_os import i18n
 from agentic_os.config import Settings
 from agentic_os.domain import DebateOptions, Purpose, TurnOptions, Usage
 from agentic_os.orchestrator.engine import Engine
@@ -243,13 +244,13 @@ async def test_list_models_offers_the_aliases_and_what_they_resolved_to(
         ("haiku", "Claude Haiku", False),
         ("fable", "Claude Fable", False),
     ]
-    assert all(m.description.startswith("Sempre la versió més nova.") for m in models)
-    assert not any("Ara:" in m.description for m in models)
+    assert all(str(m.description).startswith("Sempre la versió més nova.") for m in models)
+    assert not any("Ara:" in str(m.description) for m in models)
 
     # The recorded system/init resolves "haiku" to a concrete model.
     await collect(provider, request(fast=True))
     haiku = next(m for m in await provider.list_models() if m.id == "haiku")
-    assert haiku.description.endswith("Ara: claude-haiku-4-5-20251001")
+    assert str(haiku.description).endswith("Ara: claude-haiku-4-5-20251001")
 
 
 async def test_list_models_with_a_configured_full_id(tmp_path: Path, fake: FakeCli) -> None:
@@ -260,7 +261,7 @@ async def test_list_models_with_a_configured_full_id(tmp_path: Path, fake: FakeC
         ("claude-opus-5-5", True),
         ("opus", False),
     ]
-    assert models[0].description == "Raonament profund i tasques llargues."
+    assert str(models[0].description) == "Raonament profund i tasques llargues."
 
 
 async def test_environment_is_allow_listed(
@@ -325,6 +326,35 @@ async def test_rejected_rate_limit(fake: FakeCli, provider: ClaudeCliProvider) -
     limits = {limit.window: limit for limit in (await provider.status()).limits}
     assert limits["5h"].status == "rejected" and limits["5h"].used_percent == 100.0
     assert limits["7d"].status == "allowed"
+
+
+@pytest.mark.parametrize(
+    ("lang", "message"),
+    [
+        (
+            "en",
+            "The Claude subscription has reached its usage limit. It resets on 27/09 at 19:48 UTC.",
+        ),
+        (
+            "es",
+            "Se ha alcanzado el límite de uso de la suscripción de Claude. "
+            "Se restablece el 27/09 a las 19:48 UTC.",
+        ),
+        (
+            "ca",
+            "S'ha arribat al límit d'ús de la subscripció de Claude. "
+            "Es restableix el 27/09 a les 19:48 UTC.",
+        ),
+    ],
+)
+async def test_the_usage_limit_is_told_in_the_language_of_the_turn(
+    lang: i18n.Lang, message: str, fake: FakeCli, provider: ClaudeCliProvider
+) -> None:
+    """The turn's task carries the language of the connection that started it."""
+    fake.scenario(stream="stream_rate_limited.jsonl")
+    with i18n.use(lang):
+        error = await expect_error(provider, request())
+    assert (error.kind, error.message) == ("rate_limit", message)
 
 
 async def test_overloaded_is_retryable(fake: FakeCli, provider: ClaudeCliProvider) -> None:
@@ -425,7 +455,7 @@ async def test_missing_cli(tmp_path: Path, fake: FakeCli) -> None:
     assert error.kind == "unavailable" and "no trobada" in error.message
     await provider.prewarm(request())  # never raises
     status = await provider.status()
-    assert not status.available and status.detail == "CLI de Claude no trobada"
+    assert not status.available and str(status.detail) == "CLI de Claude no trobada"
     await provider.aclose()
 
 
@@ -696,9 +726,49 @@ async def test_status(
     fake.scenario(status={"json": status, "exit_code": 0 if status["loggedIn"] else 1})
     result = await provider.status()
     assert (result.agent, result.mode, result.model) == ("claude", "cli", "opus")
-    assert (result.available, result.detail) == (available, detail)
+    assert (result.available, str(result.detail)) == (available, detail)
     assert result.limits == ()
     await provider.status()  # cached
+    assert len([c for c in fake.calls() if c["phase"] == "status"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "english", "spanish"),
+    [
+        (
+            {"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"},
+            "Subscription active (max)",
+            "Suscripción activa (max)",
+        ),
+        (
+            {"loggedIn": False, "authMethod": "none"},
+            "Not logged in: put the token from “claude setup-token” in "
+            "CLAUDE_CODE_OAUTH_TOKEN (.env) and run “docker compose up -d”, or run "
+            "“claude auth login” on the server",
+            "Sin sesión: pon el token de «claude setup-token» en CLAUDE_CODE_OAUTH_TOKEN "
+            "(.env) y ejecuta «docker compose up -d», o ejecuta «claude auth login» en el "
+            "servidor",
+        ),
+    ],
+)
+async def test_the_cached_status_speaks_the_language_of_whoever_reads_it(
+    fake: FakeCli,
+    provider: ClaudeCliProvider,
+    status: dict[str, Any],
+    english: str,
+    spanish: str,
+) -> None:
+    """The status is kept for every client (docs/adr/0011-internationalization.md): the
+    client that asks first does not choose the language of the others."""
+    fake.scenario(status={"json": status, "exit_code": 0 if status["loggedIn"] else 1})
+    with i18n.use("es"):
+        first = await provider.status()
+    with i18n.use("en"):
+        second = await provider.status()  # cached
+        assert str(second.detail) == english
+    assert second.detail is first.detail
+    with i18n.use("es"):
+        assert str(first.detail) == spanish
     assert len([c for c in fake.calls() if c["phase"] == "status"]) == 1
 
 
@@ -708,7 +778,7 @@ async def test_status_times_out(
     monkeypatch.setattr(claude_cli, "STATUS_TIMEOUT_SECONDS", 0.3)
     fake.scenario(status={"json": {"loggedIn": True}, "delay": 5})
     result = await provider.status()
-    assert not result.available and result.detail == "La CLI de Claude no respon"
+    assert not result.available and str(result.detail) == "La CLI de Claude no respon"
 
 
 # -- helpers ----------------------------------------------------------------------------------
@@ -885,7 +955,7 @@ async def test_a_refusal_through_the_engine_is_never_stored_nor_cached(
     ]
 
 
-# -- attachments (docs/adr/0009-adjunts.md) ------------------------------------------------
+# -- attachments (docs/adr/0009-attachments.md) ------------------------------------------------
 
 
 def base64_of(attachment: Attachment) -> str:
@@ -922,11 +992,11 @@ async def test_attachments_are_content_blocks_before_the_transcript(
         },
         {
             "type": "text",
-            "text": f"[Fitxer: annex.pdf · {a}]\n--- Pàgina 1 ---\nAnnex.\n[Fi del fitxer {a}]\n",
+            "text": f"[File: annex.pdf · {a}]\n--- Pàgina 1 ---\nAnnex.\n[End of file {a}]\n",
         },
         {
             "type": "text",
-            "text": f"[Fitxer: notes.md · {n}]\n# Notes\n\n- u < v\n[Fi del fitxer {n}]\n",
+            "text": f"[File: notes.md · {n}]\n# Notes\n\n- u < v\n[End of file {n}]\n",
         },
         {"type": "text", "text": render_transcript(req)},
     ]
@@ -952,8 +1022,8 @@ async def test_a_pdf_sent_as_text_without_any_says_so(
     assert run["stdin"]["message"]["content"][0] == {
         "type": "text",
         "text": (
-            f"[Fitxer: escanejat.pdf · {code}]\n"
-            f"[No se n'ha pogut extreure el text d'aquest PDF.]\n[Fi del fitxer {code}]\n"
+            f"[File: escanejat.pdf · {code}]\n"
+            f"[No text could be extracted from this PDF.]\n[End of file {code}]\n"
         ),
     }
 
@@ -975,7 +1045,7 @@ async def test_a_hostile_file_cannot_pass_for_the_prompt(
     assert transcript == {"type": "text", "text": render_transcript(req)}
     for block, attachment in zip(blocks, (hostile, pdf), strict=True):
         assert block["type"] == "text"
-        assert block["text"].endswith(f"\n[Fi del fitxer {file_code(attachment)}]\n")
+        assert block["text"].endswith(f"\n[End of file {file_code(attachment)}]\n")
         assert not reserved_tags(block["text"])
     # Every tag the model reads comes from the app's own prompt.
     assert reserved_tags("".join(block["text"] for block in content)) == reserved_tags(
@@ -1053,7 +1123,7 @@ async def test_each_phase_of_a_debate_sends_its_blocks(
     code = file_code(pdf)
     as_text = {
         "type": "text",
-        "text": f"[Fitxer: informe.pdf · {code}]\n{pdf.text}\n[Fi del fitxer {code}]\n",
+        "text": f"[File: informe.pdf · {code}]\n{pdf.text}\n[End of file {code}]\n",
     }
     # Prewarmed processes start before their calls: tell the phases by their prompt.
     by_phase = {
@@ -1067,7 +1137,7 @@ async def test_each_phase_of_a_debate_sends_its_blocks(
     [answer], [revision], [synthesis] = by_phase.values()
     assert answer[0] == document and synthesis[0] == document
     assert revision[0] == as_text
-    assert "informe.pdf (PDF, 2 pàgines; només el text extret)" in revision[-1]["text"]
+    assert "informe.pdf (PDF, 2 pages; extracted text only)" in revision[-1]["text"]
     assert [len(blocks) for blocks in (answer, revision, synthesis)] == [2, 2, 2]
 
 

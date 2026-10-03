@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n, LOCALE_KEY } from '../i18n/index.svelte';
 import { LIMIT_WARN_PERCENT } from '../limits';
 import type { ProviderStatus, Stats, Usage } from '../protocol';
 import {
@@ -11,7 +12,6 @@ import {
   kpis,
   latencyData,
   limitTone,
-  plural,
   providerCards,
   resetLabel,
   SAVING_SERIES,
@@ -128,7 +128,7 @@ describe('categorical series', () => {
     expect(turnsData(stats()).map((x) => [x.label, x.values.count])).toEqual([
       ['Solo', 2],
       ['Duel', 1],
-      ['Debat', 4],
+      ['Consell', 4],
       ['Perfecciona', 3],
     ]);
   });
@@ -300,8 +300,47 @@ describe('formatters', () => {
   });
 
   it('pluralises', () => {
-    expect(plural(1, 'crida', 'crides')).toBe('1 crida');
-    expect(plural(3, 'crida', 'crides', '3')).toBe('3 crides');
-    expect(plural(0, 'error', 'errors')).toBe('0 errors');
+    const t = i18n.m.dashboard.kpis;
+    expect(t.calls(1, '1')).toBe('1 crida');
+    expect(t.calls(3, '3')).toBe('3 crides');
+    expect(t.errors(0, '0')).toBe('0 errors');
+  });
+});
+
+describe('the limits and charts in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it('names the windows, their status and when they reset', () => {
+    const now = new Date('2026-09-27T18:00:00Z');
+    i18n.set('en');
+    expect(windowLabel('5h')).toBe('5-hour window');
+    expect(windowLabel('1w')).toBe('1-week window');
+    expect(windowLabel('monthly')).toBe('monthly window');
+    expect(limitTone('allowed', 10)).toEqual({ tone: 'ok', label: 'Within the limit' });
+    expect(limitTone('rejected', null).label).toBe('Limit reached');
+    expect(resetLabel('2026-09-27T17:00:00Z', now)).toBe('Resets soon');
+    expect(resetLabel('2026-09-27T20:00:00Z', now)).toMatch(/^Resets in 2 hours \(\d{2}:\d{2}\)$/);
+    expect(resetLabel('2026-09-30T18:00:00Z', now)).toMatch(/^Resets in 3 days \(.+ at \d{2}:\d{2}\)$/);
+    i18n.set('es');
+    expect(windowLabel('1h')).toBe('Ventana de 1 hora');
+    expect(windowLabel('7d')).toBe('Ventana de 7 días');
+    expect(limitTone('warning', 90).label).toBe('Cerca del límite');
+    expect(resetLabel('2026-09-27T18:30:00Z', now)).toMatch(/^Se restablece dentro de 30 minutos \(\d{2}:\d{2}\)$/);
+    expect(resetLabel('2026-09-30T18:00:00Z', now)).toMatch(/dentro de 3 días \(.+ a las \d{2}:\d{2}\)$/);
+  });
+
+  it('labels the series, the modes and the latency rows, and formats the ticks', () => {
+    i18n.set('en');
+    expect(SAVING_SERIES.map((s) => s.label)).toEqual(['Cache', 'Compaction', 'Stop by consensus', 'No changes']);
+    expect(turnsData(stats()).map((d) => d.label)).toEqual(['Solo', 'Duel', 'Council', 'Refine']);
+    expect(latencyData(stats()).map((d) => d.fullLabel)).toEqual(['Median (p50)', '95th percentile (p95)']);
+    expect(formatCompact(1_200_000)).toMatch(/^1\.2m$/i);
+    i18n.set('es');
+    expect(SAVING_SERIES.map((s) => s.label)).toEqual(['Caché', 'Compactación', 'Parada por consenso', 'Sin cambios']);
+    expect(turnsData(stats()).map((d) => d.label)).toEqual(['Solo', 'Duelo', 'Consejo', 'Perfecciona']);
+    expect(formatCompact(1_200_000).replace(/ /g, ' ')).toBe('1,2 M');
   });
 });

@@ -1,4 +1,4 @@
-"""The replies of a refine turn (docs/adr/0010-mode-perfecciona.md), read strictly: a
+"""The replies of a refine turn (docs/adr/0010-refine-mode.md), read strictly: a
 review's proposed changes and score, and the version an edit writes with its changelog.
 A document may quote the tags it is written between, and the live stream of a reply
 always ends up as exactly what is stored."""

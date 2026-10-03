@@ -350,7 +350,7 @@ async def test_consensus_stored_by_the_engine_takes_precedence(store: SqliteStor
 
 
 async def test_refine_turns_are_counted_and_are_not_debates(store: SqliteStore) -> None:
-    """A refine turn (docs/adr/0010-mode-perfecciona.md) counts in ``turns.refine``; its
+    """A refine turn (docs/adr/0010-refine-mode.md) counts in ``turns.refine``; its
     final version is a synthesis, but it is no debate: it never counts for consensus."""
     conversation_id = await store.create_conversation("Perfecciona")
     for _ in range(2):

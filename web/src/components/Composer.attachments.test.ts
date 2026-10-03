@@ -1,4 +1,4 @@
-// Attaching files in the composer (docs/PROTOCOL.md «Adjunts»): the attach button and its
+// Attaching files in the composer (docs/PROTOCOL.md "Attachments"): the attach button and its
 // file picker, dropping files on the composer and pasting images; the cards and their
 // states; a send that waits for the uploads and then sends their ids with the question
 // (turn.start `attachments`); and a question the server did not take coming back with its

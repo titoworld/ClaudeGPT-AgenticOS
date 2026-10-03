@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import DebateOptions, RefineOptions, TurnOptions
 from agentic_os.fx import FxRate
 from agentic_os.pricing import ModelPrice
@@ -431,3 +432,60 @@ def test_timestamps_are_fixed_width_utc() -> None:
     parsed = parse_ts("2026-01-02T01:04:05.678Z")
     assert parsed == datetime(2026, 1, 2, 1, 4, 5, 678_000, tzinfo=UTC)
     assert parsed.tzinfo is UTC
+
+
+# -- languages (docs/adr/0011-internationalization.md) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("wire", "texts"),
+    [
+        (
+            {"fx": {"eur_per_usd": 7}},
+            {
+                "en": '"fx.eur_per_usd" must be a number between 0.2 and 5.',
+                "es": "«fx.eur_per_usd» debe ser un número entre 0,2 y 5.",
+                "ca": "«fx.eur_per_usd» ha de ser un nombre entre 0,2 i 5.",
+            },
+        ),
+        (
+            {"plans_eur": {"chatgpt": -1}},
+            {
+                "en": '"plans_eur.chatgpt" must be a number between 0 and 100,000.',
+                "es": "«plans_eur.chatgpt» debe ser un número entre 0 y 100.000.",
+                "ca": "«plans_eur.chatgpt» ha de ser un nombre entre 0 i 100.000.",
+            },
+        ),
+        (
+            {"debate": {"rounds": 9}},
+            {
+                "en": '"debate.rounds" must be an integer between 0 and 4.',
+                "es": "«debate.rounds» debe ser un entero entre 0 y 4.",
+                "ca": "«debate.rounds» ha de ser un enter entre 0 i 4.",
+            },
+        ),
+        (
+            {"prices": {"m": {"input": -1, "output": 0, "cache_read": 0, "cache_write": 0}}},
+            {
+                "en": '"prices.m": Invalid price for "input": it must be a number ≥ 0.',
+                "es": "«prices.m»: Precio no válido para «input»: debe ser un número ≥ 0.",
+                "ca": "«prices.m»: Preu invàlid per a «input»: ha de ser un nombre ≥ 0.",
+            },
+        ),
+        (
+            {"default_mode": "refine"},
+            {
+                "en": 'The default mode cannot be "refine".',
+                "es": "El modo por defecto no puede ser «refine».",
+                "ca": "El mode per defecte no pot ser «refine».",
+            },
+        ),
+    ],
+)
+def test_settings_errors_speak_the_language_in_force(
+    wire: dict[str, Any], texts: dict[i18n.Lang, str]
+) -> None:
+    for lang, text in texts.items():
+        with i18n.use(lang), pytest.raises(ValueError) as exc:
+            RuntimeSettings.from_wire(wire)
+        assert str(exc.value) == text

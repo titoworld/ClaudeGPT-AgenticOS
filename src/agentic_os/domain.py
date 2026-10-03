@@ -21,7 +21,7 @@ critique each other for up to N rounds (early stop on consensus) and one of them
 synthesizes the final answer. refine («Perfecciona»): both answer, one of them merges
 the answers into a document, and round after round both review it and the editor writes
 its next version, until the owner stops it, nobody finds anything left to change or a
-limit is reached (docs/adr/0010-mode-perfecciona.md)."""
+limit is reached (docs/adr/0010-refine-mode.md)."""
 
 MessageKind = Literal["question", "answer", "revision", "synthesis"]
 """question: the user's message. answer: first answer of an agent in a turn.
@@ -30,7 +30,7 @@ synthesis: final answer of a debate."""
 
 Purpose = Literal["answer", "revision", "synthesis", "summary", "check"]
 """Why a model is called: a message of the turn (answer, revision, synthesis), the
-compaction summary, or Claude's check of a PDF's text for ChatGPT (docs/adr/0009-adjunts.md)."""
+compaction summary, or Claude's check of a PDF's text for ChatGPT (docs/adr/0009-attachments.md)."""
 
 SavingKind = Literal["cache", "compaction", "early_stop", "unchanged"]
 
@@ -58,7 +58,7 @@ class Usage:
     def processed_tokens(self) -> int:
         """Every token the call processed and was billed for: input, cache reads, cache
         writes and output. Reasoning is part of the output, so it is never added again
-        (docs/adr/0008-recompte-de-tokens.md)."""
+        (docs/adr/0008-token-accounting.md)."""
         return (
             self.input_tokens
             + self.cache_read_tokens
@@ -105,6 +105,14 @@ RefineStopReason = Literal["owner", "converged", "unchanged", "max_rounds", "bud
 """Why a refine turn ended with its last version: the owner stopped it, both agents
 scored it above the threshold without a defect in consecutive rounds, neither found
 anything left to change, the rounds or the budget ran out, or both agents failed."""
+
+RefineReasonCode = Literal[
+    "over_budget", "incomplete", "identical", "nothing_to_change", "failed_round"
+]
+"""Why a round of a refine turn wrote no new version, as a code (``reason_code``, next to
+the ``reason`` written for people): its version went over the word limit, the editor wrote
+no complete version, the version was the same as the previous one, neither agent found
+anything to change, or the models failed and the round wrote no version."""
 
 REFINE_MAX_CHANGES: Final = 5
 """Changes a review may propose and an edit may apply in one round."""

@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Live progress of a Consell turn: Respostes -> Revisió 1..N -> Síntesi.
+  // Live progress of a Council turn: Answers -> Review 1..N -> Synthesis.
   import { debateSteps } from '../lib/debate-steps';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { isTerminal, type TurnView } from '../lib/turns.svelte';
 
   interface Props {
@@ -23,7 +24,7 @@
 
 <div class="stepper" class:running={!isTerminal(turn.status)}>
   <div class="rail" aria-hidden="true"><span class="rail-fill" style:width="{fill * 100}%"></span></div>
-  <ol aria-label="Progrés del consell">
+  <ol aria-label={i18n.m.turn.steps.label}>
     {#each steps as step (step.key)}
       <li class={step.state} aria-current={step.state === 'active' ? 'step' : undefined}>
         <span class="node" aria-hidden="true"></span>

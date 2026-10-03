@@ -1,77 +1,88 @@
-# Protocol client ↔ servidor
+# Client ↔ server protocol
 
-Contracte entre el frontend (`web/`) i el backend (`src/agentic_os/server/`). Tot és JSON en UTF-8. Els noms de camps són en anglès i en `snake_case`. Els tipus TypeScript equivalents són a `web/src/lib/protocol.ts`.
+The contract between the frontend (`web/`) and the backend (`src/agentic_os/server/`). Everything is JSON in UTF-8. Field names are in English and in `snake_case`. The equivalent TypeScript types are in `web/src/lib/protocol.ts`.
 
-## Autenticació i seguretat comuna
+## Authentication and common security
 
-- Sessió amb una cookie `__Host-aos_session` (HttpOnly, Secure, SameSite=Strict, Path=/). En desenvolupament sense HTTPS (`AOS_SECURE_COOKIES=false`) la cookie es diu `aos_session` i no és `Secure`. La sessió caduca després de `AOS_SESSION_IDLE_HOURS` sense activitat (72 h) i als `AOS_SESSION_MAX_DAYS` (30 dies).
-- Activitat: només les accions del propietari allarguen la caducitat per inactivitat (iniciar sessió, obrir una conversa, desar, esborrar, canviar un nom, `turn.start`, `turn.stop`, `turn.cancel`...). Les peticions REST que el client fa pel seu compte, sense cap acció del propietari (els refrescos després d'un `hello` o d'una reconnexió, els refrescos periòdics i els reintents), porten la capçalera `X-AOS-Background: 1`. Per a aquestes, el servidor comprova la sessió només en lectura, com un `ping`: respon igual (`401` si ja no és vàlida), però no allarga la caducitat. Així, una pestanya oberta sense ús no manté la sessió viva. El client també posa la capçalera a tots els `POST /api/auth/logout`, perquè un logout que falla no allargui la sessió (si funciona, la tanca igualment). Sense la capçalera, o amb un altre valor, la petició compta com a activitat. L'*handshake* del WebSocket també és només de lectura (vegeu [WebSocket](#websocket-apiws)).
-- Dispositiu conegut: cada inici de sessió correcte posa també una cookie `__Host-aos_device` (HttpOnly, Secure, SameSite=Strict, Path=/; sense HTTPS es diu `aos_device` i no és `Secure`) amb un testimoni aleatori que dura 1 any i se substitueix per un de nou a cada inici de sessió. El logout la conserva; `agentic-os init` i `agentic-os reset-sessions` obliden tots els dispositius. Un intent d'inici de sessió que la porta només es limita pel comptador d'errors d'aquell dispositiu (no pel de l'adreça ni pel global), de manera que ningú no pot bloquejar el propietari des d'un navegador on ja ha entrat.
-- Totes les rutes sota `/api/` requereixen sessió, excepte `GET /api/health`, `GET /api/auth/state` i `POST /api/auth/login`.
-- Les peticions que canvien estat (`POST`, `PUT`, `PATCH`, `DELETE`) i l'*handshake* del WebSocket han de portar una capçalera `Origin` present a `Settings.allowed_origins`: la d'`AOS_PUBLIC_ORIGIN` o una d'`AOS_EXTRA_ORIGINS`. Si no, la petició rep `403`. El WebSocket, en canvi, s'accepta i es tanca de seguida amb el codi `4403`, perquè el navegador en vegi el motiu: d'un *handshake* rebutjat no en veu cap.
-- Errors HTTP: cos `{"detail": "missatge en català"}`. `400` si el client talla la connexió abans d'enviar tot el cos, `401` sense sessió, `403` origen no permès, `404`, `408` si el cos no arriba sencer en 15 s (des que el servidor el comença a llegir; 120 s a `PUT /api/attachments`), `409` si la configuració ha canviat des que el client la va llegir (`PUT /api/settings`, amb `settings` al cos) o si l'adjunt que s'esborra ja s'ha enviat (`DELETE /api/attachments/{id}`), `413` cos massa gran: com a molt 1 MiB, o 4 KiB a `POST /api/auth/login` (l'única ruta que es llegeix sense sessió), o 20 MB a `PUT /api/attachments` (cada tipus de fitxer en té un de més baix: vegeu «Adjunts»), pel `Content-Length` o comptat mentre arriba; el `detail` diu el límit que s'ha aplicat (`La petició és massa gran (màxim 1 MiB).`, `La petició és massa gran (màxim 4 KiB).` o `La petició és massa gran (màxim 20 MB).`), `415` tipus de fitxer no admès (només els adjunts), `422` validació (també els nombres fora de rang, per grans que siguin; vegeu «Validació de l'entrada»), `429` massa intents (amb capçalera `Retry-After` i camp `retry_after` en segons), `507` el servidor no té espai al disc per desar un adjunt.
-- Validació de l'entrada: els identificadors de conversa i d'adjunt (a la ruta, a `before`, i al `conversation_id` i els `attachments` del WebSocket) han de ser enters d'1 a 2^63 − 1, el màxim de SQLite; si no, `422` (`Dades no vàlides: «conversation_id».`, `«attachment_id»` o `«before»`). El text dels cossos JSON (claus i valors) s'ha de poder codificar en UTF-8: un substitut solitari, que en JSON s'escriu `"\ud800"` i és JSON vàlid, dona `422` amb `La petició conté text que no és UTF-8 vàlid.` i no es desa res. Les parelles de substituts, com `"\ud83d\ude00"` (😀), són text vàlid. L'única excepció és `POST /api/auth/login`: una contrasenya o un codi amb aquest text són credencials incorrectes (`401`), i l'intent compta per al bloqueig per intents fallits. Els missatges d'error no inclouen mai els missatges interns de Python.
-- Una resposta que surt abans que el servidor hagi rebut tot el cos de la petició (`403`, `401`, `413` pel `Content-Length`, `429`, `408`, o un cos enviat a una ruta que no el llegeix) porta `Connection: close` i el servidor tanca la connexió: el client no la pot reutilitzar. Les peticions sense cos o amb el cos llegit sencer mantenen la connexió.
+- Session with a `__Host-aos_session` cookie (HttpOnly, Secure, SameSite=Strict, Path=/). In development without HTTPS (`AOS_SECURE_COOKIES=false`) the cookie is called `aos_session` and is not `Secure`. The session expires after `AOS_SESSION_IDLE_HOURS` without activity (72 h) and, in any case, after `AOS_SESSION_MAX_DAYS` (30 days).
+- Activity: only the owner's actions extend the idle expiry (logging in, opening a conversation, saving, deleting, renaming, `turn.start`, `turn.stop`, `turn.cancel`...). The REST requests the client makes on its own, without any action of the owner (the refreshes after a `hello` or a reconnection, the periodic refreshes and the retries), carry the header `X-AOS-Background: 1`. For these, the server checks the session read-only, like a `ping`: it answers the same way (`401` if the session is no longer valid), but does not extend the expiry. That way, a tab left open and unused does not keep the session alive. The client also sets the header on every `POST /api/auth/logout`, so that a logout that fails does not extend the session (if it works, it ends the session anyway). Without the header, or with another value, the request counts as activity. The WebSocket handshake is read-only too (see [WebSocket](#websocket-apiws)).
+- Known device: every successful login also sets a `__Host-aos_device` cookie (HttpOnly, Secure, SameSite=Strict, Path=/; without HTTPS it is called `aos_device` and is not `Secure`) holding a random token that lasts 1 year and is replaced by a new one at every login. Logging out keeps it; `agentic-os init` and `agentic-os reset-sessions` forget every device. A login attempt that carries it is limited only by that device's failure counter (not by the address's nor by the global one), so nobody can lock the owner out of a browser where they have already logged in.
+- Every route under `/api/` requires a session, except `GET /api/health`, `GET /api/auth/state` and `POST /api/auth/login`.
+- Requests that change state (`POST`, `PUT`, `PATCH`, `DELETE`) and the WebSocket handshake must carry an `Origin` header listed in `Settings.allowed_origins`: that of `AOS_PUBLIC_ORIGIN` or one of `AOS_EXTRA_ORIGINS`. Otherwise the request gets `403`. The WebSocket, instead, is accepted and closed at once with code `4403`, so that the browser sees why: it sees no reason at all for a rejected handshake.
+- HTTP errors: body `{"detail": "message in the client's language"}` (see [Languages](#languages)). `400` if the client drops the connection before sending the whole body, `401` without a session, `403` origin not allowed, `404`, `408` if the body does not arrive whole within 15 s (from when the server starts reading it; 120 s on `PUT /api/attachments`), `409` if the settings have changed since the client read them (`PUT /api/settings`, with `settings` in the body) or if the attachment being deleted has already been sent (`DELETE /api/attachments/{id}`), `413` body too large: at most 1 MiB, or 4 KiB on `POST /api/auth/login` (the only route read without a session), or 20 MB on `PUT /api/attachments` (each file type has a lower one: see [Attachments](#attachments)), by the `Content-Length` or counted as it arrives; the `detail` names the limit applied (`The request is too large (maximum 1 MiB).`, `The request is too large (maximum 4 KiB).` or `The request is too large (maximum 20 MB).`), `415` file type not supported (attachments only), `422` validation (numbers out of range too, however large; see *Input validation* below), `429` too many attempts (with a `Retry-After` header and a `retry_after` field in seconds), `507` the server has no disk space left to store an attachment.
+- Input validation: conversation and attachment ids (in the path, in `before`, and in the WebSocket's `conversation_id` and `attachments`) must be integers from 1 to 2^63 − 1, the SQLite maximum; otherwise `422` (`Invalid data: "conversation_id".`, `"attachment_id"` or `"before"`). The text of JSON bodies (keys and values) must be encodable in UTF-8: a lone surrogate, which JSON writes as `"\ud800"` and which is valid JSON, gives `422` with `The request contains text that is not valid UTF-8.` and nothing is stored. Surrogate pairs, like `"😀"` (😀), are valid text. The only exception is `POST /api/auth/login`: a password or a code with such text are wrong credentials (`401`), and the attempt counts towards the lockout after failed attempts. Error messages never include Python's internal messages.
+- A response sent before the server has received the whole request body (`403`, `401`, `413` by the `Content-Length`, `429`, `408`, or a body sent to a route that does not read it) carries `Connection: close`, and the server closes the connection: the client cannot reuse it. Requests without a body, or whose body was read whole, keep the connection.
+
+## Languages
+
+The server writes every text meant for people in the client's language: English, Spanish or Catalan ([ADR 0011](adr/0011-internationalization.md)). These are the `detail` of HTTP errors, the agents' `detail` (`ProviderStatus`), the models' descriptions (`ModelInfo`), and the messages, errors and reasons of the WebSocket and of the turns. Field names, identifiers and codes never change.
+
+- **REST:** the language of the request's `Accept-Language` header: the one it prefers most among `en`, `es` and `ca` (by its `q` weights, the first listed on a tie; a tag with a region, like `ca-ES`, counts as its language), and English otherwise. The web app sends its own language on every request.
+- **WebSocket:** `/api/ws?lang=en|es|ca`, since a browser cannot set headers on a WebSocket; English otherwise. The connection's language is that of its messages (the `hello`, the `error` messages) and of the turns it starts: their reasons, their failures and what they store. A turn's events keep that language, also for another connection that subscribes to them (`turn.subscribe`). When the owner changes language, the app reconnects and fetches the agents' status and the models again.
+- **Stored texts** keep the language they were written in: a reloaded turn shows its reasons and failures as they were stored, whatever the client's language. Where the client must know what a text says, not only show it, the wire also carries a code: `reason_code` for the rounds and versions of a Refine turn (see `refine.round`), and `attachment_id` for the error about an attachment that no longer exists (see `turn.failed`). Turns stored before ADR 0011 have no code: the client recognizes their Catalan texts.
+- The models' answers are not texts of the server: the prompts ask the models to answer in the language of the user's message, whatever the language of the interface. The demo answers (the `fake` providers) are written in the turn's language.
 
 ## REST
 
-| Mètode i ruta | Cos / paràmetres | Resposta |
+Every request can carry an `Accept-Language` header: the server writes the texts of its answer in that language (see [Languages](#languages)).
+
+| Method and route | Body / parameters | Response |
 | --- | --- | --- |
 | `GET /api/health` | – | `{"status": "ok"}` |
-| `GET /api/auth/state` | – | `{"authenticated": bool, "setup_required": bool}` (`setup_required`: encara no s'ha executat `agentic-os init`) |
-| `POST /api/auth/login` | `{"password": str, "totp": str}` | `204` + cookies de sessió i de dispositiu; `401`; `429`. L'inici de sessió acaba en una sola transacció, condicionada al propietari amb què s'han comprovat les credencials: si mentrestant `agentic-os init` l'ha canviat, `401` i no es desa res. La mateixa transacció tanca la sessió que presentava la cookie, si n'hi havia; després se'n tanquen els WebSockets |
-| `POST /api/auth/logout` | – | `204` (esborra la cookie de sessió i tanca els WebSockets d'aquesta sessió; la de dispositiu es conserva); `401` sense sessió. Per al client, només `204` i `401` volen dir que la sessió s'ha acabat. Amb qualsevol altra resposta, o si no n'arriba cap, bloqueja la pàgina localment (al servidor, la sessió continua oberta) i, fins que el servidor confirma el logout o el propietari torna a iniciar sessió, cada càrrega de la pàgina torna a provar el logout abans de consultar `GET /api/auth/state` |
+| `GET /api/auth/state` | – | `{"authenticated": bool, "setup_required": bool}` (`setup_required`: `agentic-os init` has not been run yet) |
+| `POST /api/auth/login` | `{"password": str, "totp": str}` | `204` + session and device cookies; `401`; `429`. The login completes in a single transaction, conditional on the owner whose credentials were checked: if `agentic-os init` has changed it in the meantime, `401` and nothing is stored. The same transaction ends the session the cookie presented, if there was one; its WebSockets are closed afterwards |
+| `POST /api/auth/logout` | – | `204` (deletes the session cookie and closes this session's WebSockets; the device cookie is kept); `401` without a session. For the client, only `204` and `401` mean that the session has ended. With any other response, or if none arrives, it locks the page locally (on the server, the session stays open) and, until the server confirms the logout or the owner logs in again, every page load retries the logout before querying `GET /api/auth/state` |
 | `GET /api/providers` | – | `[ProviderStatus]` |
-| `GET /api/models` | `?refresh=1` opcional (ignora la memòria cau) | `ModelCatalog` |
+| `GET /api/models` | optional `?refresh=1` (skips the cache) | `ModelCatalog` |
 | `GET /api/pricing` | – | `Pricing` |
-| `GET /api/spend` | – | `MonthSpend` (mes en curs, per a les barres de pressupost) |
-| `GET /api/settings` | – | `RuntimeSettings`, amb la `revision` actual |
-| `PUT /api/settings` | `RuntimeSettings` amb la `revision` en què es basa el canvi (obligatòria; les altres claus que falten prenen el valor per defecte) | `RuntimeSettings` desats (`revision` + 1); `409` o `422` (vegeu «Desament de la configuració») |
-| `GET /api/conversations` | `?limit=50&before=<id>&q=<text>` (vegeu «Llista i cerca de converses») | `[ConversationSummary]`, les més recents primer |
+| `GET /api/spend` | – | `MonthSpend` (the current month, for the budget bars) |
+| `GET /api/settings` | – | `RuntimeSettings`, with the current `revision` |
+| `PUT /api/settings` | `RuntimeSettings` with the `revision` the change is based on (required; the other missing keys take their default value) | The saved `RuntimeSettings` (`revision` + 1); `409` or `422` (see [Saving the settings](#saving-the-settings)) |
+| `GET /api/conversations` | `?limit=50&before=<id>&q=<text>` (see [Listing and searching conversations](#listing-and-searching-conversations)) | `[ConversationSummary]`, most recent first |
 | `GET /api/conversations/{id}` | – | `ConversationDetail` |
 | `PATCH /api/conversations/{id}` | `{"title": str}` | `ConversationSummary` |
-| `DELETE /api/conversations/{id}` | – | `204`. Els torns en curs de la conversa es cancel·len, i el servidor n'oblida tots els torns: un `turn.subscribe` posterior rep `turn.unknown` |
+| `DELETE /api/conversations/{id}` | – | `204`. The conversation's running turns are cancelled, and the server forgets all its turns: a later `turn.subscribe` gets `turn.unknown` |
 | `GET /api/stats` | `?days=30` (1–365) | `Stats` |
-| `PUT /api/attachments` | `?name=<nom del fitxer>`; el cos és el fitxer tal com és, no multipart (vegeu «Adjunts») | `201` + `Attachment`; `413`, `415`, `422`, `507` |
+| `PUT /api/attachments` | `?name=<file name>`; the body is the file as it is, not multipart (see [Attachments](#attachments)) | `201` + `Attachment`; `413`, `415`, `422`, `507` |
 | `GET /api/attachments/{id}` | – | `Attachment` |
-| `GET /api/attachments/{id}/content` | – | El fitxer, amb el tipus detectat en pujar-lo (vegeu «Adjunts») |
-| `PUT /api/attachments/{id}/thumbnail` | El cos és la miniatura: PNG o WebP, com a molt 100 kB i 512 px per costat | `204`; `404`, `413`, `415`, `422` |
-| `GET /api/attachments/{id}/thumbnail` | – | La miniatura (`image/png` o `image/webp`), o `404` si no en té |
-| `DELETE /api/attachments/{id}` | – | `204` si no s'ha enviat mai; `409` si ja és a una pregunta (s'esborra amb la conversa) |
-| `GET /api/ws` | WebSocket | vegeu més avall |
+| `GET /api/attachments/{id}/content` | – | The file, with the type detected when it was uploaded (see [Attachments](#attachments)) |
+| `PUT /api/attachments/{id}/thumbnail` | The body is the thumbnail: PNG or WebP, at most 100 kB and 512 px per side | `204`; `404`, `413`, `415`, `422` |
+| `GET /api/attachments/{id}/thumbnail` | – | The thumbnail (`image/png` or `image/webp`), or `404` if it has none |
+| `DELETE /api/attachments/{id}` | – | `204` if it has never been sent; `409` if it is already in a question (it is deleted with the conversation) |
+| `GET /api/ws` | WebSocket | see below |
 
-### Tipus
+### Types
 
 ```ts
 type Agent = "claude" | "chatgpt";
-type TurnMode = "solo" | "duel" | "debate" | "refine";   // refine: «Perfecciona» (ADR 0010)
+type TurnMode = "solo" | "duel" | "debate" | "refine";   // "debate": Council; "refine": Refine (ADR 0010)
 type MessageKind = "question" | "answer" | "revision" | "synthesis";
 
 interface Usage {
-  input_tokens: number;        // entrada no servida des de memòria cau
-  output_tokens: number;       // inclou el raonament
+  input_tokens: number;        // input not served from the cache
+  output_tokens: number;       // includes the reasoning
   cache_read_tokens: number; cache_write_tokens: number;
-  reasoning_tokens: number;    // part de output_tokens: no s'hi torna a sumar
-  cost_usd: number | null;     // cost estimat (preus d'API); null si el model no té preu
+  reasoning_tokens: number;    // part of output_tokens: not added to it again
+  cost_usd: number | null;     // estimated cost (API prices); null if the model has no price
 }
-// Tokens processats (ADR 0008): input_tokens + cache_read_tokens + cache_write_tokens +
-// output_tokens. És la definició de tots els recomptes de tokens: el total d'un torn, els
-// estalvis (cache i early_stop) i la ràtio del tauler, amb la mateixa definició al
-// numerador i al denominador. El client la calcula (processedTokens a web/src/lib/costs.ts).
-// Un Usage és sempre d'un sol model, llevat dels totals (d'un torn, d'un agent, d'un dia).
+// Processed tokens (ADR 0008): input_tokens + cache_read_tokens + cache_write_tokens +
+// output_tokens. It is the definition of every token count: a turn's total, the
+// savings (cache and early_stop) and the dashboard's ratio, with the same definition in
+// the numerator and the denominator. The client computes it (processedTokens in web/src/lib/costs.ts).
+// A Usage is always of a single model, except the totals (of a turn, an agent, a day).
 
 interface ProviderStatus {
   agent: Agent; mode: "cli" | "api" | "fake";
-  available: boolean; model: string; detail: string;   // detail en català
+  available: boolean; model: string; detail: string;   // detail: in the client's language
   limits: { window: string;            // "5h", "7d"...
-            used_percent: number | null;   // 0–100 (pot passar de 100)
+            used_percent: number | null;   // 0–100 (can go over 100)
             resets_at: string | null;  // ISO 8601
             status: string }[];        // "allowed" | "warning" | "rejected"
 }
 
 interface ModelInfo {
-  id: string;                  // valor que s'envia al proveïdor (id d'API, àlies de la CLI...)
-  label: string; description: string;
+  id: string;                  // the value sent to the provider (API id, CLI alias...)
+  label: string; description: string;   // description: in the client's language
   is_default: boolean; context_window: number | null;
 }
 
@@ -80,21 +91,21 @@ interface ModelCatalog {
 }
 interface AgentModels {
   mode: "cli" | "api" | "fake";
-  default_model: string;       // el que es fa servir si no se'n tria cap
-  fast_model: string;          // el de les crides internes (resums)
-  models: ModelInfo[];         // llista en directe del proveïdor, o una de reserva
-  live: boolean;               // false si la llista és la de reserva
+  default_model: string;       // the one used if none is chosen
+  fast_model: string;          // the one for internal calls (summaries)
+  models: ModelInfo[];         // the provider's live list, or a fallback one
+  live: boolean;               // false if the list is the fallback one
 }
-// Qualsevol id que compleixi ^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$ és vàlid:
-// així es poden fer servir models nous encara que no surtin a la llista.
+// Any id matching ^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$ is valid:
+// that way new models can be used even if they are not on the list.
 
 interface FxRate {
   eur_per_usd: number;
-  as_of: string | null;        // data (AAAA-MM-DD) del tipus del BCE
+  as_of: string | null;        // date (YYYY-MM-DD) of the ECB rate
   source: "ecb" | "manual";
 }
 
-interface ModelPrice {         // USD per milió de tokens, com els publiquen els proveïdors
+interface ModelPrice {         // USD per million tokens, as the providers publish them
   input: number; output: number; cache_read: number; cache_write: number;
 }
 
@@ -103,74 +114,73 @@ interface Pricing {
   prices: (ModelPrice & { model: string; key: string; source: "default" | "custom";
                           default: ModelPrice | null })[];
 }
-// prices: exactament la taula amb què es calculen els costos, ordenada per model: els
-// preus per defecte amb els del propietari al damunt (un preu propi substitueix el per
-// defecte del mateix model normalitzat, sense prefix de proveïdor, data ni context).
-// key: l'id normalitzat amb què el servidor compara els models (normalize_model: sense
-// espais als extrems i en minúscules, sense el que hi ha fins a l'última "/" ni el prefix
-// "anthropic.", sense un context "[…]" al final i després sense una data "-AAAAMMDD",
-// "@AAAAMMDD" o "-latest" al final). Dues files no tenen mai la mateixa key. Un model
-// la key del qual no té fila paga el preu de la fila amb la key més llarga que sigui un
-// prefix de la seva.
-// Els vectors de tests/fixtures/model_ids.json fixen la normalització per al servidor
-// i per al web.
-// default: a una fila "custom" que substitueix un preu per defecte (la mateixa key),
-// aquell preu per defecte; null a les altres.
+// prices: exactly the table the costs are computed with, sorted by model: the default
+// prices with the owner's on top (a custom price replaces the default one of the same
+// normalized model, without provider prefix, date or context).
+// key: the normalized id the server compares models by (normalize_model: trimmed and
+// lowercased, without everything up to the last "/" nor the "anthropic." prefix, without
+// a "[…]" context at the end, and then without a "-YYYYMMDD", "@YYYYMMDD" or "-latest"
+// date at the end). Two rows never have the same key. A model whose key has no row pays
+// the price of the row with the longest key that is a prefix of its own.
+// The vectors in tests/fixtures/model_ids.json pin down the normalization for the server
+// and for the web.
+// default: on a "custom" row that replaces a default price (the same key), that default
+// price; null on the others.
 
-interface RefineOptions {                 // opcions d'un torn «Perfecciona» (ADR 0010)
-  max_rounds: number;                     // 2–50, per defecte 12: les rondes que escriuen una
-                                          // versió, la fusió de la ronda 1 inclosa
-  budget_eur: number;                     // 0,1–100, per defecte 3: el que pot gastar el torn,
-                                          // en euros (en mode subscripció, el valor a preus d'API)
-  max_words: number | null;               // límit de paraules de cada versió: 100–20000, o
-                                          // null (per defecte) per al límit automàtic:
-                                          // 1,2 vegades les de la versió 1, i 300 com a mínim
-                                          // (cada versió ha de cabre en una sola resposta:
-                                          // vegeu «Metadades de missatge»)
-  stop_on_convergence: boolean;           // per defecte true: s'atura sol quan convergeix
-                                          // (stop_reason "converged")
-  convergence_threshold: number;          // 50–100, per defecte 90
-  editor: Agent;                          // per defecte "claude": fusiona les respostes i
-                                          // escriu cada versió
+interface RefineOptions {                 // the options of a Refine turn (ADR 0010)
+  max_rounds: number;                     // 2–50, default 12: the rounds that write a
+                                          // version, the merge of round 1 included
+  budget_eur: number;                     // 0.1–100, default 3: what the turn may spend,
+                                          // in euros (in subscription mode, the value at API prices)
+  max_words: number | null;               // word limit of each version: 100–20000, or
+                                          // null (the default) for the automatic limit:
+                                          // 1.2 times the word count of version 1, and at least 300
+                                          // (each version must fit in a single reply:
+                                          // see "Message metadata")
+  stop_on_convergence: boolean;           // default true: the turn stops by itself when it
+                                          // converges (stop_reason "converged")
+  convergence_threshold: number;          // 50–100, default 90
+  editor: Agent;                          // default "claude": merges the answers and
+                                          // writes each version
 }
 
 interface RuntimeSettings {
-  revision: number;                       // desaments: 0 fins al primer, +1 a cada un
-                                          // (vegeu «Desament de la configuració»)
-  default_mode: TurnMode;                 // per defecte "debate"; mai "refine"
-  default_target: Agent;                  // agent del mode solo
-  debate: { rounds: number;               // 0–4, per defecte 2
-            consensus_threshold: number;  // 50–100, per defecte 85
-            synthesizer: Agent };         // per defecte "claude"
-  refine: RefineOptions;                  // les opcions dels torns «Perfecciona» que no
-                                          // porten les seves
-  use_cache: boolean;                     // per defecte true
-  compaction_threshold_tokens: number;    // 1000–100000, per defecte 6000
-  models: Record<Agent, string | null>;       // model per defecte; null = el del proveïdor
-  fast_models: Record<Agent, string | null>;  // model per als resums; null = el del proveïdor
-  prices: Record<string, ModelPrice>;         // preus propis (substitueixen o afegeixen models);
-                                              // 422 si una clau no identifica cap model un cop
-                                              // normalitzada ("openai/") o si dues són el mateix
-  fx: { mode: "auto" | "manual";              // auto: BCE diari, amb el manual de reserva
-        eur_per_usd: number };                // 0,2–5, per defecte 0,86
-  budgets_eur: Record<Agent, number | null>;  // pressupost mensual de l'ús per API
-  plans_eur: Record<Agent, number | null>;    // preu mensual de la subscripció
-  pdf_in_revisions: "full" | "text";          // PDF a les revisions d'un debat: "text" (per
-                                              // defecte) el text extret; "full" el document.
-                                              // Un PDF sense text hi va sempre sencer
+  revision: number;                       // saves: 0 until the first one, +1 at each one
+                                          // (see "Saving the settings")
+  default_mode: TurnMode;                 // default "debate"; never "refine"
+  default_target: Agent;                  // the agent of the solo mode
+  debate: { rounds: number;               // 0–4, default 2
+            consensus_threshold: number;  // 50–100, default 85
+            synthesizer: Agent };         // default "claude"
+  refine: RefineOptions;                  // the options of the Refine turns that do not
+                                          // carry their own
+  use_cache: boolean;                     // default true
+  compaction_threshold_tokens: number;    // 1000–100000, default 6000
+  models: Record<Agent, string | null>;       // default model; null = the provider's
+  fast_models: Record<Agent, string | null>;  // model for the summaries; null = the provider's
+  prices: Record<string, ModelPrice>;         // custom prices (they replace or add models);
+                                              // 422 if a key identifies no model once
+                                              // normalized ("openai/") or if two are the same
+  fx: { mode: "auto" | "manual";              // auto: the ECB's daily rate, with the manual one as a fallback
+        eur_per_usd: number };                // 0.2–5, default 0.86
+  budgets_eur: Record<Agent, number | null>;  // monthly budget for API usage
+  plans_eur: Record<Agent, number | null>;    // monthly price of the subscription
+  pdf_in_revisions: "full" | "text";          // PDFs in a debate's revisions: "text" (the
+                                              // default) the extracted text; "full" the document.
+                                              // A PDF without text always goes whole
 }
 
 interface AgentSpend {
-  api_usd: number;             // cost real de les crides en mode api
-  equivalent_usd: number;      // valor de les crides en mode cli a preus d'API
-  unpriced_calls: number;      // crides de models sense preu conegut
-  budget_eur: number | null;  budget_used: number | null;   // 0–1+ (api_usd en € / pressupost); null sense pressupost
-  plan_eur: number | null;    plan_value: number | null;    // 0–1+ (equivalent en € / preu del pla); null sense preu
+  api_usd: number;             // real cost of the calls in api mode
+  equivalent_usd: number;      // value of the calls in cli mode at API prices
+  unpriced_calls: number;      // calls of models without a known price
+  budget_eur: number | null;  budget_used: number | null;   // 0–1+ (api_usd in € / budget); null without a budget
+  plan_eur: number | null;    plan_value: number | null;    // 0–1+ (equivalent in € / plan price); null without a price
 }
-// equivalent_usd inclou tota crida que no és d'API i té preu (també les de demostració si els poses preu).
+// equivalent_usd includes every call that is not an API one and has a price (the demo ones too, if you give them a price).
 
 interface MonthSpend {
-  month: string;               // "AAAA-MM" (UTC)
+  month: string;               // "YYYY-MM" (UTC)
   fx: FxRate;
   by_agent: Record<Agent, AgentSpend>;
 }
@@ -184,33 +194,33 @@ interface ConversationSummary {
 interface Message {
   id: number; turn_id: number; kind: MessageKind; content: string;
   agent: Agent | null; round: number; final: boolean;
-  meta: Record<string, unknown>;   // vegeu "Metadades de missatge"
+  meta: Record<string, unknown>;   // see "Message metadata"
   created_at: string;
 }
 
 interface ConversationDetail extends ConversationSummary {
-  summary: string | null;          // resum de la compactació, si n'hi ha
-  messages: Message[];             // tots, els més antics primer
+  summary: string | null;          // the compaction summary, if there is one
+  messages: Message[];             // all of them, oldest first
 }
 
-interface Attachment {             // un fitxer adjunt (vegeu «Adjunts»)
+interface Attachment {             // an attached file (see "Attachments")
   id: number;
-  name: string;                    // nom que es mostra, net (sense camí ni caràcters de control)
+  name: string;                    // display name, cleaned (no path, no control characters)
   kind: "image" | "pdf" | "text";
   mime: string;                    // "image/png" | "image/jpeg" | "image/gif" | "image/webp" |
                                    // "application/pdf" | "text/plain"
   size: number;                    // bytes
   pages: number | null;            // PDF
-  width: number | null; height: number | null;   // imatges, en píxels
-  sha256: string;                  // del contingut
-  created_at: string;              // ISO 8601 UTC, quan es va pujar
-  has_thumbnail: boolean;          // el navegador n'ha pujat la miniatura
-  text_available: boolean;         // text: sempre; PDF: se n'ha pogut extreure el text
-  estimated_tokens: number;        // tokens d'entrada aproximats per crida
-  pdf_notes: {                     // avisos de les pàgines d'un PDF analitzat (vegeu «Adjunts»);
-    no_text: number[];             // null en els altres. Números de pàgina, des de l'1:
-    garbled: number[];             // sense text (escanejades), amb el text il·legible
-    hidden: number[];              // i amb possible text que no es veu
+  width: number | null; height: number | null;   // images, in pixels
+  sha256: string;                  // of the content
+  created_at: string;              // ISO 8601 UTC, when it was uploaded
+  has_thumbnail: boolean;          // the browser has uploaded its thumbnail
+  text_available: boolean;         // text: always; PDF: its text could be extracted
+  estimated_tokens: number;        // approximate input tokens per call
+  pdf_notes: {                     // warnings about the pages of an analysed PDF (see
+    no_text: number[];             // "Attachments"); null for the others. Page numbers, from 1:
+    garbled: number[];             // without text (scanned), with unreadable text
+    hidden: number[];              // and with text that may not be visible
   } | null;
 }
 
@@ -218,30 +228,30 @@ interface Stats {
   days: number;
   totals: { calls: number; errors: number; cost_usd: number;
             by_agent: Record<Agent, Usage & { calls: number }> };
-            // errors: crides amb ok = false (fallides, i cada intent que un model va
-            // declinar abans d'un fallback)
+            // errors: calls with ok = false (failed ones, and every attempt a model
+            // declined before a fallback)
   savings: { cache: number; compaction: number; early_stop: number;
              unchanged: number; total: number; cost_usd: number | null };
-             // cost_usd: valor dels estalvis de la finestra; com els tokens, es conserva
-             // encara que s'esborri la conversa (null si cap estalvi no té preu).
-             // Tokens processats; les files desades abans de l'ADR 0008 conserven la
-             // definició antiga (input + output a cache i early_stop).
+             // cost_usd: the value of the window's savings; like the tokens, it is kept
+             // even if the conversation is deleted (null if no saving has a price).
+             // Processed tokens; the rows stored before ADR 0008 keep the old
+             // definition (input + output in cache and early_stop).
   daily: { date: string; agent: Agent; input_tokens: number; output_tokens: number;
            cache_read_tokens: number; cache_write_tokens: number;
-           cost_usd: number }[];   // date: dia natural UTC; els quatre tipus de tokens
-                                   // processats, per sumar-los com Usage
+           cost_usd: number }[];   // date: UTC calendar day; the four kinds of processed
+                                   // tokens, to add them up as in Usage
   savings_daily: { date: string; kind: "cache" | "compaction" | "early_stop" | "unchanged";
                    tokens: number }[];
   latency: Record<Agent, { p50_ms: number | null; p95_ms: number | null;
                            ttft_p50_ms: number | null }>;
-                           // només les crides que escriuen un missatge (respostes,
-                           // revisions i síntesis): no els resums de l'historial ni el
-                           // contrast dels PDF, que compten als tokens i als costos
+                           // only the calls that write a message (answers,
+                           // revisions and syntheses): not the history summaries nor the
+                           // PDF checks, which count in the tokens and the costs
   turns: { solo: number; duel: number; debate: number; refine: number };
-                           // preguntes de la finestra, pel mode del torn
+                           // the window's questions, by the turn's mode
   consensus: { debates: number; reached: number; avg_rounds: number | null };
-                           // només els debats: la versió final d'un torn «Perfecciona»
-                           // també és una síntesi, però no hi compta
+                           // debates only: the final version of a Refine turn is
+                           // a synthesis too, but it does not count here
   costs: { fx: FxRate;
            by_agent: Record<Agent, { api_usd: number; equivalent_usd: number;
                                      unpriced_calls: number }> };
@@ -249,160 +259,167 @@ interface Stats {
 }
 ```
 
-### Desament de la configuració
+### Saving the settings
 
-`revision` compta els desaments de la configuració: val 0 on no s'ha desat mai i augmenta en 1 a cada desament correcte. Una configuració desada per una versió anterior, sense revisió, compta com a revisió 1. Així, només la configuració integrada, que un client té mentre encara no ha llegit la del servidor, és a la revisió 0, i un desament basat en aquesta no pot substituir mai una configuració desada. Es desa amb la configuració, de manera que es conserva en reiniciar, i no torna mai enrere. El client edita a partir de la configuració que ha llegit i envia a `PUT /api/settings` tota la configuració, amb la `revision` que tenia la que va llegir ([ADR 0006](adr/0006-revisio-de-la-configuracio.md)):
+`revision` counts the saves of the settings: it is 0 where they have never been saved and grows by 1 at each successful save. Settings saved by an earlier version, without a revision, count as revision 1. That way, only the built-in settings, which a client has while it has not yet read the server's, are at revision 0, and a save based on them can never replace saved settings. It is stored with the settings, so it survives a restart, and it never goes back. The client edits from the settings it has read and sends all of them to `PUT /api/settings`, with the `revision` of the ones it read ([ADR 0006](adr/0006-settings-revisions.md)):
 
-- `200`: la revisió és l'actual. La resposta és la configuració desada, amb `revision` + 1.
-- `409`: la revisió no és l'actual, normalment perquè s'ha desat des d'una altra pestanya o dispositiu. No es desa res. El cos és `{"detail": "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar.", "settings": RuntimeSettings}`, amb la configuració actual tal com la dona `GET /api/settings`: el client la mostra i el propietari la revisa i la torna a desar.
-- `422`: falta `revision`, no és un enter ≥ 0 o algun altre camp no és vàlid. `default_mode` no pot ser `refine` (`El mode per defecte no pot ser «refine».`): un torn «Perfecciona» dura fins que l'atures, així que només comença quan el tries. L'ordre és: el cos ha de ser un objecte JSON, després `revision` i després la resta de camps. La revisió es compara al final, de manera que una edició no vàlida dona `422` encara que es basi en una revisió antiga.
-- La comparació i l'escriptura són atòmiques (una sola transacció d'escriptura de SQLite): de dues peticions basades en la mateixa revisió, una rep `200` i l'altra `409`, encara que vinguin de processos diferents.
+- `200`: the revision is the current one. The response is the saved settings, with `revision` + 1.
+- `409`: the revision is not the current one, usually because the settings were saved from another tab or device. Nothing is saved. The body is `{"detail": "The settings have changed in another tab or on another device. Review them and save them again.", "settings": RuntimeSettings}`, with the current settings as `GET /api/settings` gives them: the client shows them, and the owner reviews them and saves them again.
+- `422`: `revision` is missing or is not an integer ≥ 0, or some other field is not valid. `default_mode` cannot be `refine` (`The default mode cannot be "refine".`): a Refine turn lasts until you stop it, so it only starts when you choose it. The order is: the body must be a JSON object, then `revision`, then the other fields. The revision is compared last, so an invalid edit gives `422` even if it is based on an old revision.
+- The comparison and the write are atomic (a single SQLite write transaction): of two requests based on the same revision, one gets `200` and the other `409`, even if they come from different processes.
 
-### Llista i cerca de converses
+### Listing and searching conversations
 
-`GET /api/conversations` dona les converses per activitat, les més recents primer (per `updated_at` i, si coincideix, per `id`), a pàgines:
+`GET /api/conversations` gives the conversations by activity, most recent first (by `updated_at` and, on a tie, by `id`), in pages:
 
-- `limit`: d'1 a 200 converses per pàgina (per defecte, 50).
-- `before`: l'`id` de l'última conversa de la pàgina anterior. En dona les que la segueixen en aquest ordre, o cap si aquella conversa ja no existeix.
-- `q` (opcional): només les converses el títol de les quals conté aquest text, sense distingir majúscules ni accents. El servidor transforma igual el títol i el text: descomposició de compatibilitat (NFKD), `casefold` i sense marques combinants. Així, `cafe` troba «Cafè», `strasse` troba «Straße» i `fi` troba «ﬁnances». La coincidència és literal: `%`, `_` i `\` són caràcters com els altres. Al text se li treuen els espais dels extrems, i els espais seguits compten com un de sol, com als títols. Un `q` buit, o només amb espais, és com no posar-n'hi.
-- El text de la cerca pot tenir com a molt 200 caràcters, un cop tret els espais dels extrems. Un de més llarg dona `422` amb `La cerca no pot tenir més de 200 caràcters.`
-- Una cerca pagina com la llista: `before` és l'`id` de l'última conversa de la pàgina anterior de la mateixa cerca. La resposta té la mateixa forma, `[ConversationSummary]`.
+- `limit`: from 1 to 200 conversations per page (50 by default).
+- `before`: the `id` of the last conversation of the previous page. It gives the ones that follow it in this order, or none if that conversation no longer exists.
+- `q` (optional): only the conversations whose title contains this text, ignoring case and accents. The server transforms the title and the text in the same way: compatibility decomposition (NFKD), `casefold`, and no combining marks. That way, `cafe` finds "Cafè", `strasse` finds "Straße" and `fi` finds "ﬁnances". The match is literal: `%`, `_` and `\` are characters like any other. The text is trimmed, and a run of spaces counts as one, as in the titles. An empty `q`, or one with only spaces, is the same as none.
+- The search text can be at most 200 characters long, once trimmed. A longer one gives `422` with `The search cannot be longer than 200 characters.`
+- A search is paged like the list: `before` is the `id` of the last conversation of the previous page of the same search. The response has the same shape, `[ConversationSummary]`.
 
-### Adjunts
+### Attachments
 
-Els fitxers que el propietari adjunta a una pregunta ([ADR 0009](adr/0009-adjunts.md)). Els límits són les constants de `src/agentic_os/attachments.py`.
+The files the owner attaches to a question ([ADR 0009](adr/0009-attachments.md)). The limits are the constants of `src/agentic_os/attachments.py`.
 
-- **Tipus.** Surt sempre del contingut, mai del nom ni del `Content-Type`:
-  - imatges PNG, JPEG, GIF i WebP, pels primers bytes; les dimensions, de les capçaleres (el servidor no descodifica mai cap imatge);
-  - PDF, pel `%PDF-` del començament;
-  - text: UTF-8 vàlid sense cap caràcter NUL i amb una d'aquestes extensions: `txt`, `md`, `markdown`, `csv`, `tsv`, `json`, `yaml`, `yml`, `xml`, `html`, `htm`, `log`, `ini`, `toml`, `cfg`, `py`, `js`, `ts`, `jsx`, `tsx`, `svelte`, `css`, `scss`, `sql`, `sh`, `bash`, `rs`, `go`, `java`, `kt`, `c`, `h`, `cpp`, `hpp`, `cs`, `rb`, `php`, `swift`, `lua`, `r`, `pl`. Sempre és text pla (`text/plain`), també un `.html`;
-  - qualsevol altra cosa, també l'SVG i l'HEIC, dona `415`.
-- **Límits:**
-  - com a molt 5 adjunts per missatge, i 20 MB entre tots;
-  - imatge: 7 MB i 8.000 píxels per costat. Abans de pujar-la, el navegador redueix tota imatge de més de 2.576 píxels al costat llarg i torna a codificar a la mateixa mida una de més de 7 MB; també torna a codificar dreta una foto que es mostra girada per la seva orientació EXIF (com les del mòbil), perquè els models en reben els píxels tal com estan desats, sense les metadades. Els GIF es pugen tal com són;
-  - PDF: 20 MB i 100 pàgines, sense xifrar;
+- **Type.** It always comes from the content, never from the name nor from the `Content-Type`:
+  - PNG, JPEG, GIF and WebP images, by their first bytes; their dimensions, from their headers (the server never decodes an image);
+  - PDF, by the `%PDF-` at the start;
+  - text: valid UTF-8 without any NUL character and with one of these extensions: `txt`, `md`, `markdown`, `csv`, `tsv`, `json`, `yaml`, `yml`, `xml`, `html`, `htm`, `log`, `ini`, `toml`, `cfg`, `py`, `js`, `ts`, `jsx`, `tsx`, `svelte`, `css`, `scss`, `sql`, `sh`, `bash`, `rs`, `go`, `java`, `kt`, `c`, `h`, `cpp`, `hpp`, `cs`, `rb`, `php`, `swift`, `lua`, `r`, `pl`. It is always plain text (`text/plain`), an `.html` file too;
+  - anything else, SVG and HEIC included, gives `415`.
+- **Limits:**
+  - at most 5 attachments per message, and 20 MB in total;
+  - image: 7 MB and 8,000 pixels per side. Before uploading an image, the browser shrinks any image over 2,576 pixels on the long side, and re-encodes at the same size one over 7 MB; it also re-encodes upright a photo that is shown rotated by its EXIF orientation (like phone photos), because the models get its pixels as they are stored, without the metadata. GIFs are uploaded as they are;
+  - PDF: 20 MB and 100 pages, not encrypted;
   - text: 200 kB.
-  - Massa gran: `413`, amb el límit del tipus (`El fitxer és massa gran: una imatge pot tenir com a molt 7 MB.`). No vàlid (buit, sense nom, una imatge il·legible, massa píxels o pàgines, un PDF xifrat o malmès): `422`.
-- **Pujada:** `PUT /api/attachments?name=<nom>`, amb el fitxer com a cos. Necessita la sessió i l'`Origin`, com totes les escriptures. El servidor escriu el cos en un fitxer temporal a mesura que arriba i el talla al límit del seu tipus, que decideixen els primers 16 bytes: si el `Content-Length` ja el passa, respon `413` de seguida, sense llegir-ne més. `name` és el nom que es mostra (i el que dona l'extensió d'un fitxer de text): se'n queda l'última part d'un camí, en NFC, sense caràcters de control ni de format invisibles (com els que capgiren el sentit del text), amb els espais seguits com un de sol i com a molt 200 caràcters (un de més llarg es talla i conserva l'extensió). Un adjunt que no s'envia en cap torn s'esborra al cap de 24 h.
-- **Text d'un PDF:** el servidor el llegeix amb pypdf en un procés a part, com a molt 60 s. Té un bloc per pàgina, introduït per la línia `--- Pàgina N ---`, i els models el reben quan no reben el document (vegeu `pdf_in_revisions` i l'ADR). `text_available` és `false` si no se n'ha pogut extreure cap text: un PDF escanejat, o un error o el temps esgotat mentre se n'extreia (si ni tan sols se'n poden comptar les pàgines, la pujada dona `422`). Si passa d'1.000.000 caràcters, es talla i acaba amb l'avís `[Text retallat: el text extret del PDF passava de 1.000.000 caràcters.]`.
-- **Pàgines d'un PDF** (`pdf_notes`): en la mateixa passada, el lector analitza cada pàgina, també les que el límit del text deixa fora: on és el seu text dins del text desat, quantes lletres i quants caràcters trencats té (U+FFFD, caràcters d'ús privat o de control: una font sense mapa de caràcters), si dibuixa alguna imatge i quant text mostra que no es veu: en un mode de renderitzat invisible (3 o 7), més petit d'1 punt en alguna direcció (comptant la mida de la lletra, l'escala horitzontal `Tz`, la matriu de text, la de transformació i la del formulari que el dibuixa) o amb l'origen a més d'1 punt fora de la part visible de la pàgina (la `CropBox` dins de la `MediaBox`), comptant-hi el desplaçament vertical del text (`Ts`). `pdf_notes` en dona els avisos, per pàgina:
-  - `no_text`: menys de 25 lletres (una pàgina escanejada, o text dibuixat com a imatge);
-  - `garbled`: 5 caràcters trencats o més, i almenys el 5 % del text (una pàgina sense text no hi surt);
-  - `hidden`: 10 caràcters o més que no es veuen. El text invisible només hi compta en una pàgina sense imatges: sobre un escaneig és el text reconegut, legítim.
+  - Too large: `413`, with the type's limit (`The file is too large: an image can be at most 7 MB.`). Not valid (empty, without a name, an unreadable image, too many pixels or pages, an encrypted or damaged PDF): `422`.
+- **Upload:** `PUT /api/attachments?name=<name>`, with the file as the body. It needs the session and the `Origin`, like every write. The server writes the body to a temporary file as it arrives and cuts it off at the limit of its type, which the first 16 bytes decide: if the `Content-Length` already exceeds it, the server answers `413` at once, without reading any more. `name` is the display name (and the one that gives a text file its extension): the server keeps the last part of a path, in NFC, without control characters or invisible format characters (like those that reverse the direction of the text), with each run of spaces as one, and at most 200 characters (a longer one is cut and keeps its extension). An attachment that is not sent in any turn is deleted after 24 h.
+- **Text of a PDF:** the server reads it with pypdf in a separate process, for at most 60 s. It has one block per page, introduced by the line `--- Page N ---`, and the models get it when they do not get the document (see `pdf_in_revisions` and the ADR). `text_available` is `false` if no text could be extracted: a scanned PDF, or an error or a timeout while extracting it (if not even its pages can be counted, the upload gives `422`). If it exceeds 1,000,000 characters, it is cut off and ends with the notice `[Text truncated: the text extracted from the PDF was over 1,000,000 characters.]`.
+- **Pages of a PDF** (`pdf_notes`): in the same pass, the reader analyses every page, also the ones the text limit leaves out: where its text is within the stored text, how many letters and how many broken characters it has (U+FFFD, private-use or control characters: a font without a character map), whether it draws any image, and how much text it shows that cannot be seen: in an invisible rendering mode (3 or 7), smaller than 1 point in some direction (counting the font size, the horizontal scaling `Tz`, the text matrix, the transformation matrix and that of the form that draws it), or with its origin more than 1 point outside the visible part of the page (the `CropBox` within the `MediaBox`), counting the text's vertical shift (`Ts`). `pdf_notes` gives its warnings, per page:
+  - `no_text`: fewer than 25 letters (a scanned page, or text drawn as an image);
+  - `garbled`: 5 broken characters or more, and at least 5% of the text (a page without text is not listed);
+  - `hidden`: 10 characters or more that cannot be seen. Invisible text only counts on a page without images: over a scan, it is the recognized text, which is legitimate.
 
-  Són avisos, no veredictes: l'anàlisi no veu el text que amaga un camí de retall ni el que té el color del que hi ha a sota, i una imatge que la pàgina té a les seves `Resources` compta encara que no la dibuixi. Un PDF que no s'ha pogut analitzar té `pdf_notes: null`, com les imatges, els fitxers de text i els PDF pujats abans que existís l'anàlisi. Els `meta.attachments` desats abans no porten la clau.
-- **Contrast de Claude** ([ADR 0009](adr/0009-adjunts.md)): ChatGPT amb la subscripció (Codex, mode `cli`) no pot obrir cap PDF i en llegeix el text extret, pàgina per pàgina. En un torn on participa i la pregunta porta PDF analitzats, Claude contrasta aquest text amb el document (en un duel o un debat, mentre respon): a les pàgines on el text extret hi falta o no es pot llegir, ChatGPT llegeix el que hi llegeix Claude, marcat, i d'una pàgina on Claude troba text que no es veu només en rep el text visible i l'avís. ChatGPT espera el contrast com a molt 5 minuts; després llegeix el text sense contrastar. Són com a molt 3 crides per PDF: les pàgines que no hi caben queden sense contrastar, i ho diuen. El Claude de demostració (`AOS_CLAUDE_MODE=fake`) no contrasta res, perquè respon que totes les pàgines són correctes sense llegir-ne cap: amb ell el PDF es llegeix sense contrastar, com sense Claude. Les pàgines que ningú no ha contrastat (`unchecked_pages`) arriben a ChatGPT tal com s'han extret, també el text que no es veu que puguin tenir: diuen que no s'han contrastat i, si l'anàlisi les troba sospitoses, que poden tenir text que no es veu, un avís que també reben tots els models a l'etiqueta del PDF. L'anàlisi és una heurística, no una garantia. El contrast es desa pel contingut del fitxer, i el reaprofiten els torns posteriors i les altres converses; s'esborra quan cap adjunt no fa servir el fitxer. Un torn on ChatGPT ha llegit un PDF que un altre torn llegiria d'una altra manera no entra mai a la memòria cau de torns: quan el torn següent el tornaria a contrastar (la comprovació ha fallat, Claude no l'ha volgut fer, una resposta no ha avançat o ha trigat massa) o quan ningú no el podia contrastar (sense Claude, o amb el de demostració). Es veu amb l'esdeveniment `pdf.check` i amb `meta.pdf_reading` dels missatges de ChatGPT. Les crides es facturen amb el propòsit `check` i compten al total del torn.
-- **`estimated_tokens`** (aproximats, per a cada crida que rep l'adjunt): imatge `ceil(w'/28) · ceil(h'/28)`, com a molt 4.784, amb `(w', h')` la imatge reduïda a 2.576 píxels al costat llarg (mai ampliada); PDF, 3.600 per pàgina; text, `ceil(caràcters / 4)`.
-- **Contingut** (`GET /api/attachments/{id}/content`): el fitxer tal com es va pujar, amb el tipus detectat (`text/plain; charset=utf-8` per al text), `X-Content-Type-Options: nosniff` i `Content-Security-Policy: default-src 'none'; sandbox`. Les imatges porten `Content-Disposition: inline`; els PDF i el text, `attachment` (es descarreguen). En tots dos casos, amb el nom: `filename` en ASCII i `filename*` en UTF-8. Res del que es puja no es serveix com a HTML. Admet `Range`.
-- **Miniatures:** el navegador en fa una en adjuntar el fitxer i la puja a `PUT /api/attachments/{id}/thumbnail`: una imatge PNG o WebP (pel contingut) de com a molt 100 kB i 512 píxels per costat; si no, `415`, `413` o `422`. Una miniatura nova substitueix l'anterior. `GET` la retorna, amb les mateixes capçaleres que una imatge, o `404` si no en té.
-- **Esborrar:** `DELETE /api/attachments/{id}` esborra un adjunt que no s'ha enviat mai (el propietari l'ha tret del compositor): `204`. Si ja és a una pregunta, `409`, i s'esborra amb la seva conversa: esborrar una conversa esborra els adjunts que només feia servir ella. Dues pujades del mateix fitxer en comparteixen la còpia, que s'esborra quan cap adjunt no la fa servir, i el contrast de Claude, amb ella.
+  They are warnings, not verdicts: the analysis does not see text hidden by a clipping path or text in the colour of what lies beneath it, and an image the page has in its `Resources` counts even if the page does not draw it. A PDF that could not be analysed has `pdf_notes: null`, like images, text files and the PDFs uploaded before the analysis existed. The `meta.attachments` stored before it do not have the key.
+- **Claude's check** ([ADR 0009](adr/0009-attachments.md)): ChatGPT on the subscription (Codex, `cli` mode) cannot open a PDF and reads its extracted text, page by page. In a turn where ChatGPT takes part and the question carries analysed PDFs, Claude checks that text against the document (in a duel or a debate, while it answers): on the pages where the extracted text is missing or unreadable, ChatGPT reads what Claude reads there, marked as such, and from a page where Claude finds text that cannot be seen, ChatGPT only gets the visible text and the warning. ChatGPT waits for the check for at most 5 minutes; then it reads the text unchecked. Claude makes at most 3 calls per PDF: the pages that do not fit are left unchecked, and say so. The demo Claude (`AOS_CLAUDE_MODE=fake`) checks nothing, because it answers that every page is correct without reading any: with it, the PDF is read unchecked, as without Claude. The pages nobody has checked (`unchecked_pages`) reach ChatGPT as they were extracted, any text that cannot be seen included: they say that they have not been checked and, if the analysis finds them suspicious, that they may have text that cannot be seen, a warning every model also gets in the PDF's label. The analysis is a heuristic, not a guarantee. The check is stored by the file's content, and later turns and other conversations reuse it; it is deleted when no attachment uses the file any more. A turn in which ChatGPT read a PDF that another turn would read differently never enters the turn cache: when the next turn would check it again (the check failed, Claude declined to do it, a reply made no progress or took too long) or when nobody could check it (without Claude, or with the demo one). It shows in the `pdf.check` event and in the `meta.pdf_reading` of ChatGPT's messages. The calls are billed with the purpose `check` and count towards the turn's total.
+- **`estimated_tokens`** (approximate, for each call that gets the attachment): image `ceil(w'/28) · ceil(h'/28)`, at most 4,784, with `(w', h')` the image shrunk to 2,576 pixels on the long side (never enlarged); PDF, 3,600 per page; text, `ceil(characters / 4)`.
+- **Content** (`GET /api/attachments/{id}/content`): the file as it was uploaded, with the detected type (`text/plain; charset=utf-8` for text), `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. Images carry `Content-Disposition: inline`; PDFs and text, `attachment` (they are downloaded). Both with the name: `filename` in ASCII and `filename*` in UTF-8. Nothing that is uploaded is ever served as HTML. `Range` is supported.
+- **Thumbnails:** the browser makes one when the file is attached and uploads it to `PUT /api/attachments/{id}/thumbnail`: a PNG or WebP image (by its content) of at most 100 kB and 512 pixels per side; otherwise `415`, `413` or `422`. A new thumbnail replaces the previous one. `GET` returns it, with the same headers as an image, or `404` if there is none.
+- **Deleting:** `DELETE /api/attachments/{id}` deletes an attachment that has never been sent (the owner removed it from the composer): `204`. If it is already in a question, `409`, and it is deleted with its conversation: deleting a conversation deletes the attachments that only it used. Two uploads of the same file share its copy, which is deleted, and Claude's check with it, when no attachment uses it.
 
-### Resultat del torn (`meta.outcome` de la pregunta)
+### Turn outcome (`meta.outcome` of the question)
 
-Com va acabar un torn es decideix una sola vegada i es desa a la pregunta abans de l'esdeveniment final ([ADR 0007](adr/0007-resultat-del-torn.md)):
+How a turn ended is decided only once, and it is stored in the question before the final event ([ADR 0007](adr/0007-turn-outcome.md)):
 
 ```ts
 interface TurnOutcome {
   status: "completed" | "failed" | "cancelled";
-  error?: { kind: string; message: string };   // només si status és "failed" (el de turn.failed)
+  error?: { kind: string; message: string;     // only if status is "failed" (that of
+            attachment_id?: number };          // turn.failed); attachment_id: the attachment
+                                               // that no longer exists, when that is the error
   failures: { agent: Agent; kind: string; message: string; round: number }[];
-                                   // les fallades de crida del torn (stream.failed), en ordre
-  usage: Usage;                    // total del torn: totes les crides facturades (resums de
-                                   // compactació, contrastos de PDF, crides fallides, intents
-                                   // declinats i crides sense missatge incloses); el mateix
-                                   // usage de l'esdeveniment final
-  savings: object;                 // com el savings de turn.completed (vegeu més avall);
-                                   // zeros en un torn fallit o cancel·lat (no registra estalvis),
-                                   // tret d'un torn cancel·lat quan ja desava els seus
-                                   // estalvis: les files s'escriuen senceres i els porta
-  consensus: object | null;        // com el consensus de turn.completed: el d'un debat completat
-  final_message_ids: number[];     // missatges finals desats (també en un torn cancel·lat)
-  cached: boolean;                 // servit des de la memòria cau de torns
+                                   // the turn's call failures (stream.failed), in order
+  usage: Usage;                    // the turn's total: every billed call (compaction
+                                   // summaries, PDF checks, failed calls, declined
+                                   // attempts and calls without a message included); the
+                                   // same usage as the final event's
+  savings: object;                 // like the savings of turn.completed (see below);
+                                   // zeros in a failed or cancelled turn (it records no
+                                   // savings), except a turn cancelled when it was already
+                                   // storing its savings: the rows are written whole, and
+                                   // it carries them
+  consensus: object | null;        // like the consensus of turn.completed: that of a completed debate
+  final_message_ids: number[];     // final messages stored (in a cancelled turn too)
+  cached: boolean;                 // served from the turn cache
   stop_reason?: "owner" | "converged" | "unchanged" | "max_rounds" | "budget" | "failed";
-                                   // només en un torn «Perfecciona» (vegeu més avall)
+                                   // only in a Refine turn (see below)
 }
 ```
 
-- La pregunta es crea amb `outcome: null`. Si el torn no acaba mai (una caiguda o un reinici del servidor), es queda `null`: el client el mostra com a no completat. Els torns desats abans de l'ADR 0007 no tenen la clau.
-- Un torn cancel·lat també el desa, abans del `turn.cancelled`. Un torn es cancel·la una sola vegada: un `turn.cancel` repetit, o l'aturada del servidor, mentre el torn s'atura no l'interromp, i el `turn.cancelled` arriba quan el torn s'ha aturat i ha desat el resultat, amb el mateix `usage`. Si l'escriptura falla, el torn no falla i la pregunta es queda amb `null`.
-- `stop_reason`, només en un torn «Perfecciona» ([ADR 0010](adr/0010-mode-perfecciona.md)), diu per què s'ha acabat amb l'última versió, que és la resposta final:
-  - `owner`: l'ha aturat el propietari, en acabar la ronda (`turn.stop`) o de seguida (`turn.cancel`);
-  - `unchanged`: cap dels dos models no hi ha trobat res a canviar 2 rondes seguides;
-  - `converged`: tots dos li han donat el llindar (`convergence_threshold`) o més, sense proposar cap defecte, 2 rondes seguides (només amb `stop_on_convergence`);
-  - `max_rounds`: ja ha fet les rondes de `max_rounds`;
-  - `budget`: ja ha gastat el pressupost (`budget_eur`);
-  - `failed`: els dos models han fallat en una ronda quan ja hi havia una versió. El torn es completa igualment, amb la versió vigent com a resposta final i les fallades a `failures`.
-- Un torn «Perfecciona» cancel·lat (`turn.cancel`) que ja té una versió la desa abans com a missatge final, sense cap crida, perquè no es perdi res del que ja s'ha pagat: `status` continua sent `cancelled`, `final_message_ids` la porta i `stop_reason` és `owner`.
+- The question is created with `outcome: null`. If the turn never ends (a crash or a restart of the server), it stays `null`: the client shows it as not completed. Turns stored before ADR 0007 do not have the key.
+- The `message` of `error` and of `failures` is in the language of the client that started the turn, and keeps it (see [Languages](#languages)).
+- A cancelled turn stores it too, before `turn.cancelled`. A turn is cancelled only once: a repeated `turn.cancel`, or the server shutting down, while the turn is stopping does not interrupt it, and `turn.cancelled` arrives when the turn has stopped and stored its outcome, with the same `usage`. If the write fails, the turn does not fail, and the question stays `null`.
+- `stop_reason`, only in a Refine turn ([ADR 0010](adr/0010-refine-mode.md)), says why it ended with the last version, which is the final answer:
+  - `owner`: the owner stopped it, after the round (`turn.stop`) or at once (`turn.cancel`);
+  - `unchanged`: neither model found anything to change for 2 rounds in a row;
+  - `converged`: both gave it the threshold (`convergence_threshold`) or more, without proposing any defect, for 2 rounds in a row (only with `stop_on_convergence`);
+  - `max_rounds`: it has done the rounds of `max_rounds`;
+  - `budget`: it has spent the budget (`budget_eur`);
+  - `failed`: both models failed in a round when there was already a version. The turn completes anyway, with the current version as the final answer and the failures in `failures`.
+- A cancelled Refine turn (`turn.cancel`) that already has a version first stores it as the final message, without any call, so that nothing already paid for is lost: `status` is still `cancelled`, `final_message_ids` includes it, and `stop_reason` is `owner`.
 
-### Metadades de missatge (`meta`)
+### Message metadata (`meta`)
 
-- Pregunta (`question`): `mode`, `target`, `options`, `models` (models triats per a aquest torn, si n'hi ha), `attachments` (els adjunts de la pregunta, en ordre: `Attachment[]` tal com eren en començar el torn; només hi és si en porta), `compaction_usage` (`Usage` de totes les crides de resum del torn, si n'hi ha hagut), `refine` (en un torn «Perfecciona», les seves `RefineOptions`: un torn recarregat en mostra els límits) i `outcome` (vegeu «Resultat del torn»).
-- Respostes (`answer`, `revision`, `synthesis`): `model`, `usage` (amb `cost_usd`; només el de l'intent que ha respost), `cost_basis` (`"api"`: cost real; `"equivalent"`: mode subscripció, valor a preus d'API), `latency_ms`, `ttft_ms`, `cached` (si ve de la memòria cau).
-- Resposta servida després d'un fallback (API de Claude): `declined`, `[{model, usage}]`, els intents facturats que altres models van declinar abans, cadascun amb el seu model i el seu cost. Són crides facturades a part (una fila d'ús per intent, amb `ok = false`) i compten al total del torn, però no a l'`usage` del missatge: els tokens de models diferents no se sumen mai ([ADR 0008](adr/0008-recompte-de-tokens.md)).
-- Resposta tallada: `truncated: true` i, si se sap, `finish_reason` (`"max_tokens"`: límit de sortida; `"content_filter"`: filtre de contingut; `"incomplete"` o `"interrupted"`; o un valor propi del proveïdor). Només hi són quan la resposta del model es va tallar abans del final: el contingut és una resposta parcial útil, mai completa. En una revisió que conserva la resposta anterior, el que es va tallar és la crítica o la resposta nova. Un torn amb algun missatge tallat no entra mai a la memòria cau de torns. Una síntesi degradada que reutilitza una resposta tallada també porta la marca ([ADR 0005](adr/0005-integritat-de-les-respostes.md)).
-- Revisió (`revision`): a més, `critique` (text), `agreement` (0–100 o `null`) i `unchanged` (bool). Si `unchanged` és cert, `content` conté la resposta anterior que es conserva, i `unchanged_note` (opcional) és la nota curta que el model va escriure després d'`UNCHANGED`, a la mateixa línia (com a molt 200 caràcters). `content` també conté la resposta anterior (amb `unchanged: false`) quan la revisió es va tallar abans de la resposta.
-- Síntesi (`synthesis`): a més, `consensus` (`{reached, round, scores}`) i `degraded: true` si s'ha desat sense cridar cap model.
-- Missatges d'un torn «Perfecciona» ([ADR 0010](adr/0010-mode-perfecciona.md)): fan servir els tipus de sempre. Les respostes de la ronda 0 són `answer`. Les revisions, les versions i la resposta final porten `refine`, el mateix objecte que el `refine` del seu `stream.completed`:
+- Question (`question`): `mode`, `target`, `options`, `models` (the models chosen for this turn, if any), `attachments` (the question's attachments, in order: `Attachment[]` as they were when the turn started; only present if it has any), `compaction_usage` (the `Usage` of all the turn's summary calls, if there were any), `refine` (in a Refine turn, its `RefineOptions`: a reloaded turn shows its limits) and `outcome` (see [Turn outcome](#turn-outcome-metaoutcome-of-the-question)).
+- Answers (`answer`, `revision`, `synthesis`): `model`, `usage` (with `cost_usd`; only that of the attempt that answered), `cost_basis` (`"api"`: real cost; `"equivalent"`: subscription mode, the value at API prices), `latency_ms`, `ttft_ms`, `cached` (whether it comes from the cache).
+- An answer served after a fallback (Claude's API): `declined`, `[{model, usage}]`, the billed attempts that other models declined before, each with its model and its cost. They are calls billed separately (one usage row per attempt, with `ok = false`) and they count towards the turn's total, but not towards the message's `usage`: the tokens of different models are never added up ([ADR 0008](adr/0008-token-accounting.md)).
+- A truncated answer: `truncated: true` and, if known, `finish_reason` (`"max_tokens"`: output limit; `"content_filter"`: content filter; `"incomplete"` or `"interrupted"`; or a value of the provider's own). They are only present when the model's answer was cut off before the end: the content is a useful partial answer, never a complete one. In a revision that keeps the previous answer, what was cut off is the critique or the new answer. A turn with any truncated message never enters the turn cache. A degraded synthesis that reuses a truncated answer carries the mark too ([ADR 0005](adr/0005-answer-integrity.md)).
+- Revision (`revision`): also `critique` (text), `agreement` (0–100 or `null`) and `unchanged` (bool). If `unchanged` is true, `content` holds the previous answer, which is kept, and `unchanged_note` (optional) is the short note the model wrote after `UNCHANGED`, on the same line (at most 200 characters). `content` also holds the previous answer (with `unchanged: false`) when the revision was cut off before the answer.
+- Synthesis (`synthesis`): also `consensus` (`{reached, round, scores}`), and `degraded: true` if it was stored without calling any model.
+- Messages of a Refine turn ([ADR 0010](adr/0010-refine-mode.md)): they use the usual kinds. The answers of round 0 are `answer`. The reviews, the versions and the final answer carry `refine`, the same object as the `refine` of their `stream.completed`:
 
   ```ts
   interface RefineChange { kind: string; text: string }
-  // kind: "defect" (un error), "clarity" (claredat), "simplification" (treure o simplificar)
-  // o "requirement" (un requisit de l'encàrrec); "merge" a les línies de la versió 1, que
-  // diuen què ha pres de cada resposta
+  // kind: "defect" (an error), "clarity", "simplification" (remove or simplify)
+  // or "requirement" (a requirement of the brief); "merge" in the lines of version 1,
+  // which say what it took from each answer
   type RefineMeta =
-    | { role: "review";              // una revisió (kind "revision", de la ronda 2 endavant)
-        score: number | null;        // 0–100: com respon la versió a l'encàrrec (null: no
-                                     // l'ha puntuada)
-        unchanged: boolean;          // no hi proposa cap canvi (UNCHANGED)
-        changes: RefineChange[] }    // els canvis que proposa (com a molt 5)
-    | { role: "version";             // una versió de l'editor (kind "revision", de la ronda 1
-                                     // endavant)
-        version: number;             // la vigent + 1: una que no s'accepta comparteix el
-                                     // número amb la següent que s'escriu
-        words: number; budget_words: number;   // les seves paraules i el límit del torn
-        accepted: boolean;           // ha passat a ser la versió vigent
-        reason: string | null;       // per què no (el reason del refine.round)
-        changelog: RefineChange[];   // els canvis que ha aplicat (com a molt 5)
-        copied_from?: number }       // una versió 1 desada sense cap crida (cap dels dos
-                                     // no l'ha pogut escriure): l'id de la resposta copiada
-    | { role: "final";               // la resposta final (kind "synthesis", final)
+    | { role: "review";              // a review (kind "revision", from round 2 on)
+        score: number | null;        // 0–100: how well the version meets the brief (null:
+                                     // the review did not score it)
+        unchanged: boolean;          // it proposes no change (UNCHANGED)
+        changes: RefineChange[] }    // the changes it proposes (at most 5)
+    | { role: "version";             // a version by the editor (kind "revision", from round 1
+                                     // on)
+        version: number;             // the current one + 1: one that is not accepted shares
+                                     // its number with the next one written
+        words: number; budget_words: number;   // its words and the turn's limit
+        accepted: boolean;           // it has become the current version
+        reason: string | null;       // why not, as a text (the reason of refine.round)
+        reason_code?: string | null; // why not, as a code (the reason_code of refine.round);
+                                     // missing in the versions stored before ADR 0011
+        changelog: RefineChange[];   // the changes it has applied (at most 5)
+        copied_from?: number }       // a version 1 stored without any call (neither model
+                                     // could write it): the id of the copied answer
+    | { role: "final";               // the final answer (kind "synthesis", final)
         version: number; words: number; budget_words: number;
-        stop_reason: string };       // el del resultat del torn
+        stop_reason: string };       // that of the turn's outcome
   ```
 
-  Es desen totes les versions que escriu l'editor, també les que no s'accepten (amb `accepted: false` i el motiu) i l'intent d'escurçar-ne una que passa del límit de paraules, perquè el propietari les pugui veure. La versió 1 no té cap versió anterior per mantenir: si la fusió passa del límit de paraules del propietari (`max_words`), es desa amb `accepted: false` i l'intent d'escurçar-la és la versió 1, amb `accepted: true` encara que el continuï passant (`words` més gran que `budget_words`), igual que una versió 1 copiada d'una resposta. Si el torn es cancel·la mentre s'escurça, la resposta final és la fusió. L'editor escriu cada versió sencera en una sola resposta, de com a molt 16.000 tokens de sortida, el raonament inclòs: una versió que no hi cap es talla i no s'accepta (`L'editor no ha escrit cap versió completa.`), així que un `max_words` de més d'unes 10.000 paraules (menys en català o en codi) no es pot complir. La resposta final és la versió vigent, desada sense cap crida (`usage` zero): l'agent que l'ha escrita, `round` de l'última ronda i `meta.copied_from`, l'`id` del missatge de la versió.
-- Missatges de ChatGPT (`answer`, `revision`, `synthesis`) d'una pregunta amb PDF quan no els pot obrir (la subscripció, vegeu «Contrast de Claude» a «Adjunts»): `pdf_reading`, com ha llegit cada PDF, en l'ordre dels adjunts:
+  Every version the editor writes is stored, also the ones that are not accepted (with `accepted: false` and the reason) and the attempt to shorten one that goes over the word limit, so that the owner can see them. Version 1 has no previous version to keep: if the merge goes over the owner's word limit (`max_words`), it is stored with `accepted: false`, and the attempt to shorten it is version 1, with `accepted: true` even if it still goes over (`words` greater than `budget_words`), just like a version 1 copied from an answer. If the turn is cancelled while shortening, the final answer is the merge. The editor writes each version whole in a single reply, of at most 16,000 output tokens, reasoning included: a version that does not fit is cut off and not accepted (`The editor wrote no complete version.`), so a `max_words` of more than about 10,000 words (fewer in languages such as Catalan, or in code) cannot be met. The final answer is the current version, stored without any call (zero `usage`): the agent that wrote it, the `round` of the last round, and `meta.copied_from`, the `id` of the version's message.
+- ChatGPT's messages (`answer`, `revision`, `synthesis`) for a question with PDFs, when it cannot open them (the subscription; see *Claude's check* under [Attachments](#attachments)): `pdf_reading`, how it read each PDF, in the order of the attachments:
 
   ```ts
   interface PdfReading {
     attachment_id: number; name: string;
-    checked: boolean;              // Claude n'ha contrastat alguna pàgina
-    claude_pages: number[];        // pàgines que ChatGPT ha llegit, senceres o en part, tal com
-                                   // les ha llegit Claude (sense text, il·legibles, incompletes
-                                   // o amb text que no es veu) o amb la descripció de Claude
-                                   // del que mostren les figures
-    hidden_pages: number[];        // pàgines amb text que no es veu: ChatGPT no l'ha rebut
-    unchecked_pages: number[];     // pàgines que ningú no ha contrastat: el text extret tal com és
-    reason: string | null;         // per què queden pàgines sense contrastar (null si no en queda cap)
+    checked: boolean;              // Claude has checked at least one page of it
+    claude_pages: number[];        // pages ChatGPT read, wholly or in part, as Claude
+                                   // read them (without text, unreadable, incomplete
+                                   // or with text that cannot be seen), or with Claude's
+                                   // description of what the figures show
+    hidden_pages: number[];        // pages with text that cannot be seen: ChatGPT did not get it
+    unchecked_pages: number[];     // pages nobody has checked: the extracted text as it is
+    reason: string | null;         // why pages are left unchecked (null if none is), in the
+                                   // language of the client that started the turn
   }
   ```
 
-  Una resposta servida des de la memòria cau de torns conserva el `meta` desat.
-- Missatges finals del torn (els de `final_message_ids`): `savings` (el mateix objecte que `turn.completed`). Cada missatge final porta també `unstored_usage` (`Usage`) si fins llavors hi ha hagut crides facturades que no han deixat cap missatge (errors, respostes buides, negatives, límit de sortida esgotat sense text, intents declinats).
-- Total d'un torn recarregat: `outcome.usage` de la pregunta, tal com és (no s'hi tornen a sumar `compaction_usage` ni `unstored_usage`). És igual al `usage` de l'esdeveniment final i a la suma de les files d'ús del torn més les dels seus resums de compactació, que es desen sense `turn_id` perquè es fan abans que existeixi la pregunta. Per als torns sense `outcome` (desats abans de l'ADR 0007), la suma dels `usage` dels seus missatges, més `compaction_usage` i l'`unstored_usage` de l'últim missatge final, que no inclou una crida fallida que acabés després que l'altre agent d'un duel hagués desat la seva resposta.
+  An answer served from the turn cache keeps the stored `meta`.
+- The turn's final messages (those in `final_message_ids`): `savings` (the same object as in `turn.completed`). Every final message also carries `unstored_usage` (`Usage`) if, until then, there were billed calls that left no message (errors, empty answers, refusals, the output limit used up without any text, declined attempts).
+- Total of a reloaded turn: the question's `outcome.usage`, as it is (`compaction_usage` and `unstored_usage` are not added to it again). It equals the `usage` of the final event, and the sum of the turn's usage rows plus those of its compaction summaries, which are stored without a `turn_id` because they are made before the question exists. For the turns without `outcome` (stored before ADR 0007), the sum of their messages' `usage`, plus `compaction_usage` and the `unstored_usage` of the last final message, which does not include a failed call that ended after the other agent of a duel had stored its answer.
 
 ## WebSocket `/api/ws`
 
-Una sola connexió persistent per pestanya. El servidor tanca amb el codi:
+A single persistent connection per tab, at `/api/ws?lang=en|es|ca`: the language of its messages and of the turns it starts (see [Languages](#languages)). The server closes it with code:
 
-- `4401` si no hi ha sessió en connectar i també quan la sessió s'acaba amb el socket obert: al moment si és un logout d'aquest servidor, i com a molt en 30 s si l'ha revocada `agentic-os reset-sessions` o ha caducat (el servidor la torna a comprovar cada 30 s encara que el client no enviï res).
-- `4403` si l'origen no és vàlid (vegeu «Autenticació i seguretat comuna»).
-- `1013` si el client no rep prou ràpid: té 4096 missatges pendents d'enviar, o 200.000 esdeveniments o més (cada esdeveniment d'un reenviament de `turn.subscribe` compta; un sol reenviament pot ser més llarg, així que qualsevol torn es pot recuperar), quan n'arriba un altre. Ha de reconnectar i fer `turn.subscribe` des de l'últim `seq` que té.
-- `1011` si hi ha un error intern.
+- `4401` if there is no session when connecting, and also when the session ends with the socket open: at once if it is a logout on this server, and within 30 s if `agentic-os reset-sessions` has revoked it or it has expired (the server checks it again every 30 s even if the client sends nothing).
+- `4403` if the origin is not valid (see [Authentication and common security](#authentication-and-common-security)).
+- `1013` if the client does not receive fast enough: it has 4,096 messages waiting to be sent, or 200,000 events or more (each event of a `turn.subscribe` replay counts; a single replay can be longer, so any turn can be recovered), when another one arrives. It must reconnect and send `turn.subscribe` from the last `seq` it has.
+- `1011` if there is an internal error.
 
-L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Només `turn.start`, `turn.stop` i `turn.cancel`, que són accions del propietari, compten com a activitat. L'*handshake*, el `ping` i el `turn.subscribe` (que el client envia sol després de reconnectar) la comproven només en lectura: no allarguen la caducitat per inactivitat. Així, una pestanya oberta sense ús no manté la sessió viva, encara que es reconnecti.
+The handshake and every client message (with `type`) check the session. Only `turn.start`, `turn.stop` and `turn.cancel`, which are the owner's actions, count as activity. The handshake, the `ping` and the `turn.subscribe` (which the client sends on its own after reconnecting) check it read-only: they do not extend the idle expiry. That way, a tab left open and unused does not keep the session alive, even if it reconnects.
 
-### Client → servidor
+### Client → server
 
 ```jsonc
 {"type": "turn.start", "request_id": "uuid", "text": "…", "mode": "debate",
@@ -415,64 +432,89 @@ L'*handshake* i cada missatge del client (amb `type`) comproven la sessió. Nom�
  "options": {"refine": {"max_rounds": 12, "budget_eur": 3, "max_words": null,
                         "stop_on_convergence": true, "convergence_threshold": 90,
                         "editor": "claude"}}}
-{"type": "turn.stop", "request_id": "uuid"}     // «Perfecciona»: atura'l en acabar la ronda
+{"type": "turn.stop", "request_id": "uuid"}     // Refine: stop it after the current round
 {"type": "turn.cancel", "request_id": "uuid"}
-{"type": "turn.subscribe", "request_id": "uuid", "after_seq": 12}   // després d'una reconnexió
+{"type": "turn.subscribe", "request_id": "uuid", "after_seq": 12}   // after a reconnection
 {"type": "ping", "t": 1727450000000}
 ```
 
-`mode`, `target`, `options` (també parcials) i `models` són opcionals: s'apliquen els `RuntimeSettings`. A `models` (i als `RuntimeSettings`), `null` o `""` vol dir el model per defecte; els identificadors es netegen d'espais. Límit: 3 torns simultanis i un de sol per conversa.
+`mode`, `target`, `options` (partial ones too) and `models` are optional: the `RuntimeSettings` apply. In `models` (and in the `RuntimeSettings`), `null` or `""` means the default model; identifiers are trimmed. Limit: 3 simultaneous turns, and a single one per conversation.
 
-Un torn «Perfecciona» (`mode: "refine"`, [ADR 0010](adr/0010-mode-perfecciona.md)) pren les seves opcions d'`options.refine`, també parcials: les claus que hi falten prenen el valor dels `RuntimeSettings`, i `max_words: null` vol dir el límit automàtic. Es validen amb els intervals de `RefineOptions`; si no, `error` amb `code: "invalid"`, el `request_id` i el missatge de la configuració (com `«refine.max_rounds» ha de ser un enter entre 2 i 50.`), i el torn no comença. El motor compta en dòlars, així que el servidor li passa el pressupost (`budget_eur`) convertit amb el tipus amb què l'aplicació mostra els euros: el `fx` del `hello` i de `GET /api/pricing` (el del BCE en mode `auto` si és recent; si no, el manual). Així, el torn s'atura quan el que la interfície mostra que ha gastat arriba al pressupost.
+A Refine turn (`mode: "refine"`, [ADR 0010](adr/0010-refine-mode.md)) takes its options from `options.refine`, partial ones too: the missing keys take the value of the `RuntimeSettings`, and `max_words: null` means the automatic limit. They are validated with the ranges of `RefineOptions`; otherwise, `error` with `code: "invalid"`, the `request_id` and the settings' message (like `"refine.max_rounds" must be an integer between 2 and 50.`), and the turn does not start. The engine counts in dollars, so the server passes it the budget (`budget_eur`) converted with the rate the app shows euros with: the `fx` of the `hello` and of `GET /api/pricing` (the ECB's in `auto` mode if it is recent; otherwise, the manual one). That way, the turn stops when what the interface shows it has spent reaches the budget.
 
-`turn.stop` («Atura en acabar la ronda») demana a un torn «Perfecciona» que s'aturi en acabar la ronda en curs: cap crida no es talla, la ronda acaba (les revisions i l'edició) i el torn es completa amb l'última versió i `stop_reason: "owner"`. El torn ho anuncia amb `turn.stopping` un sol cop, encara que es demani més d'una vegada. Per aturar-lo de seguida hi ha `turn.cancel` («Atura ara»), que també en desa l'última versió (vegeu «Resultat del torn»). Un `turn.stop` d'un torn que el servidor no té rep `turn.unknown`, com un `turn.cancel`; el d'un torn que ja ha acabat o que ja s'està cancel·lant no rep cap resposta. El d'un torn en curs d'un altre mode, que no té rondes per acabar, rep `error` amb `code: "invalid"`, el `request_id` i `Només un torn «Perfecciona» es pot aturar en acabar la ronda; per aturar-lo ara, cancel·la'l.`, i el torn continua.
+`turn.stop` ("Stop after this round") asks a Refine turn to stop at the end of the current round: no call is cut off, the round finishes (the reviews and the edit), and the turn completes with the last version and `stop_reason: "owner"`. The turn announces it with `turn.stopping`, only once, even if it is asked more than once. To stop it at once there is `turn.cancel` ("Stop now"), which also stores its last version (see [Turn outcome](#turn-outcome-metaoutcome-of-the-question)). A `turn.stop` for a turn the server does not have gets `turn.unknown`, like a `turn.cancel`; one for a turn that has already ended, or is already being cancelled, gets no answer. One for a running turn of another mode, which has no rounds to finish, gets `error` with `code: "invalid"`, the `request_id` and `Only a Refine turn can stop after the current round; to stop it now, cancel it.`, and the turn continues.
 
-`attachments` (opcional) són els `id` dels adjunts pujats, en l'ordre en què van a la pregunta: com a molt 5, cadascun un sol cop, enters d'1 a 2^63 − 1. Si no, `error` amb `code: "invalid"` i el `request_id`, i el torn no comença. Un adjunt que no existeix, o uns adjunts que sumen més de 20 MB, donen `turn.failed` amb `kind: "invalid"` (`L'adjunt 12 no existeix.`), sense `turn.started`, i no es desa res. El mateix passa si un adjunt s'esborra mentre el torn es prepara (des d'una altra pestanya, o l'escombrada d'un adjunt no enviat de fa més de 24 h): la pregunta es desa amb els seus adjunts en una sola transacció, abans de `turn.started`, i una conversa nova que el torn acabava de crear s'esborra. Les respostes i la síntesi reben els adjunts sencers; les revisions d'un debat reben els PDF com diu `pdf_in_revisions` dels `RuntimeSettings` (el valor de quan comença el torn), excepte un PDF del qual no s'ha pogut extreure cap text (un d'escanejat), que hi va sencer.
+`attachments` (optional) are the `id`s of the uploaded attachments, in the order they go in the question: at most 5, each one once, integers from 1 to 2^63 − 1. Otherwise, `error` with `code: "invalid"` and the `request_id`, and the turn does not start. An attachment that does not exist, or attachments adding up to more than 20 MB, give `turn.failed` with `kind: "invalid"` (`Attachment 12 does not exist.`, with `attachment_id: 12` in the `error`), without `turn.started`, and nothing is stored. The same happens if an attachment is deleted while the turn is being prepared (from another tab, or by the sweep of an unsent attachment older than 24 h): the question is stored with its attachments in a single transaction, before `turn.started`, and a new conversation the turn had just created is deleted. The answers and the synthesis get the attachments whole; a debate's revisions get the PDFs as the `pdf_in_revisions` of the `RuntimeSettings` says (its value when the turn starts), except a PDF from which no text could be extracted (a scanned one), which goes whole.
 
-La pregunta (`text`) pot tenir com a molt 100.000 caràcters. Una de buida o de més llarga dona `turn.failed` amb `kind: "invalid"`, sense `turn.started`, i no es desa res.
+The question (`text`) can have at most 100,000 characters. An empty or longer one gives `turn.failed` with `kind: "invalid"`, without `turn.started`, and nothing is stored.
 
-Cap missatge del client no pot passar de 524.288 caràcters (512 × 1024). El servidor no llegeix un missatge més llarg: respon `{"type": "error", "code": "too_large", "message": "El missatge és massa gran."}` sense `request_id`, perquè no sap de quin torn és, i el torn no comença. Un client no n'ha d'enviar cap: la resposta no li diria quin torn s'ha quedat sense començar. Una pregunta dins del seu límit només el pot superar si la major part són caràcters de control, que el JSON escriu amb 6 caràcters cadascun.
+No client message can exceed 524,288 characters (512 × 1024). The server does not read a longer message: it answers `{"type": "error", "code": "too_large", "message": "The message is too large."}` without a `request_id`, because it does not know which turn the message is for, and the turn does not start. A client must not send one: the answer would not tell it which turn was left unstarted. A question within its limit can only exceed it if most of it is control characters, which JSON writes with 6 characters each.
 
-### Servidor → client
+### Server → client
 
-En connectar: `{"type": "hello", "version": string, "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null fins al turn.started d'una conversa nova), "last_seq"}]}`. `version` és la versió del paquet `agentic-os`, la mateixa que mostra `agentic-os --version`. `active_turns` només inclou els torns en curs, i no els d'una conversa esborrada.
+On connecting: `{"type": "hello", "version": string, "providers": [ProviderStatus], "fx": FxRate, "active_turns": [{"request_id", "conversation_id" (null until the turn.started of a new conversation), "last_seq"}]}`. `version` is the version of the `agentic-os` package, the same one `agentic-os --version` shows. The `detail` of the `providers` is in the connection's language. `active_turns` only includes the running turns, and not those of a deleted conversation.
 
-Cada esdeveniment d'un torn porta `request_id` i `seq` (enter creixent dins del torn, començant per 1). El servidor guarda els esdeveniments dels torns en curs i dels acabats fa menys de 5 minuts: `turn.subscribe` reenvia els que tenen `seq > after_seq` i després continua en directe; si el torn no existeix, o la seva conversa s'ha esborrat, respon `{"type": "turn.unknown", "request_id"}`. Un `turn.cancel` d'un torn que el servidor no té (no ha existit mai, va acabar fa més de 5 minuts o era d'una conversa esborrada i ja ha acabat) també rep `turn.unknown`; el d'un torn que ja ha acabat, però que encara es guarda, no rep cap resposta. Una connexió rep cada torn una sola vegada: un `turn.subscribe` d'un torn que la connexió ja rep (perquè l'ha començat o ja s'hi ha subscrit) s'ignora, sense resposta, ja que ja té tots els esdeveniments des del primer `after_seq`. **Un torn continua encara que es talli la connexió**; només `turn.cancel` l'atura (i `turn.stop`, en acabar la ronda, un torn «Perfecciona»).
+Every event of a turn carries `request_id` and `seq` (an integer that grows within the turn, starting at 1). The server keeps the events of the running turns and of those that ended less than 5 minutes ago: `turn.subscribe` replays the ones with `seq > after_seq` and then continues live; if the turn does not exist, or its conversation has been deleted, it answers `{"type": "turn.unknown", "request_id"}`. A `turn.cancel` for a turn the server does not have (it never existed, it ended more than 5 minutes ago, or it belonged to a deleted conversation and has already ended) also gets `turn.unknown`; one for a turn that has already ended, but is still kept, gets no answer. A connection gets each turn only once: a `turn.subscribe` for a turn the connection already gets (because it started it or has already subscribed to it) is ignored, without an answer, since the connection already has every event from the first `after_seq`. **A turn continues even if the connection drops**; only `turn.cancel` stops it (and `turn.stop`, after the round, a Refine turn). A turn's texts are in the language of the client that started it, also for a connection that subscribes to it.
 
-| `type` | Camps | Significat |
+| `type` | Fields | Meaning |
 | --- | --- | --- |
-| `turn.started` | `conversation_id`, `turn_id`, `mode`, `new_conversation` | Pregunta desada |
-| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`, `review`, `edit`), `round` | Canvi de fase (`compaction` pot arribar abans de `turn.started`). `review` i `edit` són les dues parts d'una ronda d'un torn «Perfecciona»: les revisions de la versió vigent i la versió nova de l'editor |
-| `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | Un model comença a respondre |
-| `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | Fragment de text. En un torn «Perfecciona», `critique` són els canvis que proposa una revisió o el registre de canvis d'una versió, i `answer`, el text de la versió |
-| `pdf.check` | `attachment_id`, `name`, `state` (`checking`, `checked`, `unchecked`), `claude_pages`, `hidden_pages`, `unchecked_pages` (números de pàgina, com a `PdfReading`), `reused`, `usage` (`Usage` o `null`), `reason` (text o `null`) | Claude contrasta un PDF de la pregunta per a ChatGPT amb la subscripció (vegeu «Contrast de Claude» a «Adjunts»). `checking` quan Claude comença a contrastar-lo, abans de la primera crida de ChatGPT, que l'espera (no n'hi ha si el contrast ja estava desat, si no es pot fer o si el temps s'acaba abans que comenci: aleshores només arriba el final); després `checked` (almenys una pàgina contrastada) o `unchecked` (cap: la comprovació ha fallat, Claude no l'ha volgut fer, ha trigat massa, el PDF no s'ha pogut analitzar, no hi ha Claude o és el de demostració). `reused`: el contrast d'un torn anterior, sense cap crida en aquest. `usage`: el que han facturat les crides d'aquest torn per a aquest PDF, amb el cost (`null` mentre contrasta i si és reutilitzat). `reason`: per què queden pàgines sense contrastar, en català (`null` si no en queda cap). Si el torn es cancel·la o falla mentre Claude contrasta un PDF, no arriba cap `pdf.check` final per a aquell PDF: el client el dona per interromput. Forma part dels esdeveniments del torn (amb `seq` i reenviat per `turn.subscribe`) |
-| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; opcionals: `truncated` (només quan és `true`), `finish_reason`, `unchanged_note`, `pdf_reading` i `refine` (només quan hi són) | Resposta acabada i desada. Amb `truncated: true` és una resposta tallada, i `finish_reason` en diu el motiu. `unchanged_note` és la nota curta d'una revisió `UNCHANGED`. `pdf_reading` (`PdfReading[]`) diu com ha llegit ChatGPT els PDF quan no els pot obrir. `refine` és el `meta.refine` del missatge en un torn «Perfecciona»: una revisió, una versió (i si s'ha acceptat) o la resposta final. Tots valen el mateix que als camps de `meta` del missatge desat, així que la vista en directe i la recarregada coincideixen |
-| `stream.failed` | `stream_id`, `error: {kind, message}`; opcional: `usage` | Aquell model ha fallat (el torn pot continuar amb l'altre). Una negativa del model arriba com a `kind: "invalid"` amb el seu propi missatge; el text que s'hagués emès abans no es desa. `usage` és el que va facturar la crida fallida, amb el cost (una negativa, una resposta buida, el límit de sortida esgotat sense text); només hi és quan se'n sap una facturació. En un torn «Perfecciona», una revisió sense la llista de canvis que se li demanava (no té la secció de canvis, o no hi proposa cap canvi en el format demanat ni hi diu `UNCHANGED`) falla amb `kind: "invalid"` i `La revisió no té la llista de canvis que se li demanava.`: aquell agent no compta en la ronda |
-| `refine.round` | `round`, `version`, `accepted`, `reason`, `words`, `budget_words`, `changes`, `proposals`, `scores`, `converged`, `usage`, `total` | Final d'una ronda d'un torn «Perfecciona», de la 1 endavant. `version`: la versió vigent després de la ronda. `accepted`: la ronda n'ha escrit una de nova, que ara és la vigent. `reason`: per què no, en català (`La nova versió passava del límit de paraules.`, `L'editor no ha escrit cap versió completa.`, `La nova versió és igual a l'anterior.`, `Cap dels dos hi ha trobat res a canviar.` o, quan no ha tornat cap revisió o cap editor no ha pogut respondre, `Els models han fallat i la ronda no ha escrit cap versió.`, i el torn s'acaba amb `stop_reason: "failed"`), o `null`. `words`: les paraules de la versió vigent; `budget_words`: el límit del torn. `changes`: el registre de canvis de la versió nova (`[{kind, text}]`; buit si no n'hi ha cap). `proposals` i `scores` (`{"claude", "chatgpt"}`): quants canvis ha proposat la revisió de cada agent i quina puntuació 0–100 li ha donat (`null` sense revisió, i la puntuació també si no n'ha donat cap de vàlida; a la ronda 1, la fusió, sempre `null`). `converged`: la ronda compleix la regla de convergència i el torn s'atura. `usage`: el que han facturat les crides de la ronda; `total`: el del torn fins ara |
-| `turn.stopping` | `round` | El torn «Perfecciona» s'aturarà en acabar `round`: la ronda en curs, o la 1 si encara no n'ha acabat cap (la versió 1 sempre s'escriu). És la resposta a `turn.stop`, un sol cop |
-| `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached`; opcional: `stop_reason` (només en un torn «Perfecciona») | Torn acabat. `stop_reason` diu per què un torn «Perfecciona» s'ha acabat amb l'última versió (vegeu «Resultat del torn») |
-| `turn.failed` | `error: {kind, message}`, `usage` | Torn avortat. `usage` és el total del torn fins aleshores, el mateix d'`outcome.usage` (zero si ha fallat abans de cap crida) |
-| `turn.cancelled` | `usage` | Cancel·lat per l'usuari (o perquè el servidor s'atura). `usage` és el que el torn havia gastat, el mateix d'`outcome.usage`. Arriba quan el torn s'ha aturat i ha desat el resultat; un `turn.cancel` repetit mentrestant no fa res |
+| `turn.started` | `conversation_id`, `turn_id`, `mode`, `new_conversation` | Question stored |
+| `phase` | `phase` (`answer`, `revision`, `synthesis`, `compaction`, `review`, `edit`), `round` | Phase change (`compaction` can arrive before `turn.started`). `review` and `edit` are the two parts of a round of a Refine turn: the reviews of the current version and the editor's new version |
+| `stream.started` | `stream_id`, `agent`, `kind`, `round`, `model` | A model starts answering |
+| `stream.delta` | `stream_id`, `section` (`text`, `critique`, `answer`), `text` | A fragment of text. In a Refine turn, `critique` is the changes a review proposes or the changelog of a version, and `answer`, the text of the version |
+| `pdf.check` | `attachment_id`, `name`, `state` (`checking`, `checked`, `unchecked`), `claude_pages`, `hidden_pages`, `unchecked_pages` (page numbers, as in `PdfReading`), `reused`, `usage` (`Usage` or `null`), `reason` (text or `null`) | Claude checks a PDF of the question for ChatGPT on the subscription (see *Claude's check* under [Attachments](#attachments)). `checking` when Claude starts checking it, before ChatGPT's first call, which waits for it (there is none if the check was already stored, if it cannot be done, or if time runs out before it starts: then only the final one arrives); then `checked` (at least one page checked) or `unchecked` (none: the check failed, Claude declined to do it or took too long, the PDF could not be analysed, there is no Claude, or it is the demo one). `reused`: the check of an earlier turn, without any call in this one. `usage`: what this turn's calls have billed for this PDF, with the cost (`null` while checking, and if reused). `reason`: why pages are left unchecked, in the language of the client that started the turn (`null` if none is). If the turn is cancelled or fails while Claude is checking a PDF, no final `pdf.check` arrives for that PDF: the client takes it as interrupted. It is one of the turn's events (with `seq`, and replayed by `turn.subscribe`) |
+| `stream.completed` | `stream_id`, `message_id`, `usage`, `latency_ms`, `ttft_ms`, `agreement`, `unchanged`, `cost_basis`; optional: `truncated` (only when it is `true`), `finish_reason`, `unchanged_note`, `pdf_reading` and `refine` (only when present) | Answer finished and stored. With `truncated: true` it is a truncated answer, and `finish_reason` says why. `unchanged_note` is the short note of an `UNCHANGED` revision. `pdf_reading` (`PdfReading[]`) says how ChatGPT read the PDFs when it cannot open them. `refine` is the message's `meta.refine` in a Refine turn: a review, a version (and whether it was accepted, with its `reason` and `reason_code`) or the final answer. They all have the same values as the fields of the stored message's `meta`, so the live view and the reloaded one match |
+| `stream.failed` | `stream_id`, `error: {kind, message}`; optional: `usage` | That model has failed (the turn can continue with the other one). A refusal of the model arrives as `kind: "invalid"` with its own message; any text emitted before it is not stored. `usage` is what the failed call billed, with the cost (a refusal, an empty answer, the output limit used up without any text); it is only present when some billing is known. In a Refine turn, a review without the list of changes it was asked for (it does not have the changes section, or it proposes no change in the requested format and does not say `UNCHANGED` either) fails with `kind: "invalid"` and `The review does not have the list of changes it was asked for.`: that agent does not count in the round |
+| `refine.round` | `round`, `version`, `accepted`, `reason`, `reason_code`, `words`, `budget_words`, `changes`, `proposals`, `scores`, `converged`, `usage`, `total` | End of a round of a Refine turn, from round 1 on. `version`: the current version after the round. `accepted`: the round has written a new version, which is now the current one. `reason`: why not, as a text in the language of the client that started the turn: `The new version went over the word limit.`, `The editor wrote no complete version.`, `The new version is the same as the previous one.`, `Neither of them found anything to change.` or, when no review came back or no editor could answer, `The models failed and the round wrote no version.` (and the turn ends with `stop_reason: "failed"`); `null` when the round wrote a version. `reason_code`: the same reason as a code, for the client's logic: `over_budget`, `incomplete`, `identical`, `nothing_to_change` or `failed_round`, respectively; `null` when the round wrote a version. `words`: the words of the current version; `budget_words`: the turn's limit. `changes`: the changelog of the new version (`[{kind, text}]`; empty if there is none). `proposals` and `scores` (`{"claude", "chatgpt"}`): how many changes each agent's review proposed, and what score from 0 to 100 it gave (`null` without a review, and the score also if the review gave no valid one; in round 1, the merge, always `null`). `converged`: the round meets the convergence rule, and the turn stops. `usage`: what the round's calls billed; `total`: what the turn has billed so far |
+| `turn.stopping` | `round` | The Refine turn will stop at the end of `round`: the current round, or round 1 if it has not finished any round yet (version 1 is always written). It is the answer to `turn.stop`, only once |
+| `turn.completed` | `conversation_id`, `turn_id`, `final_message_ids`, `usage`, `savings`, `consensus`, `cached`; optional: `stop_reason` (only in a Refine turn) | Turn finished. `stop_reason` says why a Refine turn ended with the last version (see [Turn outcome](#turn-outcome-metaoutcome-of-the-question)) |
+| `turn.failed` | `error: {kind, message}`, with `attachment_id` when the error is an attachment that no longer exists; `usage` | Turn aborted. `message` is in the language of the client that started the turn; `attachment_id` lets the client act on the error without reading it. `usage` is the turn's total until then, the same as `outcome.usage` (zero if it failed before any call) |
+| `turn.cancelled` | `usage` | Cancelled by the user (or because the server is shutting down). `usage` is what the turn had spent, the same as `outcome.usage`. It arrives when the turn has stopped and stored its outcome; a repeated `turn.cancel` in the meantime does nothing |
 
-Altres: `{"type": "pong", "t"}` (retorna el mateix `t`) i `{"type": "error", "code", "message", "request_id"?}` per a missatges invàlids o límits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` quan es rebutja un `turn.start` o un `turn.stop`). Un `conversation_id` fora de l'interval 1 – 2^63 − 1 dona `invalid`. Un missatge amb text que no es pot codificar en UTF-8 (un substitut solitari, `\ud800`, en qualsevol clau o valor) dona `invalid` amb `El missatge conté text que no és UTF-8 vàlid.` i el `request_id` si aquest és vàlid; no se n'usa res.
+Two rounds of a Refine turn: round 2 writes version 2, and in round 3 the editor's new version goes over the word limit, so version 2 stays the current one:
 
-`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (tokens processats estimats estalviats i el seu valor aproximat: les respostes conservades al preu de sortida del seu model, la compactació al preu d'entrada de les crides que portaven el context, les rondes omeses al cost mitjà de les revisions del torn i un encert de memòria cau al cost del torn original sencer, cada crida i cada intent declinat abans d'un fallback a les tarifes actuals del seu model; `null` si no se'n pot posar preu a cap). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}` o `null` fora del mode debat.
+```jsonc
+{"type": "refine.round", "request_id": "uuid", "round": 2, "version": 2, "accepted": true,
+ "reason": null, "reason_code": null, "words": 512, "budget_words": 600,
+ "changes": [{"kind": "defect", "text": "…"}, {"kind": "clarity", "text": "…"}],
+ "proposals": {"claude": 2, "chatgpt": 1}, "scores": {"claude": 72, "chatgpt": 70},
+ "converged": false,
+ "usage": {"input_tokens": 2400, "output_tokens": 3100, "cache_read_tokens": 18000,
+           "cache_write_tokens": 6000, "reasoning_tokens": 900, "cost_usd": 0.19},
+ "total": {"input_tokens": 6900, "output_tokens": 9800, "cache_read_tokens": 41000,
+           "cache_write_tokens": 15000, "reasoning_tokens": 2600, "cost_usd": 0.55},
+ "seq": 31}
+{"type": "refine.round", "request_id": "uuid", "round": 3, "version": 2, "accepted": false,
+ "reason": "The new version went over the word limit.", "reason_code": "over_budget",
+ "words": 512, "budget_words": 600, "changes": [],
+ "proposals": {"claude": 1, "chatgpt": 2}, "scores": {"claude": 85, "chatgpt": 80},
+ "converged": false,
+ "usage": {"input_tokens": 2700, "output_tokens": 4300, "cache_read_tokens": 21000,
+           "cache_write_tokens": 5500, "reasoning_tokens": 1200, "cost_usd": 0.24},
+ "total": {"input_tokens": 9600, "output_tokens": 14100, "cache_read_tokens": 62000,
+           "cache_write_tokens": 20500, "reasoning_tokens": 3800, "cost_usd": 0.79},
+ "seq": 44}
+```
 
-### Ordre típic d'un debat
+Others: `{"type": "pong", "t"}` (returns the same `t`) and `{"type": "error", "code", "message", "request_id"?}` for invalid messages or limits (`code`: `invalid`, `busy`, `duplicate`, `unavailable`, `too_large`, `internal`; `request_id` when a `turn.start` or a `turn.stop` is rejected), with `message` in the connection's language. A `conversation_id` outside the range 1 – 2^63 − 1 gives `invalid`. A message with text that cannot be encoded in UTF-8 (a lone surrogate, `\ud800`, in any key or value) gives `invalid` with `The message contains text that is not valid UTF-8.` and the `request_id` if that one is valid; nothing in the message is used.
 
-1. `turn.started` → `phase(answer, 0)` → dos `stream.started` (Claude i ChatGPT en paral·lel) amb els seus `stream.delta` (`section: "text"`) i `stream.completed`. Si ChatGPT funciona amb la subscripció i la pregunta porta PDF, abans del `stream.started` de ChatGPT arriben els `pdf.check` de cada PDF (`checking` i, en acabar el contrast, `checked` o `unchecked`) mentre Claude ja respon.
-2. Per a cada ronda `r`: `phase(revision, r)` → dos fluxos amb `section` `critique` i després `answer`; `stream.completed` porta `agreement`.
-3. Si tots dos arriben al llindar de consens, s'aturen les rondes (estalvi `early_stop`).
-4. `phase(synthesis, r)` → un flux de l'agent sintetitzador → `turn.completed`.
+`savings` = `{"cache", "compaction", "early_stop", "unchanged", "total", "cost_usd"}` (the estimated processed tokens saved and their approximate value: the kept answers at the output price of their model, the compaction at the input price of the calls that carried the context, the skipped rounds at the average cost of the turn's revisions, and a cache hit at the cost of the whole original turn; each call, and each attempt declined before a fallback, at the current rates of its model; `null` if none of them can be priced). `consensus` = `{"reached": bool, "round": int, "scores": {"claude": int, "chatgpt": int}}`, or `null` outside the debate mode.
 
-### Ordre típic d'un torn «Perfecciona»
+### Typical order of a debate
 
-Les dues IA milloren un sol document ronda rere ronda ([ADR 0010](adr/0010-mode-perfecciona.md); el bucle, a [ARQUITECTURA.md](ARQUITECTURA.md#modes-de-torn)):
+1. `turn.started` → `phase(answer, 0)` → two `stream.started` (Claude and ChatGPT in parallel) with their `stream.delta` (`section: "text"`) and `stream.completed`. If ChatGPT runs on the subscription and the question carries PDFs, the `pdf.check` events of each PDF (`checking` and, when the check ends, `checked` or `unchecked`) arrive before ChatGPT's `stream.started`, while Claude is already answering.
+2. For each round `r`: `phase(revision, r)` → two streams with `section` `critique` and then `answer`; `stream.completed` carries `agreement`.
+3. If both reach the consensus threshold, the rounds stop (`early_stop` saving).
+4. `phase(synthesis, r)` → a stream from the synthesizer agent → `turn.completed`.
 
-1. `turn.started` → `phase(answer, 0)` → les dues respostes a l'encàrrec, en paral·lel, com en un debat.
-2. `phase(edit, 1)` → l'editor (`editor`, o l'altre si l'editor ha fallat) fusiona les respostes en la versió 1: un flux amb `section` `answer` (la versió) i després `critique` (el registre de canvis), i el `stream.completed` amb `refine`. Si la fusió passa del límit de paraules del propietari, un altre flux de la mateixa ronda és l'intent d'escurçar-la, que és la versió 1 encara que el continuï passant → `refine.round` de la ronda 1.
-3. Per a cada ronda `k` de la 2 endavant: `phase(review, k)` → les revisions de la versió vigent (`stream.completed` amb `refine`, `role: "review"`). Si alguna hi proposa canvis, `phase(edit, k)` → la versió nova de l'editor (i, si passa del límit de paraules, un altre flux: l'intent d'escurçar-la) → `refine.round` de la ronda `k`. Si un dels dos models falla, l'altre continua sol.
-4. Abans de cada ronda de la 2 endavant, el torn s'acaba si el propietari ho ha demanat (`turn.stop`), si ja ha gastat el pressupost o si ja ha fet les rondes de `max_rounds`; i en acabar-ne una, si cap dels dos no hi ha trobat res a canviar 2 rondes seguides o si compleix la regla de convergència (vegeu `stop_reason` a «Resultat del torn»). El pressupost no compta les crides dels models sense preu.
-5. La resposta final, la versió vigent desada sense cap crida → `turn.completed` amb `stop_reason`.
+### Typical order of a Refine turn
 
-Si el propietari demana d'aturar-lo, `turn.stopping` arriba enmig, un sol cop. Un torn «Perfecciona» no fa servir mai la memòria cau de torns.
+The two AIs improve a single document, round after round ([ADR 0010](adr/0010-refine-mode.md); the loop is in [ARCHITECTURE.md](ARCHITECTURE.md#turn-modes)):
+
+1. `turn.started` → `phase(answer, 0)` → the two answers to the brief, in parallel, as in a debate.
+2. `phase(edit, 1)` → the editor (`editor`, or the other agent if the editor has failed) merges the answers into version 1: a stream with `section` `answer` (the version) and then `critique` (the changelog), and the `stream.completed` with `refine`. If the merge goes over the owner's word limit, another stream of the same round is the attempt to shorten it, which is version 1 even if it still goes over → `refine.round` of round 1.
+3. For each round `k` from 2 on: `phase(review, k)` → the reviews of the current version (`stream.completed` with `refine`, `role: "review"`). If any review proposes changes, `phase(edit, k)` → the editor's new version (and, if it goes over the word limit, another stream: the attempt to shorten it) → `refine.round` of round `k`. If one of the two models fails, the other one continues alone.
+4. Before each round from 2 on, the turn ends if the owner has asked for it (`turn.stop`), if it has already spent the budget or if it has already done the rounds of `max_rounds`; and at the end of a round, if neither model has found anything to change for 2 rounds in a row, or if it meets the convergence rule (see `stop_reason` in [Turn outcome](#turn-outcome-metaoutcome-of-the-question)). The budget does not count the calls of models without a price.
+5. The final answer, the current version stored without any call → `turn.completed` with `stop_reason`.
+
+If the owner asks to stop it, `turn.stopping` arrives in between, only once. A Refine turn never uses the turn cache.

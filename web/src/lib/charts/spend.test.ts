@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n, LOCALE_KEY } from '../i18n/index.svelte';
 import type { AgentSpend, FxRate, MonthSpend, ProviderStatus, Stats } from '../protocol';
 import {
   budgetStatus,
@@ -263,5 +264,44 @@ describe('monthCards', () => {
     expect(monthCards(null, null)).toEqual([]);
     // An invalid rate hides the money rather than showing it at 0.
     expect(monthCards([provider('claude', 'api')], month({ api_usd: 5 }, {}, { ...HALF, eur_per_usd: 0 }))[0]!.budget).toBeNull();
+  });
+});
+
+describe('the money in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it('writes amounts, the exchange rate, the month and the unpriced calls in the language in force', () => {
+    i18n.set('en');
+    expect(formatAmount(12.3)).toBe('€12.30');
+    expect(formatCost(0)).toBe('€0');
+    expect(formatEurTick(1500)).toMatch(/^€1\.5k$/i);
+    expect(fxNote(ECB)).toBe('1 USD = €0.8612 · ECB 25/9');
+    expect(fxNote({ eur_per_usd: 0.86, as_of: null, source: 'manual' })).toBe('1 USD = €0.86 · manual rate');
+    expect(unpricedText(1)).toBe('1 unpriced call');
+    expect(unpricedText(1200)).toBe('1,200 unpriced calls');
+    expect(monthLabel('2026-09')).toBe('September 2026');
+    i18n.set('es');
+    expect(plain(formatAmount(12.3))).toBe('12,30 €');
+    expect(plain(fxNote({ eur_per_usd: 0.86, as_of: null, source: 'manual' }))).toBe('1 USD = 0,86 € · tipo manual');
+    expect(unpricedText(3)).toBe('3 llamadas sin precio');
+    expect(monthLabel('2026-09')).toBe('septiembre de 2026');
+  });
+
+  it('describes the budget and the plan of each agent in the language in force', () => {
+    i18n.set('en');
+    const [claude, chatgpt] = monthCards(
+      [provider('claude', 'api'), provider('chatgpt', 'cli')],
+      month({ api_usd: 84, budget_eur: 50, budget_used: 0.84 }, { equivalent_usd: 68.4, plan_eur: 20, plan_value: 1.71 }),
+    );
+    expect(claude!.budget).toMatchObject({ label: 'API budget', status: { label: 'Close to the budget' } });
+    expect(claude!.budget!.valueText).toBe('€42 of €50 (84%): close to the budget');
+    expect(chatgpt!.plan).toMatchObject({ label: 'Subscription value', status: { label: 'Already pays off' } });
+    expect(chatgpt!.plan!.valueText).toBe('€34.20 of the €20 plan at API prices (171%): already pays off');
+    i18n.set('es');
+    const [none] = monthCards([provider('claude', 'api')], month({ api_usd: 3 }));
+    expect(none!.budget).toMatchObject({ label: 'Gasto de API', caption: 'Sin presupuesto mensual.', action: 'Defínelo en Configuración' });
   });
 });

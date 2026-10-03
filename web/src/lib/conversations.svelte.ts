@@ -2,13 +2,14 @@
 // searches of the sidebar and the command palette.
 
 import { api, ApiError, RequestTimeoutError, type RequestOptions } from './api';
+import { i18n } from './i18n/index.svelte';
 import { CONVERSATION_QUERY_MAX_LENGTH, type ConversationDetail, type ConversationSummary } from './protocol';
 import { turnsFromMessages, type TurnView } from './turns.svelte';
 
 const PAGE = 50;
 
 /**
- * How many conversations one «Mostra'n més» steps back over when the last ones shown
+ * How many conversations one «Show more» steps back over when the last ones shown
  * were deleted in another tab or device; if there were more, the next one goes on.
  */
 const GONE_CURSOR_STEPS = 10;
@@ -16,7 +17,8 @@ const GONE_CURSOR_STEPS = 10;
 /** How long a search waits after the last keystroke before asking the server. */
 export const SEARCH_DEBOUNCE_MS = 250;
 
-const SEARCH_FAILED = "No s'ha pogut fer la cerca.";
+/** The texts of the conversations' errors, in the language in force when they happen. */
+const texts = () => i18n.m.app.conversations;
 
 export function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
@@ -24,7 +26,7 @@ export function errorMessage(err: unknown, fallback: string): string {
     return err.message || fallback;
   }
   if (err instanceof RequestTimeoutError) return err.message;
-  if (err instanceof TypeError) return 'No es pot connectar amb el servidor.';
+  if (err instanceof TypeError) return texts().unreachable;
   return fallback;
 }
 
@@ -65,7 +67,7 @@ function comesAfter(a: ConversationSummary, b: ConversationSummary): boolean {
  * A fresh first page merged with the pages loaded before it (A13). What the first page
  * reaches is as the server has it now (moved to the top, renamed or gone); what it does
  * not reach keeps its place after it. So a refresh never shortens the list, and never
- * loses the conversation at a page boundary when it overlaps «Mostra'n més» (N12).
+ * loses the conversation at a page boundary when it overlaps «Show more» (N12).
  */
 export function mergeFirstPage(
   first: readonly ConversationSummary[],
@@ -95,7 +97,7 @@ function matching(term: string, ...lists: readonly (readonly ConversationSummary
 
 /**
  * A list request under way: what to ask again if a change made here makes its answer
- * stale. `thenMore`: a «Mostra'n més» it superseded, to go on with afterwards.
+ * stale. `thenMore`: a «Show more» it superseded, to go on with afterwards.
  */
 type ListRequest = { kind: 'first'; options: RequestOptions; thenMore: boolean } | { kind: 'more' };
 
@@ -130,7 +132,7 @@ export class ConversationPages {
   }
 
   /**
-   * The first page again, merged with the pages already loaded. A «Mostra'n més» under
+   * The first page again, merged with the pages already loaded. A «Show more» under
    * way is superseded (its page was served before this one), and goes on once the
    * first page is in.
    */
@@ -155,7 +157,7 @@ export class ConversationPages {
       applied = true;
     } catch (err) {
       if (generation !== this.#generation) return;
-      this.error = errorMessage(err, term ? SEARCH_FAILED : "No s'han pogut carregar les converses.");
+      this.error = errorMessage(err, term ? texts().searchFailed : texts().listFailed);
     } finally {
       this.#end(generation);
     }
@@ -163,7 +165,7 @@ export class ConversationPages {
   }
 
   /**
-   * The page after the last conversation shown («Mostra'n més»). The server has no page
+   * The page after the last conversation shown («Show more»). The server has no page
    * after a conversation that no longer exists: when the last ones shown were deleted in
    * another tab or device, it goes on from the one before them (A13), and those its page
    * leaves out are dropped (gone, or moved to the top, where the next refresh has them).
@@ -185,7 +187,7 @@ export class ConversationPages {
       }
       if (generation !== this.#generation) return;
       // Out of steps with nothing found: the last one asked goes too (gone, or the end of
-      // the list, which the next «Mostra'n més» brings back), and that one steps back further.
+      // the list, which the next «Show more» brings back), and that one steps back further.
       const outOfSteps = !page.length && steps === GONE_CURSOR_STEPS && at > 0;
       const kept = items.slice(0, outOfSteps ? at : at + 1);
       const known = new Set(kept.map((c) => c.id));
@@ -194,10 +196,7 @@ export class ConversationPages {
       this.error = null;
     } catch (err) {
       if (generation !== this.#generation) return;
-      this.error = errorMessage(
-        err,
-        term ? "No s'han pogut carregar més resultats." : "No s'han pogut carregar més converses.",
-      );
+      this.error = errorMessage(err, term ? texts().moreResultsFailed : texts().moreFailed);
     } finally {
       this.#end(generation);
     }
@@ -319,7 +318,7 @@ export class ConversationSearch extends ConversationPages {
     return matching(this.term, this.#convs.list, this.items);
   }
 
-  /** «Torna-ho a provar» after a search that failed. */
+  /** «Try again» after a search that failed. */
   retry(): void {
     if (!this.term) return;
     this.#stopTimer();
@@ -381,9 +380,10 @@ export class Conversations {
     return this.#all.error;
   }
 
+  /** The open conversation's title, in the language in force when it has none of its own. */
   get currentTitle(): string {
-    if (this.currentId == null) return 'Nova conversa';
-    return this.list.find((c) => c.id === this.currentId)?.title || this.detail?.title || 'Conversa';
+    if (this.currentId == null) return i18n.m.app.newConversation;
+    return this.list.find((c) => c.id === this.currentId)?.title || this.detail?.title || texts().title;
   }
 
   /**
@@ -396,7 +396,7 @@ export class Conversations {
     return this.#all.refresh(options);
   }
 
-  /** «Mostra'n més». */
+  /** «Show more». */
   loadMore(): Promise<void> {
     return this.#all.loadMore();
   }
@@ -435,7 +435,7 @@ export class Conversations {
         this.#gone(id);
         return false;
       }
-      this.loadError = errorMessage(err, "No s'ha pogut carregar la conversa.");
+      this.loadError = errorMessage(err, texts().loadFailed);
       return true;
     } finally {
       if (token === this.#token) this.loading = false;

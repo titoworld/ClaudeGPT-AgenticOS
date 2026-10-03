@@ -2,7 +2,7 @@
   // How ChatGPT read the question's PDFs when it cannot open them (the subscription): a
   // badge on each of its messages, from `meta.pdf_reading` (live, from its
   // stream.completed), so that an agreement with Claude on the pages ChatGPT read through
-  // Claude is not taken for two independent readings (docs/adr/0009-adjunts.md). Its
+  // Claude is not taken for two independent readings (docs/adr/0009-attachments.md). Its
   // tooltip lists, per PDF, the pages Claude read, the hidden ones and the unchecked ones;
   // a tap shows it too (phones have no hover), and screen readers get it as the badge's
   // description.

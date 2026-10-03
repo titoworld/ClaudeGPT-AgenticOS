@@ -2,9 +2,11 @@
   // Renders untrusted markdown. While streaming, re-renders at most ~20 times
   // per second (backing off to ~6/s when a parse gets expensive) so long
   // answers never block typing or the 3D scene. Code blocks get copy buttons
-  // and lazy highlighting once the text is final.
+  // and lazy highlighting once the text is final. A change of language renders it again,
+  // with the texts of the new one (image links, hidden characters, code bars).
   import { untrack } from 'svelte';
   import { enhanceCodeBlocks } from '../lib/code-blocks';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { hasCodeBlocks, renderMarkdown } from '../lib/markdown';
 
   interface Props {
@@ -25,6 +27,7 @@
   let cost = 0;
   let pending = '';
   let rendered: string | null = null;
+  let renderedIn = i18n.locale;
   let html = $state.raw(initialHtml());
 
   function initialHtml(): string {
@@ -34,8 +37,9 @@
   }
 
   function renderNow(src: string): void {
-    if (src === rendered) return;
+    if (src === rendered && renderedIn === i18n.locale) return;
     rendered = src;
+    renderedIn = i18n.locale;
     const t0 = performance.now();
     html = renderMarkdown(src);
     cost = performance.now() - t0;
@@ -55,6 +59,7 @@
   $effect(() => {
     const src = text;
     const live = streaming;
+    void i18n.locale;
     untrack(() => {
       pending = src;
       if (!live) {
@@ -76,4 +81,7 @@
   });
 </script>
 
-<div class="md {className}" class:streaming bind:this={el}>{@html html}</div>
+<!-- A new element for each language: its code bars are made again in that language. -->
+{#key i18n.locale}
+  <div class="md {className}" class:streaming bind:this={el}>{@html html}</div>
+{/key}

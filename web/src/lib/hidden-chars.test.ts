@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { enhanceCodeBlocks } from './code-blocks';
 import {
   answerForClipboard,
+  hiddenCopyNotice,
   MAX_MARKS,
   MAX_MARKS_PER_BLOCK,
   revealHidden,
   revealHiddenMarkdown,
   revealHiddenParts,
 } from './hidden-chars';
+import { i18n } from './i18n/index.svelte';
 import { renderMarkdown } from './markdown';
 
 // Trojan Source (CVE-2021-42574) and tag smuggling: the characters the listed set covers.
@@ -334,5 +336,37 @@ describe('revealHiddenParts (model text shown outside Markdown)', () => {
       expect.objectContaining({ text: `⟨${MAX_MARKS_PER_BLOCK + 1} caràcters invisibles eliminats⟩`, collapsed: true }),
       'b',
     ]);
+  });
+});
+
+describe('hidden characters in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('the title of a mark, and the count of a collapsed block', () => {
+    const payload = String.fromCodePoint(0xe0041).repeat(MAX_MARKS_PER_BLOCK + 1);
+    i18n.set('en');
+    expect(revealHiddenParts('a\u202Eb')[1]).toEqual({ text: '⟨U+202E⟩', title: 'Invisible or direction-control character (U+202E)', collapsed: false });
+    expect(revealHiddenParts(`a${payload}b`)[1]).toEqual({
+      text: `⟨${MAX_MARKS_PER_BLOCK + 1} invisible characters removed⟩`,
+      title: `There were too many invisible or direction-control characters to mark them one by one: ${MAX_MARKS_PER_BLOCK + 1} were removed from this block, and they are not copied either.`,
+      collapsed: true,
+    });
+    i18n.set('es');
+    expect(revealHiddenParts('a\u202Eb')[1]).toMatchObject({ title: 'Carácter invisible o de control de dirección (U+202E)' });
+    expect(revealHidden(`echo hi\u202E${payload} # ok\n`).text).toBe(`echo hi⟨${MAX_MARKS_PER_BLOCK + 2} caracteres invisibles eliminados⟩ # ok\n`);
+  });
+
+  it('the notice after copying an answer, with each count in agreement', () => {
+    i18n.set('en');
+    expect(hiddenCopyNotice(1, 0)).toBe('The answer had 1 invisible character: it was copied as ⟨U+…⟩.');
+    expect(hiddenCopyNotice(0, 1)).toBe('The answer had 1 invisible character: it was not copied.');
+    expect(hiddenCopyNotice(3, 0)).toBe('The answer had 3 invisible characters: they were copied as ⟨U+…⟩.');
+    expect(hiddenCopyNotice(0, 300)).toBe('The answer had 300 invisible characters: they were not copied.');
+    expect(hiddenCopyNotice(1, 300)).toBe('The answer had 301 invisible characters: 1 was copied as ⟨U+…⟩ and 300 were not.');
+    expect(answerForClipboard('Hola\u200B món').notice).toBe('The answer had 1 invisible character: it was copied as ⟨U+…⟩.');
+    i18n.set('es');
+    expect(hiddenCopyNotice(1, 0)).toBe('La respuesta tenía 1 carácter invisible: se ha copiado como ⟨U+…⟩.');
+    expect(hiddenCopyNotice(0, 300)).toBe('La respuesta tenía 300 caracteres invisibles: no se han copiado.');
+    expect(hiddenCopyNotice(2, 1)).toBe('La respuesta tenía 3 caracteres invisibles: 2 se han copiado como ⟨U+…⟩ y 1 no se ha copiado.');
   });
 });

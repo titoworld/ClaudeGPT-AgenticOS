@@ -1,23 +1,23 @@
 <!doctype html>
-<html lang="ca">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <meta name="robots" content="noindex" />
-    <title>Escena · banc de proves</title>
+    <title>Scene · test bench</title>
   </head>
   <body>
     <!-- Development harness for web/src/scene. Not part of the production build
          (vite only builds index.html). Open /scene-harness.html with `npm run dev`. -->
     <canvas id="scene" aria-hidden="true"></canvas>
     <aside class="mock-column" hidden>
-      <p>Columna de xat de mostra per comprovar la llegibilitat.</p>
+      <p>A sample chat column to check that text stays legible.</p>
       <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer posuere erat a ante venenatis dapibus.</p>
     </aside>
-    <nav class="panel" aria-label="Controls de l'escena">
+    <nav class="panel" aria-label="Scene controls">
       <fieldset>
-        <legend>Estat</legend>
+        <legend>State</legend>
         <button type="button" data-mood="idle">idle</button>
         <button type="button" data-mood="thinking">thinking</button>
         <button type="button" data-mood="speaking">speaking</button>
@@ -27,24 +27,24 @@
         <button type="button" data-mood="error">error</button>
       </fieldset>
       <fieldset>
-        <legend>Qualitat</legend>
+        <legend>Quality</legend>
         <button type="button" data-quality="high">high</button>
         <button type="button" data-quality="low">low</button>
         <button type="button" data-quality="off">off</button>
       </fieldset>
       <fieldset>
         <legend>Agents</legend>
-        <label><input type="checkbox" data-active="claude" /> Claude actiu</label>
-        <label><input type="checkbox" data-active="chatgpt" /> ChatGPT actiu</label>
-        <label><input type="checkbox" id="autopulse" /> Polsos</label>
-        <label>Acord <input type="range" id="agreement" min="-1" max="100" value="-1" /></label>
+        <label><input type="checkbox" data-active="claude" /> Claude active</label>
+        <label><input type="checkbox" data-active="chatgpt" /> ChatGPT active</label>
+        <label><input type="checkbox" id="autopulse" /> Pulses</label>
+        <label>Agreement <input type="range" id="agreement" min="-1" max="100" value="-1" /></label>
       </fieldset>
       <fieldset>
-        <legend>Cicle de vida</legend>
-        <label><input type="checkbox" id="paused" /> En pausa</label>
-        <label><input type="checkbox" id="column" /> Columna</label>
-        <button type="button" id="recreate">Recrea</button>
-        <button type="button" id="dispose">Allibera</button>
+        <legend>Lifecycle</legend>
+        <label><input type="checkbox" id="paused" /> Paused</label>
+        <label><input type="checkbox" id="column" /> Column</label>
+        <button type="button" id="recreate">Recreate</button>
+        <button type="button" id="dispose">Dispose</button>
       </fieldset>
       <output id="stats">…</output>
     </nav>

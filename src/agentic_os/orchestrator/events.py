@@ -10,13 +10,21 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from agentic_os.domain import AGENTS, AgentName, MessageKind, RefineStopReason, TurnMode, Usage
+from agentic_os.domain import (
+    AGENTS,
+    AgentName,
+    MessageKind,
+    RefineReasonCode,
+    RefineStopReason,
+    TurnMode,
+    Usage,
+)
 
 Section = Literal["text", "critique", "answer"]
 """text: plain answer/synthesis stream. critique/answer: parts of a debate revision."""
 
 PdfCheckState = Literal["checking", "checked", "unchecked"]
-"""Where Claude's check of a PDF for ChatGPT is (docs/adr/0009-adjunts.md): running, done
+"""Where Claude's check of a PDF for ChatGPT is (docs/adr/0009-attachments.md): running, done
 with at least one page checked, or done with none (it failed, took too long, the PDF was
 not analysed or there is no Claude)."""
 
@@ -27,9 +35,16 @@ Wire = dict[str, object]
 class ErrorInfo:
     kind: str
     message: str
+    """For people, in the turn's language (docs/adr/0011-internationalization.md)."""
+    attachment_id: int | None = None
+    """The attachment that no longer exists, when that is the error: the client acts on
+    it without reading the message, whatever its language."""
 
     def to_wire(self) -> Wire:
-        return {"kind": self.kind, "message": self.message}
+        wire: Wire = {"kind": self.kind, "message": self.message}
+        if self.attachment_id is not None:
+            wire["attachment_id"] = self.attachment_id
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +71,7 @@ class PhaseChanged:
     request_id: str
     phase: Literal["answer", "revision", "synthesis", "compaction", "review", "edit"]
     """``review`` and ``edit``: a refine round, where both agents review the current
-    version and then the editor writes the next one (docs/adr/0010-mode-perfecciona.md)."""
+    version and then the editor writes the next one (docs/adr/0010-refine-mode.md)."""
     round: int
 
     def to_wire(self) -> Wire:
@@ -110,7 +125,7 @@ class StreamDelta:
 class PdfReading:
     """How ChatGPT, when it cannot open PDFs (Codex), read one PDF of the question: as
     the text the server extracted, with the pages Claude's check read for it
-    (docs/adr/0009-adjunts.md). ChatGPT's messages keep it (``meta.pdf_reading``)."""
+    (docs/adr/0009-attachments.md). ChatGPT's messages keep it (``meta.pdf_reading``)."""
 
     attachment_id: int
     name: str
@@ -124,7 +139,8 @@ class PdfReading:
     unchecked_pages: tuple[int, ...] = ()
     """Pages nobody checked: ChatGPT read the extracted text as it is."""
     reason: str | None = None
-    """Why pages remain unchecked (Catalan); None when every page was checked."""
+    """Why pages remain unchecked, for people, in the turn's language; None when every page
+    was checked."""
 
     def to_wire(self) -> Wire:
         return {
@@ -155,7 +171,7 @@ class PdfCheckChanged:
     usage: Usage | None = None
     """What this turn's calls for the PDF billed (None while checking, or reused)."""
     reason: str | None = None
-    """Why pages remain unchecked (Catalan), as :attr:`PdfReading.reason`."""
+    """Why pages remain unchecked, as :attr:`PdfReading.reason`."""
 
     def to_wire(self) -> Wire:
         return {
@@ -303,7 +319,7 @@ class RefineChange:
 
 @dataclass(frozen=True, slots=True)
 class RefineRound:
-    """The end of a refine round (docs/adr/0010-mode-perfecciona.md): round 1 merges the
+    """The end of a refine round (docs/adr/0010-refine-mode.md): round 1 merges the
     answers into version 1; each later round reviews the current version and may write
     the next one."""
 
@@ -322,7 +338,11 @@ class RefineRound:
     total: Usage
     """What the turn has billed so far."""
     reason: str | None = None
-    """Why the round wrote no new version (Catalan); None when it did."""
+    """Why the round wrote no new version, for people, in the turn's language; None when
+    it did."""
+    reason_code: RefineReasonCode | None = None
+    """The same reason as a code, for the client's logic; None when the round wrote a
+    version."""
     changes: Sequence[RefineChange] = ()
     """The changes of the new version (its changelog); none when not accepted."""
     proposals: Mapping[AgentName, int | None] = field(default_factory=dict)
@@ -340,6 +360,7 @@ class RefineRound:
             "version": self.version,
             "accepted": self.accepted,
             "reason": self.reason,
+            "reason_code": self.reason_code,
             "words": self.words,
             "budget_words": self.budget_words,
             "changes": [change.to_wire() for change in self.changes],
@@ -449,7 +470,7 @@ class TurnFailure:
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
-    """How a turn ended (docs/adr/0007-resultat-del-torn.md): what its terminal event
+    """How a turn ended (docs/adr/0007-turn-outcome.md): what its terminal event
     said, written once on its question (``meta.outcome``) so that a reloaded turn shows
     what the live one did."""
 

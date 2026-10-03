@@ -11,7 +11,7 @@ Definitions:
   An agent's ``cost_usd`` is ``None`` when none of its calls reported a cost.
 - ``daily``: every kind of processed token (input, cache reads, cache writes and
   output; reasoning is part of the output), so the dashboard can add them up as
-  ``Usage.processed_tokens`` does (docs/adr/0008-recompte-de-tokens.md).
+  ``Usage.processed_tokens`` does (docs/adr/0008-token-accounting.md).
 - ``latency``: nearest-rank percentiles over successful calls.
 - ``costs``: per agent, ``api_usd`` sums the cost of api-mode calls (real spend) and
   ``equivalent_usd`` the cost of the other calls (subscription usage valued at API
@@ -45,6 +45,7 @@ from typing import Final, TypedDict
 
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, SavingKind
 from agentic_os.fx import FxRate
+from agentic_os.i18n import t
 from agentic_os.storage.db import Tx
 from agentic_os.storage.models import TURN_MODES, as_utc, format_ts
 
@@ -183,7 +184,7 @@ def percentile(values: Sequence[int], pct: float) -> int | None:
 def window(days: int, now: datetime) -> tuple[list[str], str, str]:
     """Dates (``YYYY-MM-DD``) of the window plus its ``[start, end)`` timestamps."""
     if not 1 <= days <= MAX_DAYS:
-        raise ValueError(f"«days» ha de ser un enter entre 1 i {MAX_DAYS}.")
+        raise ValueError(t("storage.stats_days", max=MAX_DAYS))
     today = as_utc(now).date()
     first = today - timedelta(days=days - 1)
     dates = [(first + timedelta(days=i)).isoformat() for i in range(days)]

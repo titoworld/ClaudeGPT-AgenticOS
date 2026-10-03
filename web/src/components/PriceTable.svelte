@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { normalizeModel, validateModelId } from '../lib/models';
   import type { ModelPrice, Pricing } from '../lib/protocol';
   import type { SettingsErrors } from '../lib/settings';
@@ -22,12 +23,8 @@
   let { prices = $bindable(), pricing, errors, loadError = null }: Props = $props();
 
   type PriceKey = keyof ModelPrice;
-  const COLUMNS: { key: PriceKey; short: string; long: string }[] = [
-    { key: 'input', short: 'Entrada', long: "Entrada (tokens nous d'entrada)" },
-    { key: 'output', short: 'Sortida', long: 'Sortida (inclou el raonament)' },
-    { key: 'cache_read', short: 'Lect. cau', long: 'Lectura de la memòria cau' },
-    { key: 'cache_write', short: 'Escr. cau', long: 'Escriptura a la memòria cau' },
-  ];
+  const COLUMNS: PriceKey[] = ['input', 'output', 'cache_read', 'cache_write'];
+  const t = $derived(i18n.m.settings.table);
 
   interface Row {
     model: string;
@@ -40,15 +37,14 @@
   }
 
   const ZERO: ModelPrice = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-  const NO_MODEL =
-    'Aquest identificador no correspon a cap model (sense el prefix del proveïdor, la data o el context no en queda res).';
 
   const uid = $props.id();
   let table: HTMLTableElement | undefined = $state();
   let newModel = $state('');
-  let addError: string | null = $state(null);
+  // The add field's error and note are made when shown, so they follow a change of language.
+  let addError: (() => string) | null = $state(null);
   /** Where the prices of the model just added come from. */
-  let addNote: string | null = $state(null);
+  let addNote: (() => string) | null = $state(null);
 
   const copyPrice = (p: ModelPrice): ModelPrice => ({
     input: p.input,
@@ -90,7 +86,7 @@
     return [...known, ...added];
   });
 
-  const num = (n: number) => n.toLocaleString('ca-ES', { maximumFractionDigits: 4 });
+  const num = (n: number) => n.toLocaleString(i18n.tag, { maximumFractionDigits: 4 });
   const validCell = (v: unknown) =>
     typeof v === 'number' && Number.isFinite(v) && v >= LIMITS.price.min && v <= LIMITS.price.max;
 
@@ -123,11 +119,11 @@
   function add(): void {
     const model = newModel.trim();
     addNote = null;
-    addError = validateModelId(model);
+    addError = validateModelId(model) === null ? null : () => validateModelId(model) ?? '';
     if (addError) return;
     const key = normalizeModel(model);
     if (!key) {
-      addError = NO_MODEL;
+      addError = () => t.noModel;
       return;
     }
     newModel = '';
@@ -136,12 +132,12 @@
     const same = rows.find((r) => r.key === key);
     if (same) {
       // Says why the typed id gets no row of its own.
-      const alias = model === same.model ? null : `El servidor tracta «${model}» com a «${same.model}»`;
+      const alias = model !== same.model;
       if (same.custom) {
-        addNote = alias ? `${alias}, que ja té un preu propi.` : `«${same.model}» ja té un preu propi.`;
+        addNote = alias ? () => t.aliasOwn(model, same.model) : () => t.hasOwn(same.model);
         void focusRow(same.model);
       } else {
-        addNote = alias ? `${alias}: se n'edita el preu.` : null;
+        addNote = alias ? () => t.aliasEdit(model, same.model) : null;
         edit(same.model, same.price);
       }
       return;
@@ -151,9 +147,7 @@
     const family = rows
       .filter((r) => r.key && key.startsWith(r.key))
       .reduce<Row | null>((best, r) => (best && best.key.length >= r.key.length ? best : r), null);
-    if (family) {
-      addNote = `Comença amb els preus de ${family.model}, que són els que s'hi aplicaven fins ara. Revisa'ls.`;
-    }
+    if (family) addNote = () => t.family(family.model);
     edit(model, family?.price ?? ZERO);
   }
 
@@ -167,14 +161,14 @@
 
 <div class="wrap">
   <table class="prices" bind:this={table}>
-    <caption class="sr-only">Preus en dòlars per milió de tokens</caption>
+    <caption class="sr-only">{t.caption}</caption>
     <thead>
       <tr>
-        <th scope="col">Model</th>
-        {#each COLUMNS as col (col.key)}
-          <th scope="col" class="num" title={col.long}>{col.short}</th>
+        <th scope="col">{t.model}</th>
+        {#each COLUMNS as col (col)}
+          <th scope="col" class="num" title={t.columns[col].long}>{t.columns[col].short}</th>
         {/each}
-        <th scope="col"><span class="sr-only">Accions</span></th>
+        <th scope="col"><span class="sr-only">{t.actions}</span></th>
       </tr>
     </thead>
     <tbody>
@@ -184,12 +178,12 @@
           <th scope="row" class="model" title={row.model}>
             <span class="id">{row.model}</span>
             {#if row.base}
-              <span class="tag" title="Preu propi. A sota de cada preu, el per defecte.">propi</span>
+              <span class="tag" title={t.ownTitle}>{t.own}</span>
             {:else if row.custom}
-              <span class="tag" title="Model sense preu per defecte.">afegit</span>
+              <span class="tag" title={t.addedTitle}>{t.added}</span>
             {/if}
           </th>
-          {#each COLUMNS as col (col.key)}
+          {#each COLUMNS as col (col)}
             <td class="num">
               {#if row.custom}
                 <input
@@ -200,16 +194,16 @@
                   max={LIMITS.price.max}
                   step="any"
                   data-model={row.model}
-                  bind:value={() => prices[row.model]?.[col.key], (v) => setPrice(row.model, col.key, v)}
-                  aria-label="{col.long}: {row.model}, en dòlars per milió de tokens{row.base
-                    ? ` (per defecte, ${num(row.base[col.key])})`
-                    : ''}"
-                  aria-invalid={!!error && !validCell(prices[row.model]?.[col.key])} />
+                  bind:value={() => prices[row.model]?.[col], (v) => setPrice(row.model, col, v)}
+                  aria-label={row.base
+                    ? t.cellWithDefault(t.columns[col].long, row.model, num(row.base[col]))
+                    : t.cell(t.columns[col].long, row.model)}
+                  aria-invalid={!!error && !validCell(prices[row.model]?.[col])} />
                 {#if row.base}
-                  <small class="base" title="Preu per defecte" aria-hidden="true">{num(row.base[col.key])}</small>
+                  <small class="base" title={t.defaultPrice} aria-hidden="true">{num(row.base[col])}</small>
                 {/if}
               {:else}
-                {num(row.price[col.key])}
+                {num(row.price[col])}
               {/if}
             </td>
           {/each}
@@ -219,8 +213,8 @@
                 type="button"
                 class="icon-btn small"
                 onclick={() => edit(row.model, row.price)}
-                aria-label="Edita el preu de {row.model}"
-                title="Edita (crea un preu propi)">
+                aria-label={t.edit(row.model)}
+                title={t.editTitle}>
                 <Icon name="edit" size={14} />
               </button>
             {:else if row.base}
@@ -228,8 +222,8 @@
                 type="button"
                 class="icon-btn small"
                 onclick={() => remove(row.model)}
-                aria-label="Restaura el preu per defecte de {row.model}"
-                title="Restaura el preu per defecte">
+                aria-label={t.restore(row.model)}
+                title={t.restoreTitle}>
                 <Icon name="refresh" size={14} />
               </button>
             {:else}
@@ -237,8 +231,8 @@
                 type="button"
                 class="icon-btn small"
                 onclick={() => remove(row.model)}
-                aria-label="Elimina el preu de {row.model}"
-                title="Elimina">
+                aria-label={t.remove(row.model)}
+                title={t.removeTitle}>
                 <Icon name="trash" size={14} />
               </button>
             {/if}
@@ -252,7 +246,7 @@
       {:else}
         <tr>
           <td colspan={COLUMNS.length + 2} class="empty">
-            {loadError ?? (pricing ? 'Encara no hi ha cap preu.' : 'Carregant els preus…')}
+            {loadError ?? (pricing ? t.empty : t.loading)}
           </td>
         </tr>
       {/each}
@@ -265,12 +259,12 @@
 {/if}
 
 <div class="add">
-  <label class="sr-only" for="{uid}-new">Identificador del model nou</label>
+  <label class="sr-only" for="{uid}-new">{t.newModel}</label>
   <input
     id="{uid}-new"
     class="input"
     type="text"
-    placeholder="Afegeix un model (p. ex. gpt-6-sol-mini)"
+    placeholder={t.newModelPlaceholder}
     maxlength="100"
     spellcheck="false"
     autocomplete="off"
@@ -283,11 +277,11 @@
     onkeydown={onAddKeydown}
     aria-invalid={!!addError}
     aria-describedby="{uid}-add-err" />
-  <button type="button" class="btn" onclick={add}><Icon name="plus" size={15} />Afegeix</button>
+  <button type="button" class="btn" onclick={add}><Icon name="plus" size={15} />{t.add}</button>
 </div>
-<small class="error-text add-error" id="{uid}-add-err">{addError ?? ''}</small>
+<small class="error-text add-error" id="{uid}-add-err">{addError?.() ?? ''}</small>
 {#if addNote}
-  <small class="hint add-note" role="status">{addNote}</small>
+  <small class="hint add-note" role="status">{addNote()}</small>
 {/if}
 
 <style>

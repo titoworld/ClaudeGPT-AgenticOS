@@ -1,4 +1,4 @@
-"""Refine turns («Perfecciona», docs/adr/0010-mode-perfecciona.md) end to end, with fake
+"""Refine turns («Perfecciona», docs/adr/0010-refine-mode.md) end to end, with fake
 providers and the in-memory store: both agents answer, the editor merges the answers into
 version 1, and round after round both review the current version and the editor writes the
 next one, until the owner stops the turn, nobody finds anything left to change, both score
@@ -10,11 +10,21 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
-from agentic_os.domain import AGENTS, AgentName, Purpose, RefineOptions, TurnOptions, Usage, words
+from agentic_os import i18n
+from agentic_os.domain import (
+    AGENTS,
+    AgentName,
+    Purpose,
+    RefineOptions,
+    RefineReasonCode,
+    TurnOptions,
+    Usage,
+    words,
+)
 from agentic_os.orchestrator import engine as engine_module
 from agentic_os.orchestrator import prompts
 from agentic_os.orchestrator.engine import (
@@ -25,6 +35,7 @@ from agentic_os.orchestrator.engine import (
     REFINE_NOTHING_TO_CHANGE,
     REFINE_OVER_BUDGET,
     Engine,
+    refine_reason,
 )
 from agentic_os.orchestrator.events import (
     PhaseChanged,
@@ -327,6 +338,7 @@ async def test_a_refine_turn_end_to_end() -> None:
         "budget_words": 300,
         "accepted": True,
         "reason": None,
+        "reason_code": None,
         "changelog": [
             {"kind": "merge", "text": "Els passos numerats vénen de la resposta de Claude."},
             {"kind": "merge", "text": "La taula de comprovació ve de la resposta de ChatGPT."},
@@ -403,6 +415,7 @@ async def test_the_rounds_on_the_wire() -> None:
         "version": 1,
         "accepted": True,
         "reason": None,
+        "reason_code": None,
         "words": V1_WORDS,
         "budget_words": 300,
         "changes": refine_meta(versions(store)[0])["changelog"],
@@ -423,7 +436,8 @@ async def test_the_rounds_on_the_wire() -> None:
         False,
     )
     assert fourth.to_wire()["changes"] == [] and fourth.version == 3
-    assert (fourth.accepted, fourth.reason) == (False, REFINE_NOTHING_TO_CHANGE)
+    assert (fourth.accepted, fourth.reason) == (False, str(REFINE_NOTHING_TO_CHANGE))
+    assert (fourth.reason_code, fourth.to_wire()["reason_code"]) == ("nothing_to_change",) * 2
     assert fourth.proposals == {"claude": 0, "chatgpt": 0} and fourth.converged
 
     # Each round's usage is what its calls billed; the total, the turn's so far.
@@ -588,7 +602,11 @@ async def test_two_rounds_without_changes_stop_the_turn_whatever_the_options(
     assert phases(events) == [("answer", 0), ("edit", 1), ("review", 2), ("review", 3)]
     second, third = rounds(events)[1:]
     for event in (second, third):
-        assert (event.version, event.accepted, event.reason) == (1, False, REFINE_NOTHING_TO_CHANGE)
+        assert (event.version, event.accepted, event.reason) == (
+            1,
+            False,
+            str(REFINE_NOTHING_TO_CHANGE),
+        )
         assert not event.converged
     assert len(versions(store)) == 1  # no edit at all
     assert refine_meta(final_of(store, done))["version"] == 1
@@ -717,7 +735,8 @@ async def test_a_version_over_the_budget_is_shortened_once() -> None:
         "words": words(too_long.content),
         "budget_words": 100,
         "accepted": False,
-        "reason": REFINE_OVER_BUDGET,
+        "reason": str(REFINE_OVER_BUDGET),
+        "reason_code": "over_budget",
         "changelog": [{"kind": "defect", "text": "Afegeix la data."}],
     }
     assert refine_meta(shortened)["accepted"] is True and refine_meta(shortened)["version"] == 2
@@ -773,7 +792,8 @@ async def test_a_first_version_over_the_owners_limit_is_shortened_once() -> None
         "words": 900,
         "budget_words": 200,
         "accepted": False,
-        "reason": REFINE_OVER_BUDGET,
+        "reason": str(REFINE_OVER_BUDGET),
+        "reason_code": "over_budget",
         "changelog": [{"kind": "merge", "text": "Tot ve de Claude."}],
     }
     assert (v1.round, v1.agent) == (1, "claude") and words(v1.content) <= 200
@@ -938,9 +958,17 @@ async def test_a_version_still_over_the_budget_is_rejected() -> None:
     v1, too_long, still = versions(store)
     for rejected in (too_long, still):
         meta = refine_meta(rejected)
-        assert (meta["accepted"], meta["reason"], meta["version"]) == (False, REFINE_OVER_BUDGET, 2)
+        assert (meta["accepted"], meta["reason"], meta["version"]) == (
+            False,
+            str(REFINE_OVER_BUDGET),
+            2,
+        )
+    assert {refine_meta(rejected)["reason_code"] for rejected in (too_long, still)} == {
+        "over_budget"
+    }
     second = rounds(events)[1]
-    assert (second.version, second.accepted, second.reason) == (1, False, REFINE_OVER_BUDGET)
+    assert (second.version, second.accepted, second.reason) == (1, False, str(REFINE_OVER_BUDGET))
+    assert second.reason_code == "over_budget"
     assert second.changes == () and second.words == words(v1.content)
     final = final_of(store, done)
     assert final.content == v1.content and refine_meta(final)["version"] == 1
@@ -954,10 +982,12 @@ async def test_a_version_identical_to_the_current_one_is_not_accepted() -> None:
     store = InMemoryStore()
     events = await run(refine(max_rounds=2), providers, store)
     second = rounds(events)[1]
-    assert (second.version, second.accepted, second.reason) == (1, False, REFINE_IDENTICAL)
+    assert (second.version, second.accepted, second.reason) == (1, False, str(REFINE_IDENTICAL))
+    assert second.reason_code == "identical"
     same = versions(store)[1]
-    assert (
-        refine_meta(same)["accepted"] is False and refine_meta(same)["reason"] == REFINE_IDENTICAL
+    assert refine_meta(same)["reason_code"] == "identical"
+    assert refine_meta(same)["accepted"] is False and refine_meta(same)["reason"] == str(
+        REFINE_IDENTICAL
     )
     # No retry: one edit call in round 2.
     assert sum(is_edit(r) for r in providers["claude"].requests) == 1
@@ -971,10 +1001,12 @@ async def test_a_reply_without_a_complete_version_rejects_the_round() -> None:
     store = InMemoryStore()
     events = await run(refine(max_rounds=2), providers, store)
     second = rounds(events)[1]
-    assert (second.version, second.accepted, second.reason) == (1, False, REFINE_INCOMPLETE)
+    assert (second.version, second.accepted, second.reason) == (1, False, str(REFINE_INCOMPLETE))
+    assert second.reason_code == "incomplete"
     incomplete = versions(store)[1]
+    assert refine_meta(incomplete)["reason_code"] == "incomplete"
     assert incomplete.content == "Aquí tens la versió nova, però sense etiquetes."
-    assert refine_meta(incomplete)["reason"] == REFINE_INCOMPLETE
+    assert refine_meta(incomplete)["reason"] == str(REFINE_INCOMPLETE)
     assert refine_meta(incomplete)["accepted"] is False
     # A rejection is no failure: nobody else edits.
     assert not of_type(events, StreamFailed)
@@ -1132,7 +1164,7 @@ async def test_both_reviews_failing_after_version_1_complete_the_turn_with_it() 
     assert phases(events)[-1] == ("review", 2)
     last = rounds(events)[-1]
     assert (last.round, last.version, last.accepted) == (2, 1, False)
-    assert last.reason == REFINE_FAILED_ROUND
+    assert last.reason == str(REFINE_FAILED_ROUND) and last.reason_code == "failed_round"
     assert last.to_wire()["proposals"] == {"claude": None, "chatgpt": None}
     assert last.to_wire()["scores"] == {"claude": None, "chatgpt": None}
     outcome = outcome_of(store, done.turn_id)
@@ -1203,7 +1235,9 @@ async def test_a_review_in_prose_fails_and_sits_out_the_round() -> None:
     events = await run(refine(max_rounds=3), providers, store)
     done = completed(events)
     failed = of_type(events, StreamFailed)
-    assert [(f.error.kind, f.error.message) for f in failed] == [("invalid", REFINE_NO_CHANGES)] * 2
+    assert [(f.error.kind, f.error.message) for f in failed] == [
+        ("invalid", str(REFINE_NO_CHANGES))
+    ] * 2
     assert {m.agent for m in reviews(store)} == {"claude"}
     for event in rounds(events)[1:]:
         assert event.to_wire()["proposals"] == {"claude": 1, "chatgpt": None}
@@ -1224,7 +1258,7 @@ async def test_two_reviews_in_prose_are_no_round_without_changes() -> None:
     assert done.stop_reason == "failed"
     last = rounds(events)[-1]
     assert (last.round, last.version, last.accepted) == (2, 1, False)
-    assert last.reason == REFINE_FAILED_ROUND
+    assert last.reason == str(REFINE_FAILED_ROUND) and last.reason_code == "failed_round"
     assert reviews(store) == []
     assert refine_meta(final_of(store, done))["stop_reason"] == "failed"
 
@@ -1445,7 +1479,7 @@ async def test_the_rounds_get_the_attachments_as_the_revisions_do(files: Attachm
         ("synthesis", ["text", "full"]),
     ]
     review = claude.requests[2]
-    assert "informe.pdf (PDF, 2 pàgines; només el text extret)" in review.prompt
+    assert "informe.pdf (PDF, 2 pages; extracted text only)" in review.prompt
 
 
 async def test_a_chatgpt_that_cannot_open_pdfs_reviews_them_through_claudes_check(
@@ -1573,3 +1607,111 @@ async def test_every_purpose_of_a_refine_turn_is_a_billed_call() -> None:
     assert done.usage == records_usage(store, done.turn_id) != Usage()
     assert done.usage.cost_usd is not None
     assert store.savings == []
+
+
+# -- languages (docs/adr/0011-internationalization.md) ------------------------------------------
+
+
+def test_every_reason_code_has_its_text_in_every_language() -> None:
+    codes = get_args(RefineReasonCode)
+    assert codes == ("over_budget", "incomplete", "identical", "nothing_to_change", "failed_round")
+    with i18n.use("en"):
+        assert [refine_reason(code) for code in codes] == [
+            "The new version went over the word limit.",
+            "The editor wrote no complete version.",
+            "The new version is the same as the previous one.",
+            "Neither of them found anything to change.",
+            "The models failed and the round wrote no version.",
+        ]
+        assert str(REFINE_NO_CHANGES) == (
+            "The review does not have the list of changes it was asked for."
+        )
+    with i18n.use("es"):
+        assert refine_reason("identical") == "La nueva versión es igual a la anterior."
+    assert [refine_reason(code) for code in codes] == [
+        str(reason)
+        for reason in (
+            REFINE_OVER_BUDGET,
+            REFINE_INCOMPLETE,
+            REFINE_IDENTICAL,
+            REFINE_NOTHING_TO_CHANGE,
+            REFINE_FAILED_ROUND,
+        )
+    ]
+
+
+def over_budget_editors() -> dict[AgentName, FakeProvider]:
+    """Providers whose edit of version 1 goes over a budget of 100 words, and so does its
+    shortening: round 2 keeps version 1 (``over_budget``)."""
+    return {
+        "claude": Editor(
+            "claude",
+            [lambda v: version_reply(longer(v)), lambda draft: version_reply(draft)],
+            refine_reviews=(ALWAYS_A_DEFECT,),
+        ),
+        "chatgpt": FakeProvider("chatgpt", chunk_delay=0, refine_reviews=(ALWAYS_A_DEFECT,)),
+    }
+
+
+async def test_a_turn_writes_and_stores_its_reasons_in_the_language_it_started_in() -> None:
+    """Two turns at once, started by connections in English and in Catalan: each writes
+    its events and stores its messages in its own language, with the same codes."""
+
+    async def turn(lang: i18n.Lang, store: InMemoryStore) -> list[ServerEvent]:
+        with i18n.use(lang):
+            return await run(refine(max_rounds=2, max_words=100), over_budget_editors(), store)
+
+    english, catalan = InMemoryStore(), InMemoryStore()
+    in_english, in_catalan = await asyncio.gather(turn("en", english), turn("ca", catalan))
+    for events, store, reason in (
+        (in_english, english, "The new version went over the word limit."),
+        (in_catalan, catalan, "La nova versió passava del límit de paraules."),
+    ):
+        wire = rounds(events)[1].to_wire()
+        assert (wire["accepted"], wire["reason"], wire["reason_code"]) == (
+            False,
+            reason,
+            "over_budget",
+        )
+        keys = list(wire)
+        assert keys[keys.index("reason") + 1] == "reason_code"
+        # The draft over the budget and its shortening, still over it: stored and streamed
+        # with the reason and its code.
+        expected = [(reason, "over_budget")] * 2
+        stored = [refine_meta(message) for message in versions(store)[1:]]
+        assert [(meta["reason"], meta["reason_code"]) for meta in stored] == expected
+        streamed = [
+            event.refine
+            for event in of_type(events, StreamCompleted)
+            if event.refine is not None and event.refine.get("role") == "version"
+        ]
+        assert [(meta["reason"], meta["reason_code"]) for meta in streamed[1:]] == expected
+        assert (streamed[0]["reason"], streamed[0]["reason_code"]) == (None, None)
+
+
+async def test_a_round_without_changes_says_why_in_spanish() -> None:
+    with i18n.use("es"):
+        events = await run(refine())
+    fourth = rounds(events)[3]
+    assert (fourth.accepted, fourth.reason, fourth.reason_code) == (
+        False,
+        "Ninguno de los dos ha encontrado nada que cambiar.",
+        "nothing_to_change",
+    )
+
+
+@pytest.mark.parametrize(
+    ("lang", "message"),
+    [
+        ("en", "The word limit must be between 100 and 20,000."),
+        ("es", "El límite de palabras debe estar entre 100 y 20.000."),
+    ],
+)
+async def test_an_invalid_option_is_refused_in_the_turns_language(
+    lang: i18n.Lang, message: str
+) -> None:
+    with i18n.use(lang):
+        events = await run(refine(max_words=99))
+    (failed,) = events
+    assert isinstance(failed, TurnFailed)
+    assert (failed.error.kind, failed.error.message) == ("invalid", message)

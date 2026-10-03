@@ -3,6 +3,7 @@
    * Usage meter: the fill carries severity (accent -> warning -> critical) and
    * the track is a faint step of the same hue, so state reads across the bar.
    */
+  import { i18n } from '../i18n/index.svelte';
   import type { LimitTone } from './usage';
 
   interface Props {
@@ -11,7 +12,7 @@
     /** Severity for limits; 'neutral' for plain shares. */
     tone: LimitTone | 'neutral';
     label: string;
-    /** Spoken value; defaults to 'N % utilitzat'. */
+    /** Spoken value; defaults to 'N% used'. */
     valueText?: string;
   }
 
@@ -26,7 +27,7 @@
   aria-valuemin={0}
   aria-valuemax={100}
   aria-valuenow={Math.round(pct)}
-  aria-valuetext={valueText ?? `${Math.round(pct)} % utilitzat`}
+  aria-valuetext={valueText ?? i18n.m.dashboard.chart.used(Math.round(pct))}
 >
   <span class="fill" style:width="{pct}%"></span>
 </div>

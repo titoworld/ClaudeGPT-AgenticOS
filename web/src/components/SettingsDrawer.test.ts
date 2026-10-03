@@ -2,8 +2,9 @@
 // it opens, it cannot save before they arrive, and a save based on settings changed
 // elsewhere (409) reloads them instead of undoing that change.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LOCALE_KEY } from '../lib/i18n/index.svelte';
 import type { RuntimeSettings } from '../lib/protocol';
-import { INVALID_AMOUNT } from '../lib/settings';
+import { invalidAmount } from '../lib/settings';
 import { CONFLICT_DETAIL, deferred, FakeApi, FakeSocket, polyfillDialog } from '../lib/test-server';
 
 const SAVED: RuntimeSettings = {
@@ -27,10 +28,11 @@ const SAVED: RuntimeSettings = {
 async function load() {
   vi.resetModules();
   const { app } = await import('../lib/app.svelte');
+  const { i18n } = await import('../lib/i18n/index.svelte');
   const { render, cleanup, textOf } = await import('../lib/test-render');
   const { flushSync } = await import('svelte');
   const { default: SettingsDrawer } = await import('./SettingsDrawer.svelte');
-  return { app, render, cleanup, textOf, flushSync, SettingsDrawer };
+  return { app, i18n, render, cleanup, textOf, flushSync, SettingsDrawer };
 }
 
 let server: FakeApi;
@@ -321,8 +323,67 @@ describe('SettingsDrawer: the defaults of the refine mode («Perfecciona»)', ()
     await settle();
     expect(server.puts).toEqual([]);
     expect(errorOf(root, 'Rondes màximes')).toBe("Ha d'estar entre 2 i 50.");
-    expect(errorOf(root, 'Pressupost per torn')).toBe(INVALID_AMOUNT);
+    expect(errorOf(root, 'Pressupost per torn')).toBe(invalidAmount());
     expect(errorOf(root, 'Límit de paraules')).toBe('Cal un número.');
     expect(notice(root)).toBe('Revisa els camps marcats.');
+  });
+});
+
+describe('SettingsDrawer in English and Spanish (ADR 0011)', () => {
+  const headings = (root: HTMLElement) => [...root.querySelectorAll('section h3')].map((h) => env!.textOf(h));
+  const field = (root: HTMLElement, label: string) =>
+    [...root.querySelectorAll('label.field')].find((l) => l.textContent?.trim().startsWith(label)) ?? null;
+
+  // The language chosen stays in this browser: the next page load must start in Catalan again.
+  afterEach(() => localStorage.removeItem(LOCALE_KEY));
+
+  it('names its sections and says what is wrong in Spanish', async () => {
+    const e = await fresh();
+    e.i18n.set('es');
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(modeRadio(root, 'solo')?.checked).toBe(true));
+    expect(e.textOf(root.querySelector('h2'))).toBe('Configuración');
+    expect(headings(root)).toEqual([
+      'Por defecto',
+      'Consejo',
+      'Perfecciona',
+      'Historial',
+      'Modelos',
+      'Costes y moneda',
+      'Precios',
+      'Presupuestos y planes',
+      'Idioma',
+      'Efectos visuales',
+    ]);
+    expect(e.textOf(field(root, 'Límite de palabras')?.querySelector('span'))).toBe('Límite de palabras (100–20.000)');
+
+    type(field(root, 'Rondas de revisión')!.querySelector('input')!, '9');
+    submit(root);
+    await settle();
+    expect(server.puts).toEqual([]);
+    expect(e.textOf(field(root, 'Rondas de revisión')!.querySelector('.error-text'))).toBe('Tiene que estar entre 0 y 4.');
+    expect(notice(root)).toBe('Revisa los campos marcados.');
+    expect(saveButton(root).textContent?.trim()).toBe('Guardar la configuración');
+  });
+
+  it('repaints itself, the last save included, when the owner picks another language in it', async () => {
+    const e = await fresh();
+    await e.app.init();
+    const root = openDrawer(e);
+    await vi.waitFor(() => expect(modeRadio(root, 'solo')?.checked).toBe(true));
+    submit(root);
+    await vi.waitFor(() => expect(notice(root)).toBe('Configuració desada.'));
+
+    const picker = root.querySelector<HTMLSelectElement>('section.local select')!;
+    picker.value = 'en';
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+    e.flushSync();
+    expect(e.i18n.locale).toBe('en');
+    expect(e.textOf(root.querySelector('h2'))).toBe('Settings');
+    expect(notice(root)).toBe('Settings saved.');
+    expect(e.textOf(field(root, 'Review rounds')?.querySelector('span'))).toBe('Review rounds (0–4)');
+    expect(root.querySelector('input[aria-label="Monthly API budget of Claude, in euros"]')).not.toBeNull();
+    expect(saveButton(root).textContent?.trim()).toBe('Save settings');
   });
 });

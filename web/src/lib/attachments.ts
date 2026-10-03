@@ -1,7 +1,8 @@
-// Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-adjunts.md).
+// Files attached to a question (docs/PROTOCOL.md "Attachments", docs/adr/0009-attachments.md).
 //
 // - What the server would accept, checked in the browser with the server's own rules
-//   and Catalan messages (src/agentic_os/attachments.py): the type comes from the
+//   and messages (src/agentic_os/attachments.py), in the language of the interface
+//   (lib/i18n, area `attachments`): the type comes from the
 //   content, never from the name or the browser's type, so a file the server would
 //   refuse is never uploaded (a large refused upload would only show a network error:
 //   the server answers before it has read it all).
@@ -9,6 +10,8 @@
 // - What an attachment's card says: type, size, pages, estimated tokens (and a PDF's
 //   page warnings: lib/pdf-pages.ts).
 
+import { formatInt } from './format';
+import { i18n } from './i18n/index.svelte';
 import {
   DOWNSCALE_EDGE,
   MAX_ATTACHMENTS,
@@ -21,6 +24,7 @@ import {
   TEXT_EXTENSIONS,
   type Attachment,
   type AttachmentKind,
+  type ErrorInfo,
   type PdfNotes,
 } from './protocol';
 
@@ -35,55 +39,51 @@ export class AttachmentError extends Error {
   }
 }
 
-/** A number as the server writes it in its messages: `9.000`. */
-const grouped = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-
-/** A size limit as the messages write it: `20 MB`, `200 kB`. */
+/** A size limit as the messages write it: `20 MB`, `200 kB` (numbers as the language in force writes them). */
 function limitText(bytes: number): string {
-  if (bytes >= 1_000_000 && bytes % 1_000_000 === 0) return `${bytes / 1_000_000} MB`;
-  if (bytes >= 1000 && bytes % 1000 === 0) return `${bytes / 1000} kB`;
-  return `${grouped(bytes)} bytes`;
+  if (bytes >= 1_000_000 && bytes % 1_000_000 === 0) return `${formatInt(bytes / 1_000_000)} MB`;
+  if (bytes >= 1000 && bytes % 1000 === 0) return `${formatInt(bytes / 1000)} kB`;
+  return `${formatInt(bytes)} bytes`;
 }
 
-// The server's messages (src/agentic_os/attachments.py and the engine's).
-export const UNSUPPORTED_MESSAGE =
-  "Aquest tipus de fitxer no s'admet. Pots adjuntar imatges (PNG, JPEG, GIF o WebP), PDF i fitxers de text (UTF-8).";
-export const SVG_MESSAGE =
-  "Les imatges SVG no s'admeten, perquè poden portar codi. Converteix-la a PNG i torna-la a adjuntar.";
-export const HEIC_MESSAGE =
-  "Les imatges HEIC no s'admeten. Converteix-la a JPEG (o fes-ne una captura) i torna-la a adjuntar.";
-export const EMPTY_MESSAGE = 'El fitxer és buit.';
-export const TOO_MANY_MESSAGE = `Un missatge pot portar com a màxim ${MAX_ATTACHMENTS} adjunts.`;
-export const TURN_TOO_LARGE_MESSAGE = `Els adjunts d'un missatge no poden sumar més de ${limitText(MAX_TURN_ATTACHMENT_BYTES)}.`;
+// The server's messages (src/agentic_os/attachments.py and the engine's), made when they
+// are needed: in the language in force.
+export const unsupportedMessage = (): string => i18n.m.attachments.refused.unsupported;
+export const svgMessage = (): string => i18n.m.attachments.refused.svg;
+export const heicMessage = (): string => i18n.m.attachments.refused.heic;
+export const emptyMessage = (): string => i18n.m.attachments.refused.empty;
+export const tooManyMessage = (): string => i18n.m.attachments.refused.tooMany(MAX_ATTACHMENTS);
+export const turnTooLargeMessage = (): string =>
+  i18n.m.attachments.refused.turnTooLarge(limitText(MAX_TURN_ATTACHMENT_BYTES));
 // The browser's own.
-export const UNREADABLE_IMAGE_MESSAGE = "No s'ha pogut llegir la imatge: el fitxer no és vàlid.";
-export const CONNECTION_FAILED_MESSAGE = "No s'ha pogut pujar el fitxer: la connexió ha fallat.";
-export const GONE_MESSAGE = "Aquest adjunt ja no és al servidor: treu-lo i torna'l a adjuntar.";
+export const unreadableImageMessage = (): string => i18n.m.attachments.failed.unreadableImage;
+export const connectionFailedMessage = (): string => i18n.m.attachments.failed.connection;
+export const goneMessage = (): string => i18n.m.attachments.failed.gone;
 
 /**
- * The attachment a turn failed for because the server does not have it (anymore): an
- * upload never sent is deleted after a day. docs/PROTOCOL.md gives the message of that
- * `turn.failed`: «L'adjunt 12 no existeix.».
+ * The attachment a turn's error says no longer exists (`attachment_id`), else null. The
+ * server deletes an attachment no message uses after a while (docs/PROTOCOL.md). Errors
+ * stored before the server gave the id only say it in Catalan: «L'adjunt 12 no existeix.».
  */
-export function missingAttachment(message: string): number | null {
-  const found = /^L'adjunt (\d+) no existeix\.$/.exec(message.trim());
+export function missingAttachment(error: ErrorInfo): number | null {
+  if (typeof error.attachment_id === 'number' && Number.isInteger(error.attachment_id)) return error.attachment_id;
+  const found = /^L'adjunt (\d+) no existeix\.$/.exec(error.message.trim());
   return found ? Number(found[1]) : null;
 }
 
 const KIND_LIMIT: Record<AttachmentKind, number> = { image: MAX_IMAGE_BYTES, pdf: MAX_PDF_BYTES, text: MAX_TEXT_BYTES };
-const KIND_NAME: Record<AttachmentKind, string> = { image: 'una imatge', pdf: 'un PDF', text: 'un fitxer de text' };
 
 /** Most bytes a file of `kind` may have. */
 export const kindLimit = (kind: AttachmentKind): number => KIND_LIMIT[kind];
 
 export const tooLargeMessage = (kind: AttachmentKind): string =>
-  `El fitxer és massa gran: ${KIND_NAME[kind]} pot tenir com a molt ${limitText(KIND_LIMIT[kind])}.`;
+  i18n.m.attachments.refused.tooLarge[kind](limitText(KIND_LIMIT[kind]));
 
 export const imageSideMessage = (width: number, height: number): string =>
-  `La imatge fa ${grouped(width)} x ${grouped(height)} píxels: com a molt ${grouped(MAX_IMAGE_SIDE)} per costat.`;
+  i18n.m.attachments.refused.imageSide(formatInt(width), formatInt(height), formatInt(MAX_IMAGE_SIDE));
 
 export const pdfPagesMessage = (pages: number): string =>
-  `El PDF té ${grouped(pages)} pàgines: com a molt ${MAX_PDF_PAGES}.`;
+  i18n.m.attachments.refused.pdfPages(formatInt(pages), formatInt(MAX_PDF_PAGES));
 
 // ------------------------------------------------------------ type of a file
 
@@ -123,10 +123,10 @@ export function sniff(head: Uint8Array): FileType | null {
 }
 
 function unsupported(head: Uint8Array, suffix: string): AttachmentError {
-  if (suffix === 'svg' || suffix === 'svgz') return new AttachmentError(415, SVG_MESSAGE);
+  if (suffix === 'svg' || suffix === 'svgz') return new AttachmentError(415, svgMessage());
   const heif = ascii(head, 4, 8) === 'ftyp' && HEIF_BRANDS.has(ascii(head, 8, 12));
-  if (suffix === 'heic' || suffix === 'heif' || suffix === 'avif' || heif) return new AttachmentError(415, HEIC_MESSAGE);
-  return new AttachmentError(415, UNSUPPORTED_MESSAGE);
+  if (suffix === 'heic' || suffix === 'heif' || suffix === 'avif' || heif) return new AttachmentError(415, heicMessage());
+  return new AttachmentError(415, unsupportedMessage());
 }
 
 /**
@@ -245,13 +245,19 @@ export function estimateTokens(
 
 // ------------------------------------------------------------ what a card says
 
-const oneDecimal = new Intl.NumberFormat('ca-ES', { maximumFractionDigits: 1 });
+let oneDecimal: { tag: string; format: Intl.NumberFormat } | null = null;
 
-/** A file size in decimal units, as the limits are written: `340 kB`, `1,2 MB`. */
+/** `n` with a decimal at most, with the decimal mark of the language in force. */
+function decimal(n: number): string {
+  if (oneDecimal?.tag !== i18n.tag) oneDecimal = { tag: i18n.tag, format: new Intl.NumberFormat(i18n.tag, { maximumFractionDigits: 1 }) };
+  return oneDecimal.format.format(n);
+}
+
+/** A file size in decimal units, as the limits are written: `340 kB`, `1,2 MB` (`1.2 MB` in English). */
 export function formatBytes(bytes: number): string {
   if (bytes < 1000) return `${bytes} B`;
-  if (bytes < 999_950) return `${oneDecimal.format(bytes / 1000)} kB`;
-  return `${oneDecimal.format(bytes / 1_000_000)} MB`;
+  if (bytes < 999_950) return `${decimal(bytes / 1000)} kB`;
+  return `${decimal(bytes / 1_000_000)} MB`;
 }
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -263,17 +269,16 @@ const IMAGE_TYPES: Record<string, string> = {
 
 /** The short type on a card: PNG, PDF, PY... */
 export function typeLabel(kind: AttachmentKind | null, mime: string | null, name: string): string {
-  if (kind === 'image') return IMAGE_TYPES[mime ?? ''] ?? 'Imatge';
+  if (kind === 'image') return IMAGE_TYPES[mime ?? ''] ?? i18n.m.attachments.kinds.image;
   if (kind === 'pdf') return 'PDF';
   if (kind === 'text') return extension(name).toUpperCase() || 'TXT';
-  return 'Fitxer';
+  return i18n.m.attachments.file;
 }
 
-export function kindLabel(kind: AttachmentKind): string {
-  return kind === 'image' ? 'Imatge' : kind === 'pdf' ? 'PDF' : 'Fitxer de text';
-}
+export const kindLabel = (kind: AttachmentKind): string => i18n.m.attachments.kinds[kind];
 
-export const pagesLabel = (pages: number): string => (pages === 1 ? '1 pàgina' : `${grouped(pages)} pàgines`);
+/** «1 page», «12 pages». */
+export const pagesLabel = (pages: number): string => i18n.m.attachments.pages(pages, formatInt(pages));
 
 export const contentUrl = (id: number): string => `/api/attachments/${id}/content`;
 export const thumbnailUrl = (id: number): string => `/api/attachments/${id}/thumbnail`;
@@ -297,7 +302,7 @@ export interface AttachmentView {
   /** A text file: its first lines, when known here (else the card asks the server). */
   lines: string | null;
   status: AttachmentStatus;
-  /** Why it failed (Catalan). */
+  /** Why it failed, in the language of the interface when it failed. */
   error: string | null;
   /** Its upload failed for a reason a retry can fix (the connection...). */
   retryable: boolean;

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import Usage
 from agentic_os.fx import FxRate
 from agentic_os.orchestrator.events import Savings, TurnFailure, TurnOutcome
@@ -744,3 +745,27 @@ async def test_timestamps_are_stored_as_utc_iso_strings(store: SqliteStore) -> N
     assert row is not None
     assert row[0] == "2026-09-27T12:00:00.000Z"
     assert parse_ts(row[0]) == T0
+
+
+# -- languages (docs/adr/0011-internationalization.md) ---------------------------------
+
+
+async def test_the_default_title_and_the_errors_speak_the_language_in_force(
+    store: SqliteStore,
+) -> None:
+    titles = []
+    for lang in ("en", "es"):
+        with i18n.use(lang):
+            conversation_id = await store.create_conversation("")
+            detail = await store.get_conversation(conversation_id)
+            assert detail is not None
+            titles.append(detail.conversation.title)
+            with pytest.raises(ValueError) as exc:
+                await store.rename_conversation(conversation_id, " ")
+            titles.append(str(exc.value))
+    assert titles == [
+        "New conversation",
+        "The title cannot be empty.",
+        "Nueva conversación",
+        "El título no puede estar vacío.",
+    ]

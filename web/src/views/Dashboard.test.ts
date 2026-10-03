@@ -3,6 +3,7 @@
 // savings compares tokens of the same kind.
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { i18n, LOCALE_KEY } from '../lib/i18n/index.svelte';
 import type { Stats } from '../lib/protocol';
 import { cleanup, render, textOf } from '../lib/test-render';
 
@@ -130,12 +131,77 @@ describe('Dashboard: the turns of each mode', () => {
     const el = await loaded();
     const turns = tile(el, 'Torns');
     expect(textOf(turns.querySelector('.value'))).toBe('4');
-    expect(textOf(turns.querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 2');
+    expect(textOf(turns.querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Consell 0 · Perfecciona 2');
   });
 
   it('reads 0 from a server that does not count them yet', async () => {
     data.stats = { ...cacheHeavy(), turns: { solo: 1, duel: 1, debate: 0 } as Stats['turns'] };
     const el = await loaded();
-    expect(textOf(tile(el, 'Torns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Debat 0 · Perfecciona 0');
+    expect(textOf(tile(el, 'Torns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Consell 0 · Perfecciona 0');
+  });
+});
+
+describe('Dashboard in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+    // The charts' width, given by the test that draws them.
+    delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+  });
+
+  /** The chart card titled `title`. */
+  const card = (el: HTMLElement, title: string) =>
+    [...el.querySelectorAll('figure.card')].find((f) => textOf(f.querySelector('h3')) === title) ?? null;
+
+  it('shows its KPIs in English, and repaints them in another language', async () => {
+    i18n.set('en');
+    const el = await loaded();
+    expect(textOf(el.querySelector('h2'))).toBe('Usage and savings');
+    const processed = tile(el, 'Tokens processed');
+    expect(textOf(processed.querySelector('.value'))).toMatch(/^180\.6k$/i);
+    const parts = [...processed.querySelectorAll('ul[aria-label="Tokens processed by kind"] li span')].map((s) => textOf(s));
+    expect(parts).toEqual(['Input', 'Cache reads', 'Cache writes', 'Output']);
+    expect(textOf(processed.querySelector('.sub'))).toBe('6 calls · 0 errors');
+    expect(textOf(tile(el, 'Turns').querySelector('.sub'))).toBe('Solo 1 · Duel 1 · Council 0 · Refine 0');
+    expect(textOf(tile(el, 'Tokens saved'))).toContain('14% fewer tokens than would have been processed');
+    expect(textOf(el.querySelector('.money'))).toContain('Amounts in euros · 1 USD = €0.86 · manual rate');
+
+    i18n.set('es');
+    flushSync();
+    expect(textOf(el.querySelector('h2'))).toBe('Uso y ahorro');
+    expect(textOf(tile(el, 'Turnos').querySelector('.sub'))).toBe('Solo 1 · Duelo 1 · Consejo 0 · Perfecciona 0');
+  });
+
+  it('writes the days of a chart, on its axis and in its table, in Spanish', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 640 });
+    i18n.set('es');
+    const el = await loaded();
+    const tokens = card(el, 'Tokens por día')!;
+    expect(tokens).not.toBeNull();
+    const axis = [...tokens.querySelectorAll('svg text')].map((t) => t.textContent ?? '').filter((t) => /^\d{1,2} \D+$/.test(t));
+    expect(axis.length).toBeGreaterThan(1);
+    for (const day of axis) expect(day).toMatch(/^\d{1,2} (ene|feb|mar|abr|may|jun|jul|ago|sept|oct|nov|dic)$/);
+
+    tokens.querySelector<HTMLButtonElement>('button.toggle')!.click();
+    flushSync();
+    expect(textOf(tokens.querySelector('button.toggle'))).toBe('Ver gráfico');
+    expect([...tokens.querySelectorAll('thead th')].map((th) => textOf(th))).toEqual(['Día', 'Claude', 'ChatGPT', 'Total']);
+    const row = [...tokens.querySelectorAll('tbody tr')].map((tr) => [...tr.querySelectorAll('th, td')].map((c) => textOf(c)));
+    expect(row).toHaveLength(1);
+    expect(row[0]![0]).toMatch(/^(lun|mar|mié|jue|vie|sáb|dom), \d{1,2} de [a-z]+$/);
+    expect(row[0]!.slice(1)).toEqual(['120.412', '60.206', '180.618']);
+  });
+
+  it('writes the days of a chart on its axis in English', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 640 });
+    i18n.set('en');
+    const el = await loaded();
+    const savings = card(el, 'Savings per day')!;
+    const axis = [...savings.querySelectorAll('svg text')].map((t) => t.textContent ?? '').filter((t) => /^\d{1,2} \D+$/.test(t));
+    expect(axis.length).toBeGreaterThan(1);
+    for (const day of axis) expect(day).toMatch(/^\d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)$/);
+    expect(savings.querySelector('rect.hit')?.getAttribute('aria-label')).toMatch(
+      /^\w{3} \d{1,2} \w+: Cache 0, Compaction 0, Stop by consensus 0, No changes 0, total 0$/,
+    );
   });
 });

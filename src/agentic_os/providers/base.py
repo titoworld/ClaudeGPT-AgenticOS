@@ -6,7 +6,7 @@ Failures raise :class:`ProviderError` (a refusal raises :class:`RefusalError`).
 Cancellation (``asyncio.CancelledError``) must release every resource (kill
 subprocesses, close HTTP streams).
 
-Integrity of a reply (docs/adr/0005-integritat-de-les-respostes.md): a result says
+Integrity of a reply (docs/adr/0005-answer-integrity.md): a result says
 whether the reply is complete or was cut off (``truncated``, ``finish_reason``); a
 refusal is never a result, even when some text streamed before it; a stream that ends
 without the vendor's final event is an error, never a complete answer.
@@ -15,9 +15,9 @@ Billing: ``usage`` is always what the attempt that produced the result (or the e
 billed, at the rates of its ``model``. Earlier attempts of the same call that another
 model declined (a server-side fallback) are ``declined``, each with its own model, and
 the engine prices and records every one of them apart: tokens of different models are
-never summed (docs/adr/0008-recompte-de-tokens.md).
+never summed (docs/adr/0008-token-accounting.md).
 
-Attachments (docs/adr/0009-adjunts.md): a request carries the files the owner attached to
+Attachments (docs/adr/0009-attachments.md): a request carries the files the owner attached to
 the question (``GenerationRequest.attachments``), each with the ``mode`` this call must
 deliver it in. Providers send them before the prompt text, in order, as the vendor's own
 blocks (images, PDF documents, labelled text); their content is data, never instructions.
@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.i18n import Lazy, lazy, number, use
 from agentic_os.pdf_facts import PdfCheck, PdfNotes, PdfPage, pdf_notes
 
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
@@ -106,11 +107,11 @@ class Attachment:
             data = self.path.read_bytes()
         except OSError:
             raise ProviderError(
-                f"No s'ha pogut llegir l'adjunt «{self.name}».", kind="internal"
+                lazy("providers.attachment_unreadable", name=self.name), kind="internal"
             ) from None
         if hashlib.sha256(data).hexdigest() != self.sha256:
             raise ProviderError(
-                f"L'adjunt «{self.name}» ha canviat des que es va pujar.", kind="internal"
+                lazy("providers.attachment_changed", name=self.name), kind="internal"
             )
         return data
 
@@ -198,11 +199,16 @@ class ProviderError(Exception):
     """A call that failed. ``usage`` and ``model`` say what its last attempt billed when
     the vendor reported it (a refusal, an output budget spent before any text...), so the
     engine records its cost; None when nothing is known to be billed. ``declined`` are the
-    billed attempts other models declined before it (see :class:`DeclinedAttempt`)."""
+    billed attempts other models declined before it (see :class:`DeclinedAttempt`).
+
+    ``message`` is made in the language in force when the error is raised (a turn's, the
+    language of the connection that started it). ``text`` is the message as it was given:
+    an error that an agent's status may show, kept for every client, gives it as a
+    :func:`~agentic_os.i18n.lazy` text, which ``str()`` makes in the reader's language."""
 
     def __init__(
         self,
-        message: str,
+        message: str | Lazy,
         *,
         kind: ProviderErrorKind,
         retryable: bool = False,
@@ -210,13 +216,32 @@ class ProviderError(Exception):
         model: str | None = None,
         declined: Sequence[DeclinedAttempt] = (),
     ) -> None:
-        super().__init__(message)
-        self.message = message
+        made = str(message)
+        super().__init__(made)
+        self.message = made
+        self.text: str | Lazy = message
         self.kind: ProviderErrorKind = kind
         self.retryable = retryable
         self.usage = usage
         self.model = model
         self.declined: tuple[DeclinedAttempt, ...] = tuple(declined)
+
+    @property
+    def log_text(self) -> str:
+        """The message for the logs, which are in English: a :func:`~agentic_os.i18n.lazy`
+        message is made in English; any other one is logged as it was made."""
+        if isinstance(self.text, Lazy):
+            with use("en"):
+                return str(self.text)
+        return self.message
+
+
+def seconds(value: float) -> str:
+    """A number of seconds as the texts write it: as ``{:g}`` would (``600``, ``0.5``, at
+    most three decimals), with the separators of the language in force
+    (:func:`~agentic_os.i18n.number`)."""
+    shown = f"{value:.3f}".rstrip("0").rstrip(".")
+    return number(value, len(shown.partition(".")[2]))
 
 
 def clean_refusal(text: str) -> str:
@@ -249,7 +274,7 @@ class RefusalError(ProviderError):
 
     def __init__(
         self,
-        message: str,
+        message: str | Lazy,
         *,
         usage: Usage,
         model: str,
@@ -280,8 +305,10 @@ class ProviderStatus:
     mode: ProviderMode
     available: bool
     model: str
-    detail: str
-    """Human-readable state in Catalan, e.g. 'Subscripció activa' or the error cause."""
+    detail: str | Lazy
+    """Human-readable state, e.g. «Subscription active» or the error's cause: a
+    :func:`agentic_os.i18n.lazy` text when it is kept for every client (``str()`` makes
+    it in the language in force)."""
     limits: Sequence[UsageLimit] = ()
     """Latest subscription usage windows seen (empty when unknown or in api mode)."""
 
@@ -292,16 +319,19 @@ class ModelInfo:
 
     id: str
     """Value passed to the provider (API id, CLI alias such as "opus", Codex slug...)."""
-    label: str
-    description: str = ""
+    label: str | Lazy
+    """The name shown: the vendor's, or a :func:`agentic_os.i18n.lazy` text (the demo's)."""
+    description: str | Lazy = ""
+    """What the model is for: a :func:`agentic_os.i18n.lazy` text, since listings are
+    cached for every client."""
     is_default: bool = False
     context_window: int | None = None
 
     def to_wire(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "label": self.label,
-            "description": self.description,
+            "label": str(self.label),
+            "description": str(self.description),
             "is_default": self.is_default,
             "context_window": self.context_window,
         }
@@ -352,5 +382,5 @@ def reads_pdfs(provider: Provider) -> bool:
     """Whether a provider sends a PDF itself. ChatGPT through Codex (the app-server, mode
     "cli") cannot: it gets the text the server extracted, page by page
     (``prompt_format.pdf_view``), checked by Claude when the engine can
-    (docs/adr/0009-adjunts.md)."""
+    (docs/adr/0009-attachments.md)."""
     return not (provider.agent == "chatgpt" and provider.mode == "cli")

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import AgentName, ProviderMode, TurnOptions, Usage
 from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.events import (
@@ -772,7 +773,8 @@ async def test_monitor_answers_with_a_placeholder_while_a_check_is_slow() -> Non
     first = await monitor.statuses()
     assert [s.agent for s in first] == ["claude", "chatgpt"]
     assert first[0].available
-    assert first[1] == ProviderStatus("chatgpt", "cli", False, "", "S'està comprovant l'estat…")
+    placeholder = ProviderStatus("chatgpt", "cli", False, "", "S'està comprovant l'estat…")
+    assert status_to_wire(first[1]) == status_to_wire(placeholder)
     second = await monitor.statuses(wait_seconds=1.0)  # joins the check still running
     assert second[1].detail == "Subscripció activa"
     assert slow.calls == 1
@@ -786,11 +788,11 @@ async def test_monitor_reports_failures_and_timeouts() -> None:
         {"claude": failing, "chatgpt": hanging}, wait_seconds=1.0, hard_timeout_seconds=0.05
     )
     claude, chatgpt = await monitor.statuses()
-    assert (claude.available, claude.detail) == (
+    assert (claude.available, str(claude.detail)) == (
         False,
         "No s'ha pogut consultar l'estat del proveïdor.",
     )
-    assert (chatgpt.available, chatgpt.detail) == (False, "El proveïdor no respon.")
+    assert (chatgpt.available, str(chatgpt.detail)) == (False, "El proveïdor no respon.")
     await monitor.aclose()
 
 
@@ -960,3 +962,23 @@ async def test_written_events_leave_the_bound() -> None:
     assert not connection.overflowed.is_set()
     assert len(websocket.sent) == 15
     await cancel_and_wait([writer])
+
+
+async def test_a_turn_keeps_the_language_it_was_started_in() -> None:
+    """The texts a turn writes (here, its crash) are in the language of the connection
+    that started it, even once that language is no longer in force."""
+    runner = ScriptedRunner(crash=True)
+    turns = TurnManager(runner)
+    live = Recorder()
+    with i18n.use("es"):
+        turns.start(request("r1"), live)
+        with pytest.raises(TurnRejectedError) as exc:
+            turns.start(request("r1"), Recorder())
+        assert exc.value.message == "Este identificador de petición ya se ha usado."
+    runner.gate.set()
+    await settle()
+    assert live.messages[-1]["error"] == {
+        "kind": "internal",
+        "message": "Se ha producido un error interno y el turno se ha detenido.",
+    }
+    await turns.aclose()

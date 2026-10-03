@@ -1,45 +1,46 @@
-# Registre de decisions d'arquitectura (ADR)
+# Architecture decision records (ADRs)
 
-Cada decisió important es documenta en un fitxer numerat `NNNN-titol-curt.md`. Així qualsevol sessió (humana o de Claude) sap què es va decidir, per què i quines alternatives es van descartar, sense reobrir el debat.
+Every important decision is documented in a numbered file, `NNNN-short-title.md`. That way any session (a human's or Claude's) knows what was decided, why, and which alternatives were discarded, without reopening the debate.
 
-Un ADR acceptat no s'edita: si la decisió canvia, s'escriu un ADR nou que el substitueix i l'antic passa a l'estat "Substituït per NNNN".
+An accepted ADR is not edited: if the decision changes, a new ADR is written to supersede it, and the old one moves to the status "Superseded by NNNN". Translating an ADR is not changing it: [ADR 0011](0011-internationalization.md) put them all into English, with every decision as it was.
 
-## Índex
+## Index
 
-| Núm. | Decisió                                                                                   | Estat    |
-| ---- | ----------------------------------------------------------------------------------------- | -------- |
-| 0001 | [Python amb uv com a base del projecte](0001-python-con-uv.md) (en castellà)              | Acceptat |
-| 0002 | [Subscripcions via les CLI oficials, amb claus d'API com a alternativa](0002-subscripcions-via-cli-oficials.md) | Acceptat |
-| 0003 | [Mode Consell i estratègia d'estalvi de tokens](0003-consell-i-estalvi-de-tokens.md)      | Acceptat |
-| 0004 | [Interfície web i desplegament](0004-web-i-desplegament.md)                               | Acceptat |
-| 0005 | [Integritat de les respostes: truncades, negatives i pressupost de sortida](0005-integritat-de-les-respostes.md) | Proposat |
-| 0006 | [Revisió de la configuració i preus per defecte a la taula de preus](0006-revisio-de-la-configuracio.md) | Proposat |
-| 0007 | [Resultat del torn desat a la pregunta](0007-resultat-del-torn.md)                        | Proposat |
-| 0008 | [Recompte de tokens i intents declinats](0008-recompte-de-tokens.md)                      | Proposat |
-| 0009 | [Adjunts: imatges, PDF i fitxers de text al xat](0009-adjunts.md)                         | Proposat |
-| 0010 | [Mode «Perfecciona»: un document que les dues IA milloren fins que l'aturis](0010-mode-perfecciona.md) | Proposat |
+| No. | Decision | Status |
+| --- | --- | --- |
+| 0001 | [Python with uv as the project's base](0001-python-with-uv.md) | Accepted |
+| 0002 | [Subscriptions through the official CLIs, with API keys as an alternative](0002-subscriptions-via-official-clis.md) | Accepted |
+| 0003 | [The Council mode and the token-saving strategy](0003-council-and-token-savings.md) | Accepted |
+| 0004 | [Web interface and deployment](0004-web-and-deployment.md) | Accepted |
+| 0005 | [Answer integrity: truncated answers, refusals and the output budget](0005-answer-integrity.md) | Proposed |
+| 0006 | [Settings revisions and default prices in the price table](0006-settings-revisions.md) | Proposed |
+| 0007 | [The turn outcome, stored on the question](0007-turn-outcome.md) | Proposed |
+| 0008 | [Token accounting and declined attempts](0008-token-accounting.md) | Proposed |
+| 0009 | [Attachments: images, PDFs and text files in the chat](0009-attachments.md) | Proposed |
+| 0010 | [Refine mode: a document the two AIs improve until you stop it](0010-refine-mode.md) | Proposed |
+| 0011 | [Internationalization: the repository in English, the interface in English, Spanish and Catalan](0011-internationalization.md) | Proposed |
 
-## Plantilla
+## Template
 
 ```markdown
-# NNNN. Títol
+# NNNN. Title
 
-- Estat: Proposat | Acceptat | Substituït per NNNN
-- Data: AAAA-MM-DD
+- Status: Proposed | Accepted | Superseded by NNNN
+- Date: YYYY-MM-DD
 
 ## Context
 
-Quin problema cal resoldre i què condiciona la decisió.
+What problem needs solving, and what constrains the decision.
 
-## Decisió
+## Decision
 
-Què es decideix.
+What is decided.
 
-## Alternatives considerades
+## Alternatives considered
 
-Quines altres opcions hi havia i per què es van descartar.
+What other options there were, and why they were discarded.
 
-## Conseqüències
+## Consequences
 
-Què implica la decisió, tant el que és bo com el que no.
+What the decision implies, both the good and the bad.
 ```

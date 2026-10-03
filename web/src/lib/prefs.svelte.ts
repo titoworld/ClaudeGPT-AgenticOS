@@ -80,5 +80,3 @@ class Prefs {
 }
 
 export const prefs = new Prefs();
-
-export const EFFECTS_LABEL: Record<SceneQuality, string> = { high: 'Alts', low: 'Baixos', off: 'Desactivats' };

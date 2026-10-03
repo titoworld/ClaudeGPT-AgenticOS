@@ -1,5 +1,5 @@
 # ClaudeGPT OS on a VPS: Caddy (HTTPS edge) in front of the app.
-# Step by step (in Catalan): docs/DESPLEGAMENT.md
+# Step by step: docs/DEPLOYMENT.md
 #
 #   cp .env.example .env && nano .env
 #   docker compose up -d --build
@@ -34,7 +34,7 @@ services:
     env_file: .env
     environment:
       # Wiring that depends on this file; .env may override it.
-      AOS_PUBLIC_ORIGIN: ${AOS_PUBLIC_ORIGIN:-https://${DOMAIN:?Defineix DOMAIN al fitxer .env}}
+      AOS_PUBLIC_ORIGIN: ${AOS_PUBLIC_ORIGIN:-https://${DOMAIN:?Set DOMAIN in the .env file}}
       AOS_SECURE_COOKIES: ${AOS_SECURE_COOKIES:-true}
       AOS_TRUSTED_PROXIES: ${AOS_TRUSTED_PROXIES:-172.30.0.0/24} # the `proxy` network
     # No `ports:` on purpose: reachable only through Caddy.
@@ -117,8 +117,8 @@ services:
       - "443:443/tcp" # HTTPS (HTTP/1.1, HTTP/2)
       - "443:443/udp" # HTTP/3 (QUIC)
     environment:
-      DOMAIN: ${DOMAIN:?Defineix DOMAIN al fitxer .env}
-      ACME_EMAIL: ${ACME_EMAIL:?Defineix ACME_EMAIL al fitxer .env}
+      DOMAIN: ${DOMAIN:?Set DOMAIN in the .env file}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in the .env file}
       # Empty or unset: everyone (an empty list inside Caddy would block all).
       ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
     volumes:

@@ -28,7 +28,7 @@ class TurnRequest:
     """Model per agent for cheap internal calls (compaction summaries)."""
     attachments: tuple[int, ...] = ()
     """Ids of the uploaded files attached to the question, in order
-    (docs/adr/0009-adjunts.md)."""
+    (docs/adr/0009-attachments.md)."""
     refine_budget_usd: float | None = None
     """A refine turn's budget in USD (``options.refine.budget_eur`` at the rate the app
     shows euros with); None when unknown: the turn then stops at its rounds only."""

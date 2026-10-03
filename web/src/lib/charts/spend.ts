@@ -1,61 +1,73 @@
 // Euros on the usage dashboard: costs of the selected range (real API cost vs
 // subscription value at API prices), the value of the savings, the exchange-rate
-// note, and the "Aquest mes" panel (API budgets and subscription value).
+// note, and the "This month" panel (API budgets and subscription value), in the
+// language in force (lib/i18n).
 
 import { AGENT_LABEL, formatEur, formatPercent } from '../format';
+import { i18n } from '../i18n/index.svelte';
 import { AGENTS, type Agent, type AgentSpend, type FxRate, type MonthSpend, type ProviderStatus, type Stats } from '../protocol';
-import { plural, providerCards, type LimitTone, type ProviderCard } from './usage';
+import { perLocale } from './intl';
+import { providerCards, type LimitTone, type ProviderCard } from './usage';
 
 /** Share of the monthly API budget from which it warns, and where it is used up. */
 export const BUDGET_WARNING = 0.8;
 export const BUDGET_CRITICAL = 1;
 
-const LOCALE = 'ca-ES';
-const eurWhole = new Intl.NumberFormat(LOCALE, { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
-const eurCents = new Intl.NumberFormat(LOCALE, {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-const eurTick = new Intl.NumberFormat(LOCALE, {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 4,
-});
-const eurTickCompact = new Intl.NumberFormat(LOCALE, {
-  style: 'currency',
-  currency: 'EUR',
-  notation: 'compact',
-  maximumFractionDigits: 1,
-});
-const rateFmt = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 4 });
+const eurWhole = perLocale((tag) => new Intl.NumberFormat(tag, { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }));
+const eurCents = perLocale(
+  (tag) =>
+    new Intl.NumberFormat(tag, {
+      style: 'currency',
+      currency: 'EUR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }),
+);
+const eurTick = perLocale(
+  (tag) =>
+    new Intl.NumberFormat(tag, {
+      style: 'currency',
+      currency: 'EUR',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 4,
+    }),
+);
+const eurTickCompact = perLocale(
+  (tag) =>
+    new Intl.NumberFormat(tag, {
+      style: 'currency',
+      currency: 'EUR',
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }),
+);
+const rateFmt = perLocale((tag) => new Intl.NumberFormat(tag, { maximumFractionDigits: 4 }));
+const countFmt = perLocale((tag) => new Intl.NumberFormat(tag));
 
 const finite = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 /** Costs are never negative; null, garbage and negatives count as 0. */
 const amount = (v: unknown): number => Math.max(0, finite(v) ?? 0);
 
-/** Cents from 0,10 € up; tiny amounts keep formatEur's precision ('0,0123 €'). */
+/** Cents from €0.10 up; tiny amounts keep formatEur's precision ('€0.0123'). */
 function eurText(eur: number): string {
-  return Math.abs(eur) >= 0.1 ? eurCents.format(eur) : formatEur(eur);
+  return Math.abs(eur) >= 0.1 ? eurCents().format(eur) : formatEur(eur);
 }
 
-/** Totals, budgets and plan prices: '0 €', '50 €', '12,30 €', '0,71 €', '0,0123 €'. */
+/** Totals, budgets and plan prices: '0 €', '50 €', '12,30 €', '0,71 €', '0,0123 €' (Catalan). */
 export function formatAmount(eur: number | null | undefined): string {
   if (eur == null || !Number.isFinite(eur)) return '—';
-  return Number.isInteger(eur) ? eurWhole.format(eur) : eurText(eur);
+  return Number.isInteger(eur) ? eurWhole().format(eur) : eurText(eur);
 }
 
-/** Chart values and table cells: always cents ('1,00 €'), so columns line up; '0 €' when empty. */
+/** Chart values and table cells: always cents ('€1.00'), so columns line up; '€0' when empty. */
 export function formatCost(eur: number | null | undefined): string {
   if (eur == null || !Number.isFinite(eur)) return '—';
-  return eur === 0 ? eurWhole.format(0) : eurText(eur);
+  return eur === 0 ? eurWhole().format(0) : eurText(eur);
 }
 
-/** Y-axis ticks in euros: '0 €', '0,025 €', '1,5 €', '1,2 k €'. */
+/** Y-axis ticks in euros: '0 €', '0,025 €', '1,5 €', '1,2 k €' (Catalan); '€1.2k' (English). */
 export function formatEurTick(eur: number): string {
-  return Math.abs(eur) >= 1000 ? eurTickCompact.format(eur) : eurTick.format(eur);
+  return Math.abs(eur) >= 1000 ? eurTickCompact().format(eur) : eurTick().format(eur);
 }
 
 /** Euros per dollar, or null when the rate is missing or invalid. */
@@ -64,19 +76,20 @@ export function rateOf(fx: FxRate | null | undefined): number | null {
   return r != null && r > 0 ? r : null;
 }
 
-/** '1 USD = 0,8612 € · BCE 25/9' or '1 USD = 0,86 € · tipus manual'. */
+/** '1 USD = €0.8612 · ECB 25/9' or '1 USD = 0,86 € · tipus manual' (Catalan). */
 export function fxNote(fx: FxRate | null | undefined): string | null {
   const rate = rateOf(fx);
   if (!fx || rate == null) return null;
-  const head = `1 USD = ${rateFmt.format(rate)} €`;
-  if (fx.source !== 'ecb') return `${head} · tipus manual`;
+  const t = i18n.m.dashboard.fx;
+  const head = t.rate(rateFmt().format(rate));
+  if (fx.source !== 'ecb') return `${head} · ${t.manual}`;
   const day = /^\d{4}-(\d{2})-(\d{2})$/.exec(fx.as_of ?? '');
-  return day ? `${head} · BCE ${Number(day[2])}/${Number(day[1])}` : `${head} · BCE`;
+  return day ? `${head} · ${t.ecb} ${Number(day[2])}/${Number(day[1])}` : `${head} · ${t.ecb}`;
 }
 
-/** '3 crides sense preu' (calls whose model has no known price). */
+/** '3 unpriced calls' (calls whose model has no known price). */
 export function unpricedText(calls: number): string {
-  return plural(calls, 'crida sense preu', 'crides sense preu', calls.toLocaleString(LOCALE));
+  return i18n.m.dashboard.unpricedCalls(calls, countFmt().format(calls));
 }
 
 // ------------------------------------------------------------ range KPIs
@@ -135,7 +148,7 @@ export interface MoneyRow {
   ratio: number | null;
   /** Head of the row: '84 %', or the amount when there is no limit. */
   headText: string;
-  /** '42,10 € de 50 €' (empty without a limit: the head already says it). */
+  /** '€42.10 of €50' (empty without a limit: the head already says it). */
   amountText: string;
   /** Meter fill colour. */
   tone: LimitTone;
@@ -162,9 +175,10 @@ export interface MonthCard {
 }
 
 export function budgetStatus(ratio: number): { tone: LimitTone; label: string } {
-  if (ratio >= BUDGET_CRITICAL) return { tone: 'critical', label: 'Pressupost exhaurit' };
-  if (ratio >= BUDGET_WARNING) return { tone: 'warning', label: 'A prop del pressupost' };
-  return { tone: 'ok', label: 'Dins del pressupost' };
+  const t = i18n.m.dashboard.budget;
+  if (ratio >= BUDGET_CRITICAL) return { tone: 'critical', label: t.critical };
+  if (ratio >= BUDGET_WARNING) return { tone: 'warning', label: t.warning };
+  return { tone: 'ok', label: t.ok };
 }
 
 const positiveLimit = (v: unknown): number | null => {
@@ -173,12 +187,13 @@ const positiveLimit = (v: unknown): number | null => {
 };
 
 function budgetRow(name: string, spend: AgentSpend, rate: number): MoneyRow {
+  const t = i18n.m.dashboard.budget;
   const eur = amount(spend.api_usd) * rate;
   const limit = positiveLimit(spend.budget_eur);
   if (limit == null) {
     return {
       kind: 'budget',
-      label: 'Despesa d’API',
+      label: t.spend,
       amountEur: eur,
       limitEur: null,
       ratio: null,
@@ -186,39 +201,39 @@ function budgetRow(name: string, spend: AgentSpend, rate: number): MoneyRow {
       amountText: '',
       tone: 'unknown',
       status: null,
-      caption: 'Sense pressupost mensual.',
-      action: 'Defineix-lo a Configuració',
-      meterLabel: `${name}, despesa d’API del mes`,
+      caption: t.none,
+      action: t.set,
+      meterLabel: t.spendMeter(name),
       valueText: formatAmount(eur),
     };
   }
   const ratio = Math.max(0, finite(spend.budget_used) ?? eur / limit);
   const { tone, label } = budgetStatus(ratio);
-  const amountText = `${formatAmount(eur)} de ${formatAmount(limit)}`;
   return {
     kind: 'budget',
-    label: 'Pressupost d’API',
+    label: t.title,
     amountEur: eur,
     limitEur: limit,
     ratio,
     headText: formatPercent(ratio),
-    amountText,
+    amountText: t.amountOf(formatAmount(eur), formatAmount(limit)),
     tone,
     status: { icon: tone, label },
     caption: '',
     action: null,
-    meterLabel: `${name}, pressupost d’API del mes`,
-    valueText: `${amountText} (${formatPercent(ratio)}): ${label.toLowerCase()}`,
+    meterLabel: t.meter(name),
+    valueText: t.value(formatAmount(eur), formatAmount(limit), formatPercent(ratio), label.toLowerCase()),
   };
 }
 
 function planRow(name: string, spend: AgentSpend, rate: number): MoneyRow {
+  const t = i18n.m.dashboard.plan;
   const eur = amount(spend.equivalent_usd) * rate;
   const limit = positiveLimit(spend.plan_eur);
   if (limit == null) {
     return {
       kind: 'plan',
-      label: 'Valor de la subscripció',
+      label: t.title,
       amountEur: eur,
       limitEur: null,
       ratio: null,
@@ -226,30 +241,30 @@ function planRow(name: string, spend: AgentSpend, rate: number): MoneyRow {
       amountText: '',
       tone: 'unknown',
       status: null,
-      caption: 'A preus d’API.',
-      action: 'Indica el preu del pla',
-      meterLabel: `${name}, valor de la subscripció del mes`,
+      caption: t.atApiPrices,
+      action: t.set,
+      meterLabel: t.meter(name),
       valueText: formatAmount(eur),
     };
   }
   const ratio = Math.max(0, finite(spend.plan_value) ?? eur / limit);
-  const amountText = `${formatAmount(eur)} de ${formatAmount(limit)}`;
   const paidOff = ratio >= 1;
+  const value = paidOff ? t.valuePaidOff : t.value;
   return {
     kind: 'plan',
-    label: 'Valor de la subscripció',
+    label: t.title,
     amountEur: eur,
     limitEur: limit,
     ratio,
     headText: formatPercent(ratio),
-    amountText,
+    amountText: i18n.m.dashboard.budget.amountOf(formatAmount(eur), formatAmount(limit)),
     // Value is never a warning: more is better, so the fill stays neutral.
     tone: 'ok',
-    status: paidOff ? { icon: 'good', label: 'Ja surt a compte' } : null,
-    caption: paidOff ? '' : 'Equivalent a preus d’API',
+    status: paidOff ? { icon: 'good', label: t.paidOff } : null,
+    caption: paidOff ? '' : t.equivalent,
     action: null,
-    meterLabel: `${name}, valor de la subscripció del mes`,
-    valueText: `${amountText} del pla a preus d’API (${formatPercent(ratio)})${paidOff ? ': ja surt a compte' : ''}`,
+    meterLabel: t.meter(name),
+    valueText: value(formatAmount(eur), formatAmount(limit), formatPercent(ratio)),
   };
 }
 
@@ -285,10 +300,10 @@ export function monthCards(
   });
 }
 
-const MONTH = new Intl.DateTimeFormat(LOCALE, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+const monthFmt = perLocale((tag) => new Intl.DateTimeFormat(tag, { month: 'long', year: 'numeric', timeZone: 'UTC' }));
 
-/** 'setembre del 2026' for '2026-09' (as-is when unparsable). */
+/** 'September 2026', 'septiembre de 2026', 'setembre del 2026' for '2026-09' (as-is when unparsable). */
 export function monthLabel(month: string | null | undefined): string {
   if (!month || !/^\d{4}-\d{2}$/.test(month)) return month ?? '';
-  return MONTH.format(new Date(`${month}-01T00:00:00Z`));
+  return monthFmt().format(new Date(`${month}-01T00:00:00Z`));
 }

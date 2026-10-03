@@ -1,4 +1,4 @@
-// PDF.js, for the thumbnails and the previews of attached PDFs (docs/adr/0009-adjunts.md).
+// PDF.js, for the thumbnails and the previews of attached PDFs (docs/adr/0009-attachments.md).
 // Loaded only when a PDF is attached or previewed: nothing imports this module
 // statically (lib/bundle.test.ts), so it and PDF.js are a chunk of their own.
 //

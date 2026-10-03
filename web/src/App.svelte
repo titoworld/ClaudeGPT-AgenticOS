@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import Icon from './components/Icon.svelte';
+  import RichText from './components/RichText.svelte';
   import SceneBackdrop from './components/SceneBackdrop.svelte';
   import Toasts from './components/Toasts.svelte';
   import { app } from './lib/app.svelte';
+  import { i18n } from './lib/i18n/index.svelte';
   import { prefs } from './lib/prefs.svelte';
   import { router } from './lib/router.svelte';
   import Login from './views/Login.svelte';
@@ -12,6 +14,8 @@
   // fetching it right away, in parallel with the auth check, so the login
   // screen paints without it and the app does not wait for it afterwards.
   const shell = import('./views/Shell.svelte');
+
+  const t = $derived(i18n.m.app);
 
   onMount(() => {
     void app.init();
@@ -49,7 +53,7 @@
 {#if app.auth === 'checking'}
   <div class="splash" aria-live="polite">
     <span class="spinner" aria-hidden="true"></span>
-    <span class="sr-only">Carregant…</span>
+    <span class="sr-only">{t.loading}</span>
   </div>
 {:else if app.auth === 'ready'}
   {#await shell}
@@ -59,7 +63,7 @@
     <Shell />
   {:catch}
     <div class="splash" role="alert">
-      <p>No s'ha pogut carregar l'aplicació. <button type="button" class="btn" onclick={() => location.reload()}>Torna a carregar</button></p>
+      <p>{t.root.loadFailed} <button type="button" class="btn" onclick={() => location.reload()}>{t.root.reload}</button></p>
     </div>
   {/await}
 {:else}
@@ -69,14 +73,10 @@
 {#if app.fatal}
   <div class="fatal" role="alertdialog" aria-modal="true" aria-labelledby="fatal-title" aria-describedby="fatal-text">
     <div class="fatal-card glass">
-      <h2 id="fatal-title"><Icon name="alert" size={20} />Connexió rebutjada</h2>
+      <h2 id="fatal-title"><Icon name="alert" size={20} />{t.root.fatalTitle}</h2>
       <p id="fatal-text">{app.fatal}</p>
-      <p class="hint">
-        Al servidor, <code>AOS_PUBLIC_ORIGIN</code> ha de ser exactament l'adreça d'aquesta pàgina,
-        <code>{location.origin}</code> (o aquesta adreça ha de ser a <code>AOS_EXTRA_ORIGINS</code>). Corregeix-ho,
-        reinicia l'aplicació i torna a carregar la pàgina.
-      </p>
-      <button type="button" class="btn primary" onclick={() => location.reload()}>Torna a carregar</button>
+      <p class="hint"><RichText text={t.root.fatalHint(location.origin)} /></p>
+      <button type="button" class="btn primary" onclick={() => location.reload()}>{t.root.reload}</button>
     </div>
   </div>
 {/if}
@@ -132,7 +132,8 @@
     color: var(--text-secondary);
   }
 
-  code {
+  /* The hint's code parts are RichText's elements. */
+  .hint :global(code) {
     font-family: var(--font-mono);
     font-size: 0.85em;
   }

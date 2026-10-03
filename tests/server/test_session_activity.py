@@ -225,7 +225,7 @@ def test_resubscribing_is_not_activity_but_the_owner_actions_are(tmp_path: Path)
         assert ws.receive_json() == {"type": "turn.unknown", "request_id": "old"}
         assert last_seen(client, state, token) == T0 + timedelta(minutes=10)
 
-        # «Atura en acabar la ronda» is the owner's too (docs/adr/0010-mode-perfecciona.md).
+        # «Atura en acabar la ronda» is the owner's too (docs/adr/0010-refine-mode.md).
         clock.now += timedelta(minutes=5)
         ws.send_json({"type": "turn.stop", "request_id": "old"})
         assert ws.receive_json() == {"type": "turn.unknown", "request_id": "old"}

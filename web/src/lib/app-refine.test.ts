@@ -1,4 +1,4 @@
-// A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) through the app: it is
+// A refine turn («Perfecciona», docs/adr/0010-refine-mode.md) through the app: it is
 // sent with its options, «Atura en acabar la ronda» sends turn.stop and the turn says it
 // will stop until turn.stopping confirms it (asked again after a reconnection, given up
 // when the server refuses it), and a turn that converged is celebrated like a consensus.

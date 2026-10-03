@@ -1,11 +1,13 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n/index.svelte';
+  import LanguagePicker from './LanguagePicker.svelte';
   import { untrack } from 'svelte';
   import { app, SettingsConflictError } from '../lib/app.svelte';
   import { errorMessage } from '../lib/conversations.svelte';
   import { fxText } from '../lib/costs';
   import { lightDismiss, syncDialog } from '../lib/dialog';
-  import { AGENT_LABEL } from '../lib/format';
-  import { EFFECTS_LABEL, prefs } from '../lib/prefs.svelte';
+  import { AGENT_LABEL, formatInt } from '../lib/format';
+  import { prefs } from '../lib/prefs.svelte';
   import { AGENTS, type Agent, type DefaultMode, type RuntimeSettings } from '../lib/protocol';
   import { cleanSettings, formatAmount, LIMITS, normalizeSettings, validateSettings } from '../lib/settings';
   import { MODE_LABEL, PROVIDER_MODE_LABEL } from '../lib/text';
@@ -18,11 +20,16 @@
   import PriceTable from './PriceTable.svelte';
 
   const uid = $props.id();
-  /** Never «Perfecciona» (refine): a turn that runs until the owner stops it is only started on purpose. */
+  /** Never Refine: a turn that runs until the owner stops it is only started on purpose. */
   const MODES: DefaultMode[] = ['solo', 'duel', 'debate'];
   /** The word limit a refine turn gets when the owner turns the automatic one off. */
   const DEFAULT_WORDS = 1000;
   const QUALITIES: SceneQuality[] = ['high', 'low', 'off'];
+
+  const t = $derived(i18n.m.settings);
+  /** A field's label with its range of whole numbers, as the language writes them. */
+  const ranged = (label: string, range: { min: number; max: number }) =>
+    t.withRange(label, formatInt(range.min), formatInt(range.max));
 
   let dialog: HTMLDialogElement | undefined = $state();
   /**
@@ -34,7 +41,8 @@
   let form: RuntimeSettings = $state(copy(app.settings));
   let submitted = $state(false);
   let saving = $state(false);
-  let result: { kind: 'ok' | 'warn' | 'error'; text: string } | null = $state(null);
+  /** What the last save did; its text is made when shown, so it follows a change of language. */
+  let result: { kind: 'ok' | 'warn' | 'error'; text: () => string } | null = $state(null);
   /** Bumped at every opening: answers meant for an earlier one leave the form alone. */
   let opening = 0;
   /** Model pickers with a custom id that is not valid yet. */
@@ -59,7 +67,7 @@
   const modeOf = (agent: Agent) =>
     app.catalog?.[agent].mode ?? app.providers.find((p) => p.agent === agent)?.mode ?? null;
 
-  // "Per defecte" here means the provider's own model. The catalog's defaults already
+  // "Default" here means the provider's own model. The catalog's defaults already
   // include the saved choice, so they only name it while nothing is saved (and the
   // catalog was fetched after the last save that changed it).
   const catalogDefaults = (agent: Agent) => (app.catalogStale ? null : (app.catalog?.[agent] ?? null));
@@ -140,15 +148,16 @@
       const saved = await app.saveSettings(cleanSettings($state.snapshot(form)));
       if (ticket !== opening) return;
       fill(saved); // with the new revision, for the next save
-      result = { kind: 'ok', text: 'Configuració desada.' };
+      result = { kind: 'ok', text: () => t.drawer.saved };
     } catch (err) {
       if (ticket !== opening) return;
       if (err instanceof SettingsConflictError) {
         // Show what is stored now, to review and save again, instead of overwriting it.
         fill(app.settings);
-        result = { kind: 'warn', text: err.message };
+        const message = err.message;
+        result = { kind: 'warn', text: () => message };
       } else {
-        result = { kind: 'error', text: errorMessage(err, "No s'ha pogut desar la configuració.") };
+        result = { kind: 'error', text: () => errorMessage(err, t.drawer.saveFailed) };
       }
     } finally {
       saving = false;
@@ -164,8 +173,8 @@
   {@attach lightDismiss}>
   <div class="panel glass">
     <header>
-      <h2 id="{uid}-title"><Icon name="settings" size={18} />Configuració</h2>
-      <button type="button" class="icon-btn" onclick={() => dialog?.close()} aria-label="Tanca la configuració">
+      <h2 id="{uid}-title"><Icon name="settings" size={18} />{t.drawer.title}</h2>
+      <button type="button" class="icon-btn" onclick={() => dialog?.close()} aria-label={t.drawer.close}>
         <Icon name="x" />
       </button>
     </header>
@@ -176,20 +185,20 @@
           <div class="load-state" class:error={formState === 'error'} role={formState === 'error' ? 'alert' : 'status'}>
             {#if formState === 'loading'}
               <span class="spinner" aria-hidden="true"></span>
-              <p>Carregant la configuració…</p>
+              <p>{t.drawer.loading}</p>
             {:else}
               <Icon name="alert" size={16} />
-              <p><strong>No s'ha pogut carregar la configuració.</strong> {app.settingsError ?? ''}</p>
+              <p><strong>{t.drawer.loadFailed}</strong> {app.settingsError ?? ''}</p>
               <button type="button" class="btn" disabled={app.settingsLoading} onclick={() => void reload()}>
-                <Icon name="refresh" size={14} />{app.settingsLoading ? 'Provant…' : 'Torna-ho a provar'}
+                <Icon name="refresh" size={14} />{app.settingsLoading ? t.drawer.retrying : t.drawer.retry}
               </button>
             {/if}
           </div>
         {:else}
           <section>
-            <h3>Per defecte</h3>
+            <h3>{t.defaults.title}</h3>
             <fieldset class="field">
-              <legend class="field-label">Mode</legend>
+              <legend class="field-label">{t.defaults.mode}</legend>
               <div class="segmented">
                 {#each MODES as mode (mode)}
                   <label>
@@ -200,7 +209,7 @@
               </div>
             </fieldset>
             <fieldset class="field">
-              <legend class="field-label">Agent del mode Solo</legend>
+              <legend class="field-label">{t.defaults.soloAgent}</legend>
               <div class="segmented">
                 {#each AGENTS as agent (agent)}
                   <label>
@@ -213,16 +222,16 @@
             <label class="toggle">
               <input type="checkbox" class="switch" bind:checked={form.use_cache} />
               <span>
-                <strong>Memòria cau de respostes</strong>
-                <small class="hint">Una pregunta idèntica en el mateix context es respon sense cridar cap model.</small>
+                <strong>{t.defaults.cache}</strong>
+                <small class="hint">{t.defaults.cacheHint}</small>
               </span>
             </label>
           </section>
 
           <section>
-            <h3>Consell</h3>
+            <h3>{MODE_LABEL.debate}</h3>
             <label class="field">
-              <span>Rondes de revisió ({LIMITS.rounds.min}–{LIMITS.rounds.max})</span>
+              <span>{ranged(t.council.rounds, LIMITS.rounds)}</span>
               <input
                 class="input"
                 type="number"
@@ -236,7 +245,7 @@
               <small class="error-text" id="{uid}-rounds-err">{shownErrors.rounds ?? ''}</small>
             </label>
             <label class="field">
-              <span>Llindar de consens ({LIMITS.consensus_threshold.min}–{LIMITS.consensus_threshold.max})</span>
+              <span>{ranged(t.council.threshold, LIMITS.consensus_threshold)}</span>
               <input
                 class="input"
                 type="number"
@@ -247,11 +256,11 @@
                 bind:value={form.debate.consensus_threshold}
                 aria-invalid={!!shownErrors.consensus_threshold}
                 aria-describedby="{uid}-thr-err {uid}-thr-hint" />
-              <small class="hint" id="{uid}-thr-hint">Si tots dos agents arriben a aquest acord, s'aturen les rondes.</small>
+              <small class="hint" id="{uid}-thr-hint">{t.council.thresholdHint}</small>
               <small class="error-text" id="{uid}-thr-err">{shownErrors.consensus_threshold ?? ''}</small>
             </label>
             <fieldset class="field">
-              <legend class="field-label">Sintetitzador</legend>
+              <legend class="field-label">{t.council.synthesizer}</legend>
               <div class="segmented">
                 {#each AGENTS as agent (agent)}
                   <label>
@@ -262,31 +271,24 @@
               </div>
             </fieldset>
             <fieldset class="field">
-              <legend class="field-label">PDF a les revisions</legend>
+              <legend class="field-label">{t.council.pdf}</legend>
               <div class="segmented">
                 <label>
-                  <input type="radio" name="{uid}-pdf" value="full" bind:group={form.pdf_in_revisions} />Sencer
+                  <input type="radio" name="{uid}-pdf" value="full" bind:group={form.pdf_in_revisions} />{t.council.pdfFull}
                 </label>
                 <label>
-                  <input type="radio" name="{uid}-pdf" value="text" bind:group={form.pdf_in_revisions} />Només el text
+                  <input type="radio" name="{uid}-pdf" value="text" bind:group={form.pdf_in_revisions} />{t.council.pdfText}
                 </label>
               </div>
-              <small class="hint">
-                Les respostes i la síntesi sempre reben el PDF sencer. A les revisions d'un debat, «Només el text» envia el
-                text extret del PDF, que gasta molts menys tokens, i «Sencer» hi torna a enviar el document. Un PDF sense
-                text (un d'escanejat) hi va sempre sencer.
-              </small>
+              <small class="hint">{t.council.pdfHint}</small>
             </fieldset>
           </section>
 
           <section>
-            <h3>Perfecciona</h3>
-            <p class="hint">
-              Les opcions d'un torn «Perfecciona», en què les dues IA milloren un sol document ronda rere ronda fins que
-              l'aturis. Al compositor es poden canviar per a cada torn. No pot ser el mode per defecte.
-            </p>
+            <h3>{MODE_LABEL.refine}</h3>
+            <p class="hint">{t.refine.intro}</p>
             <label class="field">
-              <span>Rondes màximes ({LIMITS.refine_rounds.min}–{LIMITS.refine_rounds.max})</span>
+              <span>{ranged(t.refine.maxRounds, LIMITS.refine_rounds)}</span>
               <input
                 class="input narrow"
                 type="number"
@@ -297,11 +299,11 @@
                 bind:value={form.refine.max_rounds}
                 aria-invalid={!!shownErrors['refine.max_rounds']}
                 aria-describedby="{uid}-refine-rounds-hint {uid}-refine-rounds-err" />
-              <small class="hint" id="{uid}-refine-rounds-hint">La ronda 1 fusiona les respostes en la primera versió.</small>
+              <small class="hint" id="{uid}-refine-rounds-hint">{t.refine.maxRoundsHint}</small>
               <small class="error-text" id="{uid}-refine-rounds-err">{shownErrors['refine.max_rounds'] ?? ''}</small>
             </label>
             <label class="field refine-budget">
-              <span>Pressupost per torn (€)</span>
+              <span>{t.refine.budget}</span>
               <!-- An emptied amount is null until it is one again: validation reports it. -->
               <AmountInput
                 class="input"
@@ -309,20 +311,19 @@
                 aria-invalid={!!shownErrors['refine.budget_eur']}
                 aria-describedby="{uid}-refine-budget-hint {uid}-refine-budget-err" />
               <small class="hint" id="{uid}-refine-budget-hint">
-                Entre {formatAmount(LIMITS.refine_budget_eur.min)} i {formatAmount(LIMITS.refine_budget_eur.max)} €. En mode
-                subscripció compta el valor a preus d'API, per no esgotar la quota.
+                {t.refine.budgetHint(formatAmount(LIMITS.refine_budget_eur.min), formatAmount(LIMITS.refine_budget_eur.max))}
               </small>
               <small class="error-text" id="{uid}-refine-budget-err">{shownErrors['refine.budget_eur'] ?? ''}</small>
             </label>
             <label class="toggle">
               <input type="checkbox" class="switch" checked={automaticWords} onchange={setAutomaticWords} />
               <span>
-                <strong>Límit automàtic de paraules</strong>
-                <small class="hint">1,2 vegades les paraules de la versió 1 (300 com a mínim).</small>
+                <strong>{t.refine.automaticWords}</strong>
+                <small class="hint">{t.refine.automaticWordsHint}</small>
               </span>
             </label>
             <label class="field">
-              <span>Límit de paraules ({LIMITS.refine_words.min}–{LIMITS.refine_words.max.toLocaleString('ca-ES')})</span>
+              <span>{ranged(t.refine.words, LIMITS.refine_words)}</span>
               <input
                 class="input narrow"
                 type="number"
@@ -331,7 +332,7 @@
                 max={LIMITS.refine_words.max}
                 step="50"
                 disabled={automaticWords}
-                placeholder={automaticWords ? 'Automàtic' : ''}
+                placeholder={automaticWords ? t.refine.automatic : ''}
                 value={automaticWords || Number.isNaN(form.refine.max_words) ? '' : form.refine.max_words}
                 oninput={setWords}
                 aria-invalid={!!shownErrors['refine.max_words']}
@@ -339,7 +340,7 @@
               <small class="error-text" id="{uid}-refine-words-err">{shownErrors['refine.max_words'] ?? ''}</small>
             </label>
             <fieldset class="field">
-              <legend class="field-label">Editor</legend>
+              <legend class="field-label">{t.refine.editor}</legend>
               <div class="segmented">
                 {#each AGENTS as agent (agent)}
                   <label>
@@ -348,20 +349,17 @@
                   </label>
                 {/each}
               </div>
-              <small class="hint">Fusiona les respostes i escriu cada versió.</small>
+              <small class="hint">{t.refine.editorHint}</small>
             </fieldset>
             <label class="toggle">
               <input type="checkbox" class="switch" bind:checked={form.refine.stop_on_convergence} />
               <span>
-                <strong>S'atura sol quan convergeix</strong>
-                <small class="hint">
-                  Quan tots dos li donen el llindar o més, sense proposar cap defecte, dues rondes seguides. Sense, només s'atura
-                  quan l'aturis, quan cap dels dos hi troba res a canviar o en arribar a un límit.
-                </small>
+                <strong>{t.refine.stopOnConvergence}</strong>
+                <small class="hint">{t.refine.stopOnConvergenceHint}</small>
               </span>
             </label>
             <label class="field">
-              <span>Llindar de convergència ({LIMITS.refine_threshold.min}–{LIMITS.refine_threshold.max})</span>
+              <span>{ranged(t.refine.threshold, LIMITS.refine_threshold)}</span>
               <input
                 class="input narrow"
                 type="number"
@@ -378,9 +376,9 @@
           </section>
 
           <section>
-            <h3>Historial</h3>
+            <h3>{t.history.title}</h3>
             <label class="field">
-              <span>Compacta l'historial a partir de (tokens)</span>
+              <span>{t.history.compaction}</span>
               <input
                 class="input"
                 type="number"
@@ -392,9 +390,10 @@
                 aria-invalid={!!shownErrors.compaction_threshold_tokens}
                 aria-describedby="{uid}-comp-err {uid}-comp-hint" />
               <small class="hint" id="{uid}-comp-hint">
-                Entre {LIMITS.compaction_threshold_tokens.min.toLocaleString('ca-ES')} i {LIMITS.compaction_threshold_tokens.max.toLocaleString(
-                  'ca-ES',
-                )}. Els missatges antics es resumeixen per gastar menys.
+                {t.history.compactionHint(
+                  formatInt(LIMITS.compaction_threshold_tokens.min),
+                  formatInt(LIMITS.compaction_threshold_tokens.max),
+                )}
               </small>
               <small class="error-text" id="{uid}-comp-err">{shownErrors.compaction_threshold_tokens ?? ''}</small>
             </label>
@@ -402,19 +401,16 @@
 
           <section>
             <div class="section-head">
-              <h3>Models</h3>
+              <h3>{t.models.title}</h3>
               <button
                 type="button"
                 class="link-btn"
                 onclick={() => void app.loadModels(true)}
                 disabled={app.catalogLoading}>
-                <Icon name="refresh" size={13} />{app.catalogLoading ? 'Actualitzant…' : 'Actualitza la llista'}
+                <Icon name="refresh" size={13} />{app.catalogLoading ? t.models.refreshing : t.models.refresh}
               </button>
             </div>
-            <p class="hint">
-              La llista es consulta al proveïdor. Un model nou que encara no hi surti es pot escriure a
-              «Personalitzat…». El principal respon les preguntes; el ràpid fa les tasques internes, com resumir l'historial.
-            </p>
+            <p class="hint">{t.models.hint}</p>
             {#each AGENTS as agent (agent)}
               {@const models = app.catalog?.[agent] ?? null}
               {@const mode = modeOf(agent)}
@@ -423,13 +419,13 @@
                   <AgentLabel {agent} size={15} />
                   {#if mode}<span class="chip">{PROVIDER_MODE_LABEL[mode]}</span>{/if}
                   {#if models && !models.live}
-                    <span class="chip warn" title="No s'ha pogut consultar el proveïdor.">llista de reserva</span>
+                    <span class="chip warn" title={t.models.fallbackTitle}>{t.models.fallback}</span>
                   {/if}
                 </div>
                 <div class="pair">
                   <ModelPicker
                     inline
-                    label="Principal"
+                    label={t.models.main}
                     value={form.models[agent]}
                     onchange={(v) => (form.models[agent] = v)}
                     {models}
@@ -438,7 +434,7 @@
                     showErrors={submitted} />
                   <ModelPicker
                     inline
-                    label="Ràpid"
+                    label={t.models.fast}
                     value={form.fast_models[agent]}
                     onchange={(v) => (form.fast_models[agent] = v)}
                     {models}
@@ -454,20 +450,20 @@
           </section>
 
           <section>
-            <h3>Costos i moneda</h3>
+            <h3>{t.costs.title}</h3>
             <fieldset class="field">
-              <legend class="field-label">Tipus de canvi de dòlars a euros</legend>
+              <legend class="field-label">{t.costs.fxMode}</legend>
               <div class="segmented">
                 <label>
-                  <input type="radio" name="{uid}-fxmode" value="auto" bind:group={form.fx.mode} />Automàtic (BCE)
+                  <input type="radio" name="{uid}-fxmode" value="auto" bind:group={form.fx.mode} />{t.costs.fxAuto}
                 </label>
                 <label>
-                  <input type="radio" name="{uid}-fxmode" value="manual" bind:group={form.fx.mode} />Manual
+                  <input type="radio" name="{uid}-fxmode" value="manual" bind:group={form.fx.mode} />{t.costs.fxManual}
                 </label>
               </div>
             </fieldset>
             <label class="field">
-              <span>{form.fx.mode === 'auto' ? 'Tipus de reserva' : 'Tipus de canvi'} (€ per 1 $)</span>
+              <span>{form.fx.mode === 'auto' ? t.costs.fallbackRate : t.costs.rate}</span>
               <input
                 class="input narrow"
                 type="number"
@@ -479,23 +475,18 @@
                 aria-invalid={!!shownErrors.eur_per_usd}
                 aria-describedby="{uid}-fx-hint {uid}-fx-err" />
               <small class="hint" id="{uid}-fx-hint">
-                {form.fx.mode === 'auto'
-                  ? "Cada dia es fa servir el tipus de referència del Banc Central Europeu; aquest només s'aplica si no es pot obtenir."
-                  : 'Tots els imports en euros es calculen amb aquest tipus.'}
+                {form.fx.mode === 'auto' ? t.costs.fxAutoHint : t.costs.fxManualHint}
               </small>
               <small class="error-text" id="{uid}-fx-err">{shownErrors.eur_per_usd ?? ''}</small>
             </label>
             {#if currentFx}
-              <p class="note"><Icon name="info" size={15} /><span>Ara: {fxText(currentFx)}</span></p>
+              <p class="note"><Icon name="info" size={15} /><span>{t.costs.now(fxText(currentFx))}</span></p>
             {/if}
           </section>
 
           <section>
-            <h3>Preus</h3>
-            <p class="hint">
-              Dòlars per milió de tokens, com els publiquen els proveïdors. En mode subscripció serveixen per
-              calcular el valor equivalent. Edita un preu per crear-ne un de propi.
-            </p>
+            <h3>{t.prices.title}</h3>
+            <p class="hint">{t.prices.hint}</p>
             <PriceTable
               bind:prices={form.prices}
               pricing={app.pricing}
@@ -504,12 +495,12 @@
           </section>
 
           <section>
-            <h3>Pressupostos i plans</h3>
-            <p class="hint">Imports mensuals en euros (p. ex. 50,5). Deixa-ho en blanc si no en tens.</p>
+            <h3>{t.money.title}</h3>
+            <p class="hint">{t.money.hint}</p>
             <div class="money-grid">
               <span></span>
-              <span class="col-head" id="{uid}-budget-head">Pressupost d'API</span>
-              <span class="col-head" id="{uid}-plan-head">Preu de la subscripció</span>
+              <span class="col-head" id="{uid}-budget-head">{t.money.budgetHead}</span>
+              <span class="col-head" id="{uid}-plan-head">{t.money.planHead}</span>
               {#each AGENTS as agent (agent)}
                 {@const budgetErr = shownErrors[`budgets_eur.${agent}`]}
                 {@const planErr = shownErrors[`plans_eur.${agent}`]}
@@ -519,7 +510,7 @@
                     class="input"
                     placeholder="—"
                     bind:value={form.budgets_eur[agent]}
-                    aria-label="Pressupost mensual d'API de {AGENT_LABEL[agent]}, en euros"
+                    aria-label={t.money.budgetLabel(AGENT_LABEL[agent])}
                     aria-invalid={!!budgetErr} />
                   <span class="unit" aria-hidden="true">€</span>
                   {#if budgetErr}<small class="error-text">{budgetErr}</small>{/if}
@@ -529,25 +520,27 @@
                     class="input"
                     placeholder="—"
                     bind:value={form.plans_eur[agent]}
-                    aria-label="Preu mensual de la subscripció de {AGENT_LABEL[agent]}, en euros"
+                    aria-label={t.money.planLabel(AGENT_LABEL[agent])}
                     aria-invalid={!!planErr} />
                   <span class="unit" aria-hidden="true">€</span>
                   {#if planErr}<small class="error-text">{planErr}</small>{/if}
                 </div>
               {/each}
             </div>
-            <p class="hint">
-              El pressupost és per a l'ús per API; l'indicador de la barra lateral avisa a partir del 80&nbsp;%.
-              El preu del pla serveix per comparar-lo amb el valor aprofitat en mode subscripció.
-            </p>
+            <p class="hint">{t.money.footer}</p>
           </section>
         {/if}
 
         <section class="local">
-          <h3>Efectes visuals</h3>
-          <p class="hint">Només en aquest navegador. S'apliquen a l'instant.</p>
+          <h3>{i18n.m.common.language}</h3>
+          <LanguagePicker />
+        </section>
+
+        <section class="local">
+          <h3>{t.effects.title}</h3>
+          <p class="hint">{t.effects.hint}</p>
           <fieldset class="field">
-            <legend class="sr-only">Qualitat dels efectes visuals</legend>
+            <legend class="sr-only">{t.effects.quality}</legend>
             <div class="segmented">
               {#each QUALITIES as q (q)}
                 <label>
@@ -557,18 +550,14 @@
                     value={q}
                     checked={prefs.effects === q}
                     onchange={() => prefs.setEffects(q)} />
-                  {EFFECTS_LABEL[q]}
+                  {t.effects.levels[q]}
                 </label>
               {/each}
             </div>
           </fieldset>
           <p class="note">
             <Icon name="info" size={15} />
-            <span>
-              L'aplicació respecta la preferència del sistema de reduir el moviment{prefs.reducedMotion
-                ? ' (ara activa: les animacions es redueixen al mínim).'
-                : '.'}
-            </span>
+            <span>{prefs.reducedMotion ? t.effects.reducedMotionOn : t.effects.reducedMotion}</span>
           </p>
         </section>
       </div>
@@ -576,13 +565,13 @@
       <footer class="save-row">
         {#if result}
           <p class="result {result.kind}" role="status">
-            <Icon name={result.kind === 'ok' ? 'check' : 'alert'} size={15} />{result.text}
+            <Icon name={result.kind === 'ok' ? 'check' : 'alert'} size={15} />{result.text()}
           </p>
         {:else if formState === 'ready' && submitted && hasErrors}
-          <p class="result error" role="status"><Icon name="alert" size={15} />Revisa els camps marcats.</p>
+          <p class="result error" role="status"><Icon name="alert" size={15} />{t.drawer.checkFields}</p>
         {/if}
         <button type="submit" class="btn primary" disabled={saving || formState !== 'ready'}>
-          {saving ? 'Desant…' : 'Desa la configuració'}
+          {saving ? t.drawer.saving : t.drawer.save}
         </button>
       </footer>
     </form>

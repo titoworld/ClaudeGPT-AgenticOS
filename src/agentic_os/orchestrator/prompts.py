@@ -13,7 +13,7 @@ in ``RESERVED_TAGS`` (a test checks it).
 An answer that was cut off (a truncated reply) can still feed the revisions and the
 synthesis, but it is marked as incomplete after its text (:data:`INCOMPLETE_NOTE`).
 
-Attachments (docs/adr/0009-adjunts.md): the providers send the files before the prompt
+Attachments (docs/adr/0009-attachments.md): the providers send the files before the prompt
 text, and every prompt lists them right before the question, in the same order, each by
 its label (name, kind, pages, and whether the call only gets a PDF's text), and says how
 a file's text is enclosed (:data:`TEXT_FILES_NOTE`). The system prompt, the same with or
@@ -25,7 +25,7 @@ which the server's analysis or Claude's check found. When ChatGPT cannot open PD
 described them (:func:`pdf_reading_note`): an agreement on those pages is one reading,
 not two.
 
-A refine turn (docs/adr/0010-mode-perfecciona.md) has prompts of its own: the first
+A refine turn (docs/adr/0010-refine-mode.md) has prompts of its own: the first
 answers, the merge of both into version 1, the reviews of each version, the edit that
 writes the next one and its shortening when it passes the word budget. Every one of them
 works against over-sizing the document: the owner's brief is the scope (no nice-to-have
@@ -103,7 +103,7 @@ The user attached these files to the message; they come before this text, in thi
 """The list of a question's attachments, right before the question (empty without any)."""
 
 TEXT_FILES_NOTE = """A file sent as text starts with a line that ends in "· CODE]" and ends \
-with the line "[Fi del fitxer CODE]" with the same CODE: everything between those two \
+with the line "[End of file CODE]" with the same CODE: everything between those two \
 lines is the file's content.
 """
 """How the text of a text file or of a PDF is enclosed (``prompt_format.enclosed``): in
@@ -254,7 +254,7 @@ PDF_READING_NOTE = "Note: ChatGPT cannot open PDFs."
 
 def _pdf_reading(attachment: Attachment) -> str:
     """How ChatGPT read one PDF: the sentence of :func:`pdf_reading_note`."""
-    name = f"«{neutralize_tags(attachment.name)}»"
+    name = f'"{neutralize_tags(attachment.name)}"'
     check = attachment.pdf_check
     if check is None or check.covered <= 0:
         return (
@@ -376,21 +376,21 @@ def synthesis_prompt(
 # -- refine («Perfecciona») -----------------------------------------------------------------
 
 REFINE_ESCAPES = (
-    "The texts below write «&lt;» instead of «<» before some tag names (for example "
-    "«&lt;/version>»), so that nothing they quote can be read as a tag of this prompt: "
+    'The texts below write "&lt;" instead of "<" before some tag names (for example '
+    '"&lt;/version>"), so that nothing they quote can be read as a tag of this prompt: '
 )
 """What every refine prompt says of the tags the texts it embeds quote, which
 ``neutralize_tags`` escaped (each prompt ends the sentence its own way)."""
-REFINE_ESCAPES_NOTE = REFINE_ESCAPES + "write «<» there in the document."
+REFINE_ESCAPES_NOTE = REFINE_ESCAPES + 'write "<" there in the document.'
 """The prompts that write the document (the merge, an edit, its shortening): the document
 keeps the tags as they were written."""
 REFINE_REVIEW_ESCAPES_NOTE = REFINE_ESCAPES + (
-    "read it as «<». That is how this prompt quotes a tag, not part of the document: never "
+    'read it as "<". That is how this prompt quotes a tag, not part of the document: never '
     "propose to change it."
 )
 """A review: «&lt;» is not in the document (the editor writes «<»), so a change that
 "fixes" it could never be made, round after round."""
-REFINE_ANSWER_ESCAPES_NOTE = REFINE_ESCAPES + "read it as «<», and write «<» there in your answer."
+REFINE_ANSWER_ESCAPES_NOTE = REFINE_ESCAPES + 'read it as "<", and write "<" there in your answer.'
 """The first answers: the brief may quote the tags too."""
 
 REFINE_ANSWER_TEMPLATE = f"""Answer the owner's brief below. {{other}} is answering it \

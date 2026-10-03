@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { answerForClipboard } from '../lib/hidden-chars';
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { Agent } from '../lib/protocol';
   import type { StreamView } from '../lib/turns.svelte';
   import AgentLabel from './AgentLabel.svelte';
@@ -26,6 +27,8 @@
 
   let { agent, stream, active, variant = 'answer', title, badge, note = null }: Props = $props();
 
+  const t = $derived(i18n.m.turn);
+
   const truncated = $derived(stream?.status === 'done' && stream.truncated);
   const status = $derived(stream ? (truncated ? 'truncated' : stream.status) : active ? 'waiting' : null);
   const streaming = $derived(stream?.status === 'streaming');
@@ -35,8 +38,8 @@
   <header>
     <div class="who">
       {#if variant === 'synthesis'}
-        <span class="synth-title"><Icon name="sparkles" size={16} />{title ?? 'Síntesi'}</span>
-        <span class="by">per <AgentLabel {agent} size={15} /></span>
+        <span class="synth-title"><Icon name="sparkles" size={16} />{title ?? t.steps.synthesis}</span>
+        <span class="by">{t.card.by} <AgentLabel {agent} size={15} /></span>
       {:else}
         <AgentLabel {agent} />
         {#if title}<span class="subtitle">{title}</span>{/if}
@@ -61,16 +64,16 @@
     {:else if status === 'waiting' || streaming}
       <div class="skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
     {:else if !stream}
-      <p class="empty">No ha respost.</p>
+      <p class="empty">{t.card.noAnswer}</p>
     {/if}
 
     {#if stream?.status === 'failed'}
       <div class="problem" role="alert">
         <Icon name="alert" size={16} />
-        <span><strong>No ha pogut respondre.</strong> {stream.error?.message ?? ''}</span>
+        <span><strong>{t.card.failed}</strong> {stream.error?.message ?? ''}</span>
       </div>
     {:else if stream?.status === 'interrupted'}
-      <p class="note">Resposta interrompuda.</p>
+      <p class="note">{t.card.interrupted}</p>
     {:else if stream?.status === 'done' && stream.truncated}
       <TruncationNote reason={stream.finishReason} />
     {/if}

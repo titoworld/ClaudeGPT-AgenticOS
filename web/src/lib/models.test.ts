@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { i18n } from './i18n/index.svelte';
 import {
   findModel,
   isValidModelId,
@@ -113,6 +114,23 @@ describe('labels', () => {
     expect(modelOptionLabel(catalog.models[1]!)).toBe('haiku');
     expect(modelHint(catalog.models[0]!)).toBe('El més capaç · 1M tokens de context');
     expect(modelHint(catalog.models[1]!)).toBe('');
+  });
+
+  it("in English and Spanish (the description is the server's, already in the language of the request)", () => {
+    const model = { ...catalog.models[0]!, description: 'The most capable', context_window: 200_000 };
+    try {
+      i18n.set('en');
+      expect(modelHint(model)).toBe('The most capable · 200k tokens of context');
+      expect(validateModelId('')).toBe('Type the model ID.');
+      expect(validateModelId('a'.repeat(101))).toBe('At most 100 characters.');
+      expect(validateModelId('gpt 6')).toMatch(/^Not a valid ID: no spaces/);
+      i18n.set('es');
+      expect(modelHint({ ...model, description: 'El más capaz', context_window: 1_500_000 })).toBe('El más capaz · 1,5M tokens de contexto');
+      expect(validateModelId(' ')).toBe('Escribe el identificador del modelo.');
+      expect(validateModelId('_x')).toMatch(/^Identificador no válido: sin espacios/);
+    } finally {
+      i18n.set('ca');
+    }
   });
 });
 

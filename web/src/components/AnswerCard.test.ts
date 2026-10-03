@@ -1,5 +1,7 @@
 // Answers cut off before the end (truncated): what the card says and what it copies.
+import { flushSync } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { i18n } from '../lib/i18n/index.svelte';
 import type { MessageMeta } from '../lib/protocol';
 import { message, sequence, usage } from '../lib/test-fixtures';
 import { cleanup, render, textOf } from '../lib/test-render';
@@ -100,5 +102,52 @@ describe('AnswerCard: the tokens of the answer (A7)', () => {
     expect(meta).toContain('20.000 escrits a la memòria cau');
     // Nothing about the cache when it was not used.
     expect(textOf(card(stored({})).target.querySelector('footer.meta'))).not.toContain('memòria cau');
+  });
+});
+
+describe('AnswerCard in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  it('in English: a synthesis, its status and what the answer used', () => {
+    i18n.set('en');
+    const cache = { ...usage(3, 100, 10_000), cache_write_tokens: 20_000 };
+    const { target, status } = card(stored({ usage: cache }, 'synthesis'), 'synthesis');
+    expect(textOf(target.querySelector('.synth-title'))).toBe('Synthesis');
+    expect(textOf(target.querySelector('.by'))).toBe('by Claude');
+    expect(status).toBe('Done');
+    const meta = target.querySelector('footer.meta')!;
+    expect(textOf(meta)).toContain('3 → 100 tokens');
+    expect(textOf(meta)).toContain('10,000 read from the cache');
+    expect(textOf(meta)).toContain('20,000 written to the cache');
+    expect(meta.querySelector('.model')?.getAttribute('title')).toBe('Model');
+    expect([...meta.querySelectorAll('.item')].map((item) => item.getAttribute('title'))).toEqual([
+      '3 input tokens · 100 output',
+      "Input tokens reused from the provider's cache",
+      'Input tokens the provider saved to its cache to reuse them',
+    ]);
+  });
+
+  it('in Spanish: an agent that has not answered yet, and one that did not answer', () => {
+    i18n.set('es');
+    const waiting = render(AnswerCard, { agent: 'chatgpt', stream: null, active: true });
+    expect(textOf(waiting.querySelector('header .status'))).toBe('Pensando…');
+    const silent = render(AnswerCard, { agent: 'chatgpt', stream: null, active: false });
+    expect(textOf(silent.querySelector('.empty'))).toBe('No ha respondido.');
+    const { status } = card(live(undefined));
+    expect(status).toBe('Hecho');
+  });
+
+  it('follows a change of language, the bars of its code blocks too', () => {
+    const [turn] = turnsFromMessages([
+      message({ id: 2, turn_id: 1, kind: 'answer', agent: 'claude', content: '```js\nlet x = 1;\n```', final: true, meta: { model: 'm' } }),
+    ]);
+    const target = render(AnswerCard, { agent: 'claude', stream: turn!.streams[0]!, active: false });
+    expect(textOf(target.querySelector('header .status'))).toBe('Fet');
+    expect(target.querySelector('.code-copy')?.textContent).toBe('Copia');
+    i18n.set('en');
+    flushSync();
+    expect(textOf(target.querySelector('header .status'))).toBe('Done');
+    expect([...target.querySelectorAll('.code-copy')].map((button) => button.textContent)).toEqual(['Copy']);
+    expect(target.querySelector('.code-copy')?.getAttribute('aria-label')).toBe('Copy the code');
   });
 });

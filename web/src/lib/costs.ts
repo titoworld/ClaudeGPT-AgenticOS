@@ -1,8 +1,10 @@
 // Costs in euros: per-answer and per-turn amounts, savings value and the
 // month-to-date budget / subscription lines of the sidebar; and the tokens a call
-// processed, the count every total and ratio uses (ADR 0008).
+// processed, the count every total and ratio uses (ADR 0008). Every text is in the language
+// in force (lib/i18n/areas/turn.ts).
 
 import { formatDay, formatEur, formatInt, formatPercent, usdToEur } from './format';
+import { i18n, textRecord } from './i18n/index.svelte';
 import { AGENTS, type AgentSpend, type FxRate, type ProviderMode, type Savings, type Usage } from './protocol';
 import type { CostBasis, StreamView, TurnView } from './turns.svelte';
 
@@ -32,19 +34,19 @@ export function processedTokens(usage: TokenCounts | null | undefined): number {
 }
 
 /**
- * Each kind of processed token, e.g. "3 d'entrada · 10.000 llegits de la memòria cau ·
- * 20.000 escrits a la memòria cau · 100 de sortida (50 de raonament)"; the cache parts only
- * when there are any.
+ * Each kind of processed token, e.g. "3 input · 10,000 read from the cache · 20,000 written
+ * to the cache · 100 output (50 reasoning)"; the cache parts only when there are any.
  */
 export function tokenBreakdown(usage: TokenCounts): string {
-  const parts = [`${formatInt(tokens(usage.input_tokens))} d'entrada`];
+  const texts = i18n.m.turn.tokens;
+  const parts = [texts.input(formatInt(tokens(usage.input_tokens)))];
   const read = tokens(usage.cache_read_tokens);
   const written = tokens(usage.cache_write_tokens);
   const reasoning = tokens(usage.reasoning_tokens);
-  if (read) parts.push(`${formatInt(read)} llegits de la memòria cau`);
-  if (written) parts.push(`${formatInt(written)} escrits a la memòria cau`);
-  const thinking = reasoning ? ` (${formatInt(reasoning)} de raonament)` : '';
-  parts.push(`${formatInt(tokens(usage.output_tokens))} de sortida${thinking}`);
+  if (read) parts.push(texts.cacheRead(formatInt(read)));
+  if (written) parts.push(texts.cacheWrite(formatInt(written)));
+  const thinking = reasoning ? ` (${texts.reasoning(formatInt(reasoning))})` : '';
+  parts.push(`${texts.output(formatInt(tokens(usage.output_tokens)))}${thinking}`);
   return parts.join(' · ');
 }
 
@@ -58,30 +60,42 @@ export function budgetLevel(ratio: number | null | undefined): Level {
   return 'ok';
 }
 
-const eurWhole = new Intl.NumberFormat('ca-ES', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
-const eurCents = new Intl.NumberFormat('ca-ES', {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-/** Totals and limits: "50 €", "12,30 €"; tiny amounts keep formatEur's precision. */
-export function formatMoney(eur: number): string {
-  if (Number.isInteger(eur)) return eurWhole.format(eur);
-  return Math.abs(eur) >= 1 ? eurCents.format(eur) : formatEur(eur);
+/** An `Intl` format for the language in force, made once per language. */
+function perLocale<T>(make: (tag: string) => T): () => T {
+  const made = new Map<string, T>();
+  return () => {
+    const tag = i18n.tag;
+    let format = made.get(tag);
+    if (!format) {
+      format = make(tag);
+      made.set(tag, format);
+    }
+    return format;
+  };
 }
 
-/** "≈ 0,0123 €" for a USD cost, or null when the cost is unknown. */
+const eurWhole = perLocale((tag) => new Intl.NumberFormat(tag, { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }));
+const eurCents = perLocale(
+  (tag) => new Intl.NumberFormat(tag, { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+);
+const months = perLocale((tag) => new Intl.DateTimeFormat(tag, { month: 'long', year: 'numeric', timeZone: 'UTC' }));
+
+/** Totals and limits: "€50", "€12.30"; tiny amounts keep formatEur's precision. */
+export function formatMoney(eur: number): string {
+  if (Number.isInteger(eur)) return eurWhole().format(eur);
+  return Math.abs(eur) >= 1 ? eurCents().format(eur) : formatEur(eur);
+}
+
+/** "≈ €0.0123" for a USD cost, or null when the cost is unknown. */
 export function approxEur(usd: number | null | undefined, eurPerUsd: number): string | null {
   const eur = usdToEur(usd, eurPerUsd);
   return eur == null || !Number.isFinite(eur) ? null : `≈ ${formatEur(eur)}`;
 }
 
-export const COST_BASIS_TITLE: Record<CostBasis, string> = {
-  api: "Cost real de l'API",
-  equivalent: "Valor equivalent a preus d'API — inclòs a la subscripció",
-};
+export const COST_BASIS_TITLE: Record<CostBasis, string> = textRecord(
+  ['api', 'equivalent'],
+  (basis) => i18n.m.turn.costs.basis[basis],
+);
 
 /**
  * Cost basis of a live answer (stream.completed does not carry it), with the
@@ -95,8 +109,9 @@ export function inferCostBasis(mode: ProviderMode | undefined, usage: Usage): Co
 
 /** Tooltip for one answer's cost. */
 export function costTitle(basis: CostBasis | null, usd: number): string {
-  const what = basis ? COST_BASIS_TITLE[basis] : "Cost estimat a preus d'API";
-  return `${what} (${usd.toLocaleString('ca-ES', { maximumFractionDigits: 6 })} $)`;
+  const texts = i18n.m.turn.costs;
+  const what = basis ? COST_BASIS_TITLE[basis] : texts.estimated;
+  return texts.usd(what, usd.toLocaleString(i18n.tag, { maximumFractionDigits: 6 }));
 }
 
 /** Visible cost text of a finished answer, or null to hide it. */
@@ -175,20 +190,19 @@ export function turnCost(turn: TurnView): TurnCost {
   return { totalUsd, apiUsd, equivalentUsd, otherUsd: rest };
 }
 
-const TURN_COST_TITLE = "Cost del torn a preus d'API";
-
 /**
  * Tooltip of the turn total: real API cost vs value included in subscriptions, and the
  * calls whose kind the turn does not tell. Without either kind it only names the total.
  */
 export function turnCostTitle(cost: TurnCost, eurPerUsd: number): string {
-  if (!(cost.apiUsd > 0) && !(cost.equivalentUsd > 0)) return TURN_COST_TITLE;
+  const texts = i18n.m.turn.costs;
+  if (!(cost.apiUsd > 0) && !(cost.equivalentUsd > 0)) return texts.turn;
   const part = (label: string, usd: number) => (usd > 0 ? [`${label}: ${formatEur(usd * eurPerUsd)}`] : []);
   return [
-    TURN_COST_TITLE,
-    ...part("cost real d'API", cost.apiUsd),
-    ...part('valor inclòs a la subscripció', cost.equivalentUsd),
-    ...part('altres crides', cost.otherUsd),
+    texts.turn,
+    ...part(texts.parts.api, cost.apiUsd),
+    ...part(texts.parts.equivalent, cost.equivalentUsd),
+    ...part(texts.parts.other, cost.otherUsd),
   ].join(' · ');
 }
 
@@ -201,11 +215,11 @@ export function savingsEur(savings: Savings | null | undefined, eurPerUsd: numbe
 // ------------------------------------------------------------ month spend
 
 export interface SpendLine {
-  /** Caption prefix: "Gastat" (API) or "Valor aprofitat" (subscription). */
+  /** Caption prefix: "Spent" (API) or "Value used" (subscription). */
   label: string;
-  /** e.g. "12,30 € de 50 €" or "34,20 € · pla 100 €". */
+  /** e.g. "€12.30 of €50" or "€34.20 · plan €100". */
   amount: string;
-  /** e.g. "25 %", null when there is no budget / plan to compare with. */
+  /** e.g. "25%", null when there is no budget / plan to compare with. */
   percent: string | null;
   /** Bar fill ratio (0..1+), null for a plain amount without bar. */
   ratio: number | null;
@@ -216,22 +230,17 @@ export interface SpendLine {
   title: string;
 }
 
-const MONTHS = new Intl.DateTimeFormat('ca-ES', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-
-/** "setembre del 2026" for "2026-09". */
+/** "September 2026" for "2026-09". */
 export function monthName(month: string): string {
   const d = new Date(`${month}-01T00:00:00Z`);
-  return Number.isNaN(d.getTime()) ? month : MONTHS.format(d);
+  return Number.isNaN(d.getTime()) ? month : months().format(d);
 }
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 function unpricedNote(spend: AgentSpend): string {
   const n = spend.unpriced_calls;
-  if (!n) return '';
-  return n === 1
-    ? ' 1 crida amb un model sense preu conegut no hi compta.'
-    : ` ${n} crides amb models sense preu conegut no hi compten.`;
+  return n ? ` ${i18n.m.turn.spend.unpriced(n)}` : '';
 }
 
 /**
@@ -239,6 +248,7 @@ function unpricedNote(spend: AgentSpend): string {
  * API mode, value obtained against the plan price in subscription mode.
  */
 export function spendLine(mode: ProviderMode, spend: AgentSpend, fx: FxRate, month: string): SpendLine | null {
+  const texts = i18n.m.turn.spend;
   const rate = fx.eur_per_usd;
   const when = capitalize(monthName(month));
   if (mode === 'api') {
@@ -248,23 +258,23 @@ export function spendLine(mode: ProviderMode, spend: AgentSpend, fx: FxRate, mon
       const ratio = spend.budget_used ?? eur / budget;
       const percent = formatPercent(ratio);
       return {
-        label: 'Gastat',
-        amount: `${formatMoney(eur)} de ${formatMoney(budget)}`,
+        label: texts.spent,
+        amount: texts.ofBudget(formatMoney(eur), formatMoney(budget)),
         percent,
         ratio,
         level: budgetLevel(ratio),
         kind: 'budget',
-        title: `${when}: despesa d'API de ${formatMoney(eur)} sobre un pressupost de ${formatMoney(budget)} (${percent}).${unpricedNote(spend)}`,
+        title: `${texts.budgetTitle(when, formatMoney(eur), formatMoney(budget), percent)}${unpricedNote(spend)}`,
       };
     }
     return {
-      label: 'Gastat',
+      label: texts.spent,
       amount: formatMoney(eur),
       percent: null,
       ratio: null,
       level: 'ok',
       kind: 'budget',
-      title: `${when}: despesa d'API de ${formatMoney(eur)}, sense pressupost mensual definit.${unpricedNote(spend)}`,
+      title: `${texts.noBudgetTitle(when, formatMoney(eur))}${unpricedNote(spend)}`,
     };
   }
   if (mode === 'cli') {
@@ -274,32 +284,33 @@ export function spendLine(mode: ProviderMode, spend: AgentSpend, fx: FxRate, mon
       const ratio = spend.plan_value ?? eur / plan;
       const percent = formatPercent(ratio);
       return {
-        label: 'Valor aprofitat',
-        amount: `${formatMoney(eur)} · pla ${formatMoney(plan)}`,
+        label: texts.valueUsed,
+        amount: texts.withPlan(formatMoney(eur), formatMoney(plan)),
         percent,
         ratio,
         level: 'ok',
         kind: 'plan',
-        title: `${when}: valor aprofitat de ${formatMoney(eur)} a preus d'API, el ${percent} dels ${formatMoney(plan)} que costa el pla.${unpricedNote(spend)}`,
+        title: `${texts.planTitle(when, formatMoney(eur), percent, formatMoney(plan))}${unpricedNote(spend)}`,
       };
     }
     return {
-      label: 'Valor aprofitat',
+      label: texts.valueUsed,
       amount: formatMoney(eur),
       percent: null,
       ratio: null,
       level: 'ok',
       kind: 'plan',
-      title: `${when}: valor aprofitat de ${formatMoney(eur)} a preus d'API, inclòs a la subscripció.${unpricedNote(spend)}`,
+      title: `${texts.noPlanTitle(when, formatMoney(eur))}${unpricedNote(spend)}`,
     };
   }
   return null;
 }
 
-/** "1 $ = 0,8612 € · BCE, 26 de set." (the ECB publishes on working days). */
+/** "$1 = €0.8612 · ECB, 26 Sept" (the ECB publishes on working days). */
 export function fxText(fx: FxRate): string {
-  const rate = fx.eur_per_usd.toLocaleString('ca-ES', { maximumFractionDigits: 4 });
-  const source = fx.source === 'ecb' ? 'BCE' : 'manual';
+  const texts = i18n.m.turn.costs;
+  const rate = fx.eur_per_usd.toLocaleString(i18n.tag, { maximumFractionDigits: 4 });
+  const source = fx.source === 'ecb' ? texts.ecb : texts.manual;
   const when = fx.as_of && !Number.isNaN(Date.parse(fx.as_of)) ? `, ${formatDay(fx.as_of)}` : '';
-  return `1 $ = ${rate} € · ${source}${when}`;
+  return texts.fx(rate, `${source}${when}`);
 }

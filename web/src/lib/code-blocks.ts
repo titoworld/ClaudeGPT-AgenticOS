@@ -5,9 +5,11 @@
 // mark with their count when there were too many, or class invisible-removed
 // when the answer had used up its marks) get a warning on the code bar and are
 // not highlighted: highlighting would flatten the marks. The copy button copies
-// the visible text, marks included.
+// the visible text, marks included. The bar's texts are in the language in force when
+// it is made (Markdown.svelte makes it again when the language changes).
 
 import { copyText } from './clipboard';
+import { i18n } from './i18n/index.svelte';
 
 let highlighter: Promise<typeof import('./highlight')> | null = null;
 
@@ -18,6 +20,7 @@ function languageOf(code: Element): string | null {
 export function enhanceCodeBlocks(root: HTMLElement): void {
   const blocks = root.querySelectorAll<HTMLPreElement>('pre:not([data-enhanced])');
   if (!blocks.length) return;
+  const texts = i18n.m.turn.code;
   for (const pre of blocks) {
     pre.dataset.enhanced = '';
     const code = pre.querySelector('code');
@@ -26,7 +29,7 @@ export function enhanceCodeBlocks(root: HTMLElement): void {
     bar.className = 'code-bar';
     const label = document.createElement('span');
     label.className = 'code-lang';
-    label.textContent = lang ?? 'codi';
+    label.textContent = lang ?? texts.code;
     bar.append(label);
     const removed = code?.classList.contains('invisible-removed') ?? false;
     if (code && (removed || code.querySelector('.invisible-char'))) {
@@ -34,27 +37,23 @@ export function enhanceCodeBlocks(root: HTMLElement): void {
       if (removed) code.className = 'invisible-removed';
       const warning = document.createElement('span');
       warning.className = 'code-warning';
-      warning.textContent = 'Caràcters invisibles';
-      const how = removed
-        ? "La resposta en tenia massa per marcar-los tots: els d'aquest bloc s'han eliminat."
-        : code.querySelector('.invisible-collapsed')
-          ? "N'hi havia massa per marcar-los un per un: s'han eliminat i en lloc seu es mostra quants eren."
-          : 'Es mostren com a ⟨U+…⟩ i es copien igual.';
-      warning.title =
-        'Aquest codi conté caràcters invisibles o de control de direcció que poden amagar què fa. ' + how;
+      warning.textContent = texts.hidden;
+      const how = removed ? texts.removed : code.querySelector('.invisible-collapsed') ? texts.collapsed : texts.marked;
+      warning.title = texts.hiddenTitle(how);
       bar.append(warning);
     }
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'code-copy';
-    button.textContent = 'Copia';
-    button.setAttribute('aria-label', 'Copia el codi');
+    button.textContent = texts.copy;
+    button.setAttribute('aria-label', texts.copyCode);
     button.addEventListener('click', () => {
       void copyText(code?.textContent ?? pre.textContent ?? '').then((ok) => {
-        button.textContent = ok ? 'Copiat' : 'Error';
+        const now = i18n.m.turn.code;
+        button.textContent = ok ? now.copied : now.error;
         button.dataset.state = ok ? 'ok' : 'error';
         setTimeout(() => {
-          button.textContent = 'Copia';
+          button.textContent = i18n.m.turn.code.copy;
           delete button.dataset.state;
         }, 1600);
       });

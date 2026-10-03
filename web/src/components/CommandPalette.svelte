@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { lightDismiss, syncDialog } from '../lib/dialog';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { CONVERSATION_QUERY_MAX_LENGTH, TURN_MODES, type ConversationSummary, type TurnMode } from '../lib/protocol';
   import { router } from '../lib/router.svelte';
   import { fuzzyFilter, MODE_LABEL } from '../lib/text';
@@ -10,11 +11,11 @@
   interface Command {
     id: string;
     label: string;
-    group: 'Accions' | 'Converses';
+    group: 'actions' | 'conversations';
     icon: IconName;
     keywords?: string;
     hint?: string;
-    /** Runs without closing the palette (e.g. «Mostra'n més converses»). */
+    /** Runs without closing the palette (e.g. «Show more conversations»). */
     keepOpen?: boolean;
     run: () => void;
   }
@@ -32,6 +33,7 @@
   onDestroy(() => search.dispose());
   const query = $derived(search.query);
   let activeIndex = $state(0);
+  const t = $derived(i18n.m.app);
 
   function setMode(mode: TurnMode): void {
     app.composer.mode = mode;
@@ -39,42 +41,50 @@
     app.focusComposer();
   }
 
-  const actions: Command[] = [
-    { id: 'new', label: 'Nova conversa', group: 'Accions', icon: 'plus', run: () => app.newConversation() },
-    // «Perfecciona» too: picking it here is the owner choosing it (it is never a default).
+  // In the language in force: a change of language makes them again.
+  const actions: Command[] = $derived([
+    { id: 'new', label: t.newConversation, group: 'actions', icon: 'plus', run: () => app.newConversation() },
+    // Refine too: picking it here is the owner choosing it (it is never a default).
     ...TURN_MODES.map(
       (mode): Command => ({
         id: `mode-${mode}`,
-        label: `Canvia al mode ${MODE_LABEL[mode]}`,
-        group: 'Accions',
+        label: t.palette.switchMode(MODE_LABEL[mode]),
+        group: 'actions',
         icon: `mode-${mode}`,
-        keywords: mode === 'refine' ? 'mode canviar perfeccionar' : 'mode canviar',
+        keywords: mode === 'refine' ? `${t.palette.keywords.mode} ${t.palette.keywords.refine}` : t.palette.keywords.mode,
         run: () => setMode(mode),
       }),
     ),
     {
       id: 'dashboard',
-      label: 'Obre el tauler',
-      group: 'Accions',
+      label: t.palette.openDashboard,
+      group: 'actions',
       icon: 'dashboard',
-      keywords: 'estadistiques consum tokens estalvi',
+      keywords: t.palette.keywords.dashboard,
       run: () => router.go({ name: 'dashboard' }),
     },
     {
       id: 'settings',
-      label: 'Configuració',
-      group: 'Accions',
+      label: t.settings,
+      group: 'actions',
       icon: 'settings',
-      keywords: 'preferencies opcions efectes',
+      keywords: t.palette.keywords.settings,
       run: () => (app.settingsOpen = true),
     },
-    { id: 'logout', label: 'Tanca la sessió', group: 'Accions', icon: 'logout', keywords: 'sortir', run: () => void app.logout() },
-  ];
+    {
+      id: 'logout',
+      label: t.palette.logOut,
+      group: 'actions',
+      icon: 'logout',
+      keywords: t.palette.keywords.logOut,
+      run: () => void app.logout(),
+    },
+  ]);
 
   const conversationCommand = (c: ConversationSummary): Command => ({
     id: `conv-${c.id}`,
-    label: c.title || 'Sense títol',
-    group: 'Converses',
+    label: c.title || t.untitled,
+    group: 'conversations',
     icon: c.last_mode ? `mode-${c.last_mode}` : 'mode-solo',
     run: () => app.openConversation(c.id),
   });
@@ -88,8 +98,8 @@
     if (search.answered && search.hasMore) {
       convs.push({
         id: 'more',
-        label: search.loading ? 'Carregant més converses…' : "Mostra'n més converses",
-        group: 'Converses',
+        label: search.loading ? t.palette.loadingMore : t.palette.showMore,
+        group: 'conversations',
         icon: 'chevron-down',
         keepOpen: true,
         run: () => void search.loadMore(),
@@ -97,8 +107,8 @@
     } else if (search.error && !search.answered) {
       convs.push({
         id: 'retry',
-        label: 'Torna a cercar',
-        group: 'Converses',
+        label: t.palette.searchAgain,
+        group: 'conversations',
         icon: 'refresh',
         keepOpen: true,
         run: () => search.retry(),
@@ -108,8 +118,8 @@
   });
 
   /** How the conversation search goes: nothing claims there is no match before the server has said so. */
-  const note = $derived(search.pending ? 'Cercant converses…' : search.error);
-  const hasConversations = $derived(results.some((c) => c.group === 'Converses'));
+  const note = $derived(search.pending ? t.palette.searching : search.error);
+  const hasConversations = $derived(results.some((c) => c.group === 'conversations'));
 
   $effect(() => syncDialog(dialog, app.paletteOpen));
 
@@ -177,7 +187,7 @@
 <dialog
   bind:this={dialog}
   class="palette"
-  aria-label="Paleta d'ordres"
+  aria-label={t.palette.label}
   onclose={() => (app.paletteOpen = false)}
   {@attach lightDismiss}>
   <div class="panel glass">
@@ -195,17 +205,17 @@
         aria-activedescendant={results.length ? `${uid}-opt-${activeIndex}` : undefined}
         aria-autocomplete="list"
         maxlength={CONVERSATION_QUERY_MAX_LENGTH}
-        placeholder="Escriu una ordre o cerca una conversa…"
+        placeholder={t.palette.placeholder}
         autocomplete="off"
         spellcheck="false" />
       <kbd>Esc</kbd>
     </div>
 
-    <ul id="{uid}-list" role="listbox" aria-label="Resultats" aria-busy={search.pending || search.loading}>
+    <ul id="{uid}-list" role="listbox" aria-label={t.palette.results} aria-busy={search.pending || search.loading}>
       {#each results as cmd, i (cmd.id)}
         {#if i === 0 || results[i - 1]?.group !== cmd.group}
-          <li class="group" role="presentation">{cmd.group}</li>
-          {#if cmd.group === 'Converses' && note}
+          <li class="group" role="presentation">{t.palette.groups[cmd.group]}</li>
+          {#if cmd.group === 'conversations' && note}
             <li class="none" role="presentation">{note}</li>
           {/if}
         {/if}
@@ -229,10 +239,10 @@
         </li>
       {/each}
       {#if note && !hasConversations}
-        <li class="group" role="presentation">Converses</li>
+        <li class="group" role="presentation">{t.palette.groups.conversations}</li>
         <li class="none" role="presentation">{note}</li>
       {:else if !results.length}
-        <li class="none" role="presentation">Cap resultat per a «{query}».</li>
+        <li class="none" role="presentation">{t.palette.noResults(query)}</li>
       {/if}
     </ul>
   </div>

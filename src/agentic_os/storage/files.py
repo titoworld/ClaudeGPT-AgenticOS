@@ -1,4 +1,4 @@
-"""The attachments' files (docs/adr/0009-adjunts.md), under ``<data_dir>/attachments``:
+"""The attachments' files (docs/adr/0009-attachments.md), under ``<data_dir>/attachments``:
 
 - ``<sha256[:2]>/<sha256>``: the uploaded files, content-addressed, so one file serves
   every upload of the same content and a stored file never changes;

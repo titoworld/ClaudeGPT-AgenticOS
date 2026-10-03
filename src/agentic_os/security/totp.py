@@ -28,7 +28,7 @@ def new_secret() -> str:
     return pyotp.random_base32()
 
 
-def provisioning_uri(secret: str, account: str = "propietari") -> str:
+def provisioning_uri(secret: str, account: str = "owner") -> str:
     """``otpauth://`` URI for authenticator apps (usually shown as a QR code)."""
     return pyotp.TOTP(secret, digits=DIGITS, interval=INTERVAL_SECONDS).provisioning_uri(
         name=account, issuer_name=ISSUER

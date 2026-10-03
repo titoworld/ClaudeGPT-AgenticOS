@@ -20,7 +20,7 @@ actions (:data:`ACTIVITY_MESSAGES`) refresh the idle timeout; the handshake, pin
 resubscriptions and the periodic check are read-only, so a tab left open (and
 reconnecting) never keeps an idle session alive.
 
-A refine turn (docs/adr/0010-mode-perfecciona.md) has its budget in euros; the engine
+A refine turn (docs/adr/0010-refine-mode.md) has its budget in euros; the engine
 counts in dollars, so ``turn.start`` converts it at the rate the app shows euros with,
 and ``turn.stop`` asks the turn to end after the round in course.
 """
@@ -40,6 +40,7 @@ from agentic_os import __version__
 from agentic_os.attachments import MAX_ATTACHMENTS
 from agentic_os.domain import AGENTS, AgentName, RefineOptions, TurnMode, TurnOptions
 from agentic_os.fx import FxRate
+from agentic_os.i18n import number, t
 from agentic_os.orchestrator.events import Wire
 from agentic_os.orchestrator.types import TurnRequest
 from agentic_os.security.sessions import hash_token
@@ -75,14 +76,11 @@ ACTIVITY_MESSAGES: Final = frozenset({"turn.start", "turn.stop", "turn.cancel"})
 """Messages that are the owner's activity (they refresh the session's idle timeout).
 The others check the session read-only: ``ping`` and ``turn.subscribe`` are sent by
 the client by itself (heartbeats, resubscriptions after a reconnection)."""
-INVALID_TEXT_MESSAGE: Final = "El missatge conté text que no és UTF-8 vàlid."
-ATTACHMENTS_MESSAGE: Final = (
-    "«attachments» ha de ser una llista d'identificadors d'adjunt (enters positius)."
-)
 
 
 class ProtocolError(Exception):
-    """Invalid client message; the (Catalan) message is sent back as an ``error``."""
+    """Invalid client message; the message, in the connection's language, is sent back
+    as an ``error``."""
 
     def __init__(self, message: str, *, request_id: str | None = None) -> None:
         super().__init__(message)
@@ -93,11 +91,11 @@ class ProtocolError(Exception):
 # -- parsing ---------------------------------------------------------------------------
 
 
-def _choice[T: str](value: object, choices: tuple[T, ...], message: str) -> T:
+def _choice[T: str](value: object, choices: tuple[T, ...], message_key: str) -> T:
     for choice in choices:
         if value == choice:
             return choice
-    raise ProtocolError(message)
+    raise ProtocolError(t(message_key))
 
 
 def _int(value: object) -> int | None:
@@ -111,9 +109,7 @@ def parse_request_id(data: Mapping[str, object]) -> str:
         or not 0 < len(request_id) <= MAX_REQUEST_ID_LENGTH
         or not request_id.isprintable()
     ):
-        raise ProtocolError(
-            f"«request_id» ha de ser un text d'1 a {MAX_REQUEST_ID_LENGTH} caràcters."
-        )
+        raise ProtocolError(t("server.ws.bad_request_id", max=number(MAX_REQUEST_ID_LENGTH)))
     return request_id
 
 
@@ -133,12 +129,12 @@ def turn_options(options: object, runtime: RuntimeSettings) -> TurnOptions:
     if options is None:
         return runtime.to_turn_options()
     if not isinstance(options, dict):
-        raise ProtocolError("«options» ha de ser un objecte.")
+        raise ProtocolError(t("server.ws.bad_options"))
     merged = runtime.to_wire()
     for name in ("debate", "refine"):
         given = options.get(name)
         if given is not None and not isinstance(given, dict):
-            raise ProtocolError(f"«options.{name}» ha de ser un objecte.")
+            raise ProtocolError(t("server.ws.bad_option", name=name))
         base = merged[name]
         if given and isinstance(base, dict):
             merged[name] = {**base, **given}
@@ -157,9 +153,9 @@ def turn_models(models: object, runtime: RuntimeSettings) -> dict[AgentName, str
     if models is None:
         return chosen
     if not isinstance(models, dict):
-        raise ProtocolError("«models» ha de ser un objecte (agent → model).")
+        raise ProtocolError(t("server.ws.bad_models"))
     for agent, value in models.items():
-        name = _choice(agent, AGENTS, "«models» només admet «claude» i «chatgpt».")
+        name = _choice(agent, AGENTS, "server.ws.bad_models_agent")
         try:
             model = optional_model_id(value, f"models.{name}")
         except ValueError as exc:
@@ -177,17 +173,17 @@ def turn_attachments(value: object) -> tuple[int, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
-        raise ProtocolError(ATTACHMENTS_MESSAGE)
+        raise ProtocolError(t("server.ws.bad_attachments"))
     ids: list[int] = []
     for item in value:
         attachment_id = _int(item)
         if attachment_id is None or not 1 <= attachment_id <= MAX_SQLITE_ID:
-            raise ProtocolError(ATTACHMENTS_MESSAGE)
+            raise ProtocolError(t("server.ws.bad_attachments"))
         ids.append(attachment_id)
     if len(ids) > MAX_ATTACHMENTS:
-        raise ProtocolError(f"Un missatge pot portar com a màxim {MAX_ATTACHMENTS} adjunts.")
+        raise ProtocolError(t("server.ws.too_many_attachments", max=number(MAX_ATTACHMENTS)))
     if len(set(ids)) != len(ids):
-        raise ProtocolError("Un mateix adjunt no pot anar dues vegades al missatge.")
+        raise ProtocolError(t("server.ws.repeated_attachment"))
     return tuple(ids)
 
 
@@ -212,27 +208,25 @@ def parse_turn_start(
     try:
         text = data.get("text")
         if not isinstance(text, str):
-            raise ProtocolError("«text» ha de ser un text.")
+            raise ProtocolError(t("server.ws.bad_text"))
         mode_value = data.get("mode")
         mode: TurnMode = (
             runtime.default_mode
             if mode_value is None
-            else _choice(
-                mode_value, TURN_MODES, "«mode» ha de ser «solo», «duel», «debate» o «refine»."
-            )
+            else _choice(mode_value, TURN_MODES, "server.ws.bad_mode")
         )
         target_value = data.get("target")
         target: AgentName = (
             runtime.default_target
             if target_value is None
-            else _choice(target_value, AGENTS, "«target» ha de ser «claude» o «chatgpt».")
+            else _choice(target_value, AGENTS, "server.ws.bad_target")
         )
         raw_conversation = data.get("conversation_id")
         conversation_id = _int(raw_conversation)
         if raw_conversation is not None and (
             conversation_id is None or not 1 <= conversation_id <= MAX_SQLITE_ID
         ):
-            raise ProtocolError("«conversation_id» ha de ser un enter positiu o null.")
+            raise ProtocolError(t("server.ws.bad_conversation_id"))
         options = turn_options(data.get("options"), runtime)
         models = turn_models(data.get("models"), runtime)
         attachments = turn_attachments(data.get("attachments"))
@@ -359,18 +353,18 @@ class ClientSession:
                 return None
             text = message.get("text")
             if not isinstance(text, str):
-                self._connection.error("Només s'accepten missatges de text JSON.")
+                self._connection.error(t("server.ws.not_text"))
                 continue
             if len(text) > MAX_MESSAGE_CHARS:
-                self._connection.error("El missatge és massa gran.", code="too_large")
+                self._connection.error(t("server.ws.too_large"), code="too_large")
                 continue
             try:
                 data = json.loads(text)
             except (ValueError, RecursionError):
-                self._connection.error("El missatge no és JSON vàlid.")
+                self._connection.error(t("server.ws.invalid_json"))
                 continue
             if not isinstance(data, dict) or not isinstance(data.get("type"), str):
-                self._connection.error("El missatge ha de ser un objecte amb un camp «type».")
+                self._connection.error(t("server.ws.no_type"))
                 continue
             kind: str = data["type"]
             if not await self._session_alive(touch=kind in ACTIVITY_MESSAGES):
@@ -378,14 +372,16 @@ class ClientSession:
             try:
                 if has_invalid_text(data):
                     # Nothing of it is used, nor echoed: it could not even be sent back.
-                    raise ProtocolError(INVALID_TEXT_MESSAGE, request_id=valid_request_id(data))
+                    raise ProtocolError(
+                        t("server.ws.invalid_text"), request_id=valid_request_id(data)
+                    )
                 await self._dispatch(kind, data)
             except ProtocolError as exc:
                 self._connection.error(exc.message, request_id=exc.request_id)
             except Exception:
                 logger.exception("Error handling a %r WebSocket message", kind[:40])
                 self._connection.error(
-                    "Error intern en processar el missatge.",
+                    t("server.ws.internal_error"),
                     code="internal",
                     request_id=data.get("request_id")
                     if isinstance(data.get("request_id"), str)
@@ -415,17 +411,17 @@ class ClientSession:
     async def _dispatch(self, kind: str, data: dict[str, object]) -> None:
         turns = self._state.turns
         if kind == "ping":
-            t = data.get("t")
+            stamp = data.get("t")
             # A finite number within the range of JavaScript's safe integers keeps the
             # pong as small as the ping (math.isfinite would overflow on a huge int).
             if (
-                isinstance(t, bool)
-                or not isinstance(t, int | float)
-                or (isinstance(t, float) and not math.isfinite(t))
-                or abs(t) > 2**53
+                isinstance(stamp, bool)
+                or not isinstance(stamp, int | float)
+                or (isinstance(stamp, float) and not math.isfinite(stamp))
+                or abs(stamp) > 2**53
             ):
-                raise ProtocolError("«t» ha de ser un número.")
-            self._connection.send_json({"type": "pong", "t": t})
+                raise ProtocolError(t("server.ws.bad_ping"))
+            self._connection.send_json({"type": "pong", "t": stamp})
         elif kind == "turn.start":
             store = self._state.store
             runtime = await store.get_runtime_settings()
@@ -457,13 +453,13 @@ class ClientSession:
             request_id = parse_request_id(data)
             after_seq = _int(data.get("after_seq", 0))
             if after_seq is None or after_seq < 0:
-                raise ProtocolError("«after_seq» ha de ser un enter ≥ 0.", request_id=request_id)
+                raise ProtocolError(t("server.ws.bad_after_seq"), request_id=request_id)
             # A turn this connection already gets is not replayed again (see
             # TurnManager.subscribe): the message is ignored.
             if not turns.subscribe(request_id, self._connection, after_seq):
                 self._connection.send_json({"type": "turn.unknown", "request_id": request_id})
         else:
-            raise ProtocolError(f"Tipus de missatge desconegut: «{kind[:40]}».")
+            raise ProtocolError(t("server.ws.unknown_type", type=kind[:40]))
 
 
 async def _close(websocket: WebSocket, code: int) -> None:

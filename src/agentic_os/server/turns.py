@@ -8,12 +8,12 @@ for what it missed (``turn.subscribe``). Only ``turn.cancel`` (or shutdown) stop
 turn; a subscriber going away does not. Deleting a conversation cancels its turns
 and forgets them, so their content can no longer be replayed. A cancelled turn ends
 with ``turn.cancelled`` carrying what it spent, as the engine reported it (its
-outcome, docs/adr/0007-resultat-del-torn.md). A turn is cancelled only once: a
+outcome, docs/adr/0007-turn-outcome.md). A turn is cancelled only once: a
 repeated ``turn.cancel`` or a shutdown while it stops leaves the engine to finish
 stopping it, so ``turn.cancelled`` always follows its stored outcome.
 
 A refine turn can also be asked to stop after the round in course (``turn.stop``,
-docs/adr/0010-mode-perfecciona.md): that is no cancellation, only a signal the engine
+docs/adr/0010-refine-mode.md): that is no cancellation, only a signal the engine
 reads between its calls; it then ends the turn as completed, with its last version.
 """
 
@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Final, Protocol
 
 from agentic_os.domain import Usage
+from agentic_os.i18n import lazy, number, t
 from agentic_os.orchestrator.events import (
     ErrorInfo,
     ServerEvent,
@@ -44,9 +45,8 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_TURNS: Final = 3
 RETENTION_SECONDS: Final = 300.0
 _TERMINAL_TYPES: Final = frozenset({"turn.completed", "turn.failed", "turn.cancelled"})
-STOP_ONLY_REFINE: Final = (
-    "Només un torn «Perfecciona» es pot aturar en acabar la ronda; per aturar-lo ara, cancel·la'l."
-)
+STOP_ONLY_REFINE: Final = lazy("server.turn.stop_only_refine")
+"""The message of :class:`TurnNotStoppableError` (``str()`` makes it)."""
 
 
 def dumps(message: Wire) -> str:
@@ -90,7 +90,8 @@ class TurnRunner(Protocol):
 
 class TurnRejectedError(Exception):
     """The turn cannot start. ``code``: ``busy`` (limits), ``duplicate`` (request id
-    already used) or ``unavailable`` (shutting down); the message is Catalan."""
+    already used) or ``unavailable`` (shutting down); the message is in the language in
+    force (the connection's)."""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -101,11 +102,12 @@ class TurnRejectedError(Exception):
 class TurnNotStoppableError(Exception):
     """``turn.stop`` of a running turn that is not a refine one: only a refine turn has
     rounds to end after; the others stop at once with ``turn.cancel``. The message is
-    Catalan, for the owner."""
+    for the owner, in the language in force."""
 
     def __init__(self) -> None:
-        super().__init__(STOP_ONLY_REFINE)
-        self.message = STOP_ONLY_REFINE
+        message = str(STOP_ONLY_REFINE)
+        super().__init__(message)
+        self.message = message
 
 
 @dataclass(slots=True, eq=False)
@@ -204,21 +206,19 @@ class TurnManager:
         :data:`MAX_CONCURRENT_TURNS` turns are running or if the conversation
         already has a running turn."""
         if self._closed:
-            raise TurnRejectedError("El servidor s'està aturant.", code="unavailable")
+            raise TurnRejectedError(t("server.turn.shutting_down"), code="unavailable")
         if request.request_id in self._turns:
-            raise TurnRejectedError(
-                "Aquest identificador de petició ja s'ha fet servir.", code="duplicate"
-            )
+            raise TurnRejectedError(t("server.turn.duplicate"), code="duplicate")
         running = self._running()
         if len(running) >= self._max_concurrent:
             raise TurnRejectedError(
-                f"Ja hi ha {self._max_concurrent} torns en curs. Espera que n'acabi algun.",
+                t("server.turn.too_many", count=number(self._max_concurrent)),
                 code="busy",
             )
         if request.conversation_id is not None and any(
             turn.conversation_id == request.conversation_id for turn in running
         ):
-            raise TurnRejectedError("Aquesta conversa ja té un torn en curs.", code="busy")
+            raise TurnRejectedError(t("server.turn.conversation_busy"), code="busy")
 
         turn = _Turn(
             request=request,
@@ -382,7 +382,7 @@ class TurnManager:
                 error = task.exception()
                 if error is not None:
                     logger.error("Turn %s crashed", turn.request_id, exc_info=error)
-                message = "S'ha produït un error intern i el torn s'ha aturat."
+                message = t("server.turn.internal_error")  # the turn's language
                 failed = TurnFailed(turn.request_id, ErrorInfo("internal", message), turn.usage)
                 self._publish(turn, failed.to_wire())
         elif not task.cancelled() and task.exception() is not None:

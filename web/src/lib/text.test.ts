@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize, truncationReason, wsErrorText } from './text';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n } from './i18n/index.svelte';
+import { DATE_GROUP_LABEL, dateGroup, formatK, fuzzyFilter, fuzzyScore, groupConversations, normalize, truncationReason, wsErrorText } from './text';
 import { DEFAULT_SETTINGS, validateSettings } from './settings';
 import type { ConversationSummary } from './protocol';
 
@@ -16,10 +17,10 @@ const conv = (id: number, title: string, updated: Date): ConversationSummary => 
 
 describe('dateGroup / groupConversations', () => {
   it('groups by local day', () => {
-    expect(dateGroup(new Date(2026, 8, 27, 0, 5).toISOString(), now)).toBe('Avui');
-    expect(dateGroup(new Date(2026, 8, 26, 23, 59).toISOString(), now)).toBe('Ahir');
-    expect(dateGroup(new Date(2026, 8, 21, 12).toISOString(), now)).toBe('Últims 7 dies');
-    expect(dateGroup(new Date(2026, 8, 20, 12).toISOString(), now)).toBe('Anteriors');
+    expect(dateGroup(new Date(2026, 8, 27, 0, 5).toISOString(), now)).toBe('today');
+    expect(dateGroup(new Date(2026, 8, 26, 23, 59).toISOString(), now)).toBe('yesterday');
+    expect(dateGroup(new Date(2026, 8, 21, 12).toISOString(), now)).toBe('week');
+    expect(dateGroup(new Date(2026, 8, 20, 12).toISOString(), now)).toBe('older');
   });
 
   it('keeps group order and item order', () => {
@@ -33,7 +34,45 @@ describe('dateGroup / groupConversations', () => {
       now,
     );
     expect(groups.map((g) => g.label)).toEqual(['Avui', 'Ahir', 'Anteriors']);
+    expect(groups.map((g) => g.key)).toEqual(['today', 'yesterday', 'older']);
     expect(groups[2]?.items.map((c) => c.id)).toEqual([3, 4]);
+  });
+});
+
+describe('in English and Spanish', () => {
+  afterEach(() => i18n.set('ca'));
+
+  const list = [conv(1, 'a', new Date(2026, 8, 27, 14)), conv(2, 'b', new Date(2026, 8, 22, 10)), conv(3, 'c', new Date(2026, 7, 1))];
+
+  it('the date groups have their headings in the language in force, under the same keys', () => {
+    i18n.set('en');
+    expect(groupConversations(list, now).map((g) => g.label)).toEqual(['Today', 'Last 7 days', 'Older']);
+    expect(DATE_GROUP_LABEL.yesterday).toBe('Yesterday');
+    i18n.set('es');
+    expect(groupConversations(list, now).map((g) => g.label)).toEqual(['Hoy', 'Últimos 7 días', 'Anteriores']);
+    expect(groupConversations(list, now).map((g) => g.key)).toEqual(['today', 'week', 'older']);
+    expect(DATE_GROUP_LABEL.yesterday).toBe('Ayer');
+  });
+
+  it('wsErrorText falls back per code, then to a generic text', () => {
+    i18n.set('en');
+    expect(wsErrorText('busy', 'Too many turns at once.')).toBe('Too many turns at once.');
+    expect(wsErrorText('too_large', '')).toBe('The message is too long.');
+    expect(wsErrorText('new-code', '')).toBe('Server error.');
+    expect(wsErrorText('constructor', undefined)).toBe('Server error.');
+    i18n.set('es');
+    expect(wsErrorText('duplicate', ' ')).toBe('Esta petición ya se había enviado.');
+    expect(wsErrorText(undefined, undefined)).toBe('Error del servidor.');
+  });
+
+  it('truncationReason explains why an answer was cut off', () => {
+    i18n.set('en');
+    expect(truncationReason('max_tokens')).toBe('the output limit was reached');
+    expect(truncationReason(null)).toBe('it was cut off before the end');
+    expect(truncationReason('pause_turn')).toBe('it was cut off before the end (reason: pause_turn)');
+    i18n.set('es');
+    expect(truncationReason('content_filter')).toBe('cortada por el filtro de contenido');
+    expect(truncationReason('pause_turn')).toBe('se ha cortado antes de acabar (motivo: pause_turn)');
   });
 });
 

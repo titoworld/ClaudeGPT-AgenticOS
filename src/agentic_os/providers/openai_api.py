@@ -35,6 +35,7 @@ from openai.types.responses import ResponseInputContentParam, ResponseInputParam
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
+from agentic_os.i18n import Lazy, lazy, number, t
 from agentic_os.providers.base import (
     Attachment,
     GenerationRequest,
@@ -46,6 +47,7 @@ from agentic_os.providers.base import (
     RefusalError,
     TextDelta,
     clean_refusal,
+    seconds,
 )
 from agentic_os.providers.prompt_format import attachment_text, read_files, to_chat_messages
 
@@ -79,12 +81,12 @@ FALLBACK_TTL_SECONDS = 60.0
 """A failed listing is retried sooner than a live one is refreshed."""
 LIST_TIMEOUT_SECONDS = 15.0
 
-MODEL_DESCRIPTIONS: dict[str, str] = {
-    "gpt-6-astra": "El més capaç, per a la feina més exigent.",
-    "gpt-6-sol": "Equilibrat, per a la feina de cada dia.",
-    "gpt-6-luna": "Ràpid i econòmic, per a tasques senzilles.",
+MODEL_DESCRIPTIONS: dict[str, Lazy] = {
+    "gpt-6-astra": lazy("providers.model.gpt_6_astra"),
+    "gpt-6-sol": lazy("providers.model.gpt_6_sol"),
+    "gpt-6-luna": lazy("providers.model.gpt_6_luna"),
 }
-"""Catalan descriptions of known models; also the fallback list (in this order)."""
+"""Descriptions of known models; also the fallback list (in this order)."""
 
 _CHAT_MODEL = re.compile(r"^(gpt-|chatgpt-|o\d)")
 _NOT_CHAT = re.compile(
@@ -157,9 +159,11 @@ def refusal_error(refusal: str, usage: Usage, model: str) -> RefusalError:
     """RefusalError for a refusal of ChatGPT, with its billed usage and its explanation
     (cleaned and shortened) in the message."""
     explanation = clean_refusal(refusal)
-    message = "ChatGPT ha declinat respondre aquesta petició."
-    if explanation:
-        message = f"ChatGPT ha declinat respondre aquesta petició: «{explanation}»"
+    message = (
+        t("providers.chatgpt.refused_explained", explanation=explanation)
+        if explanation
+        else t("providers.chatgpt.refused")
+    )
     return RefusalError(message, usage=usage, model=model, refusal=explanation)
 
 
@@ -167,16 +171,11 @@ def incomplete_error(reason: str | None, budget: int, usage: Usage, model: str) 
     """ProviderError for a reply that stopped before writing any text (billed all the
     same: the usage goes with it)."""
     if reason == "max_output_tokens":
-        message = (
-            f"ChatGPT ha esgotat el límit de sortida de {budget} tokens (raonament inclòs) "
-            "abans d'escriure cap resposta."
-        )
+        message = t("providers.chatgpt.output_budget_spent", budget=number(budget))
     elif reason == "content_filter":
-        message = (
-            "El filtre de contingut d'OpenAI ha aturat la resposta abans que ChatGPT escrivís res."
-        )
+        message = t("providers.chatgpt.content_filter")
     else:
-        message = "La resposta de ChatGPT ha quedat incompleta abans d'escriure res."
+        message = t("providers.chatgpt.incomplete")
     return ProviderError(message, kind="invalid", usage=usage, model=model)
 
 
@@ -230,29 +229,27 @@ def response_error(code: str | None, message: object) -> ProviderError:
     """ProviderError for an error reported inside the stream (``response.failed``, an
     ``error`` event or an SSE error payload)."""
     if code == "rate_limit_exceeded":
-        return ProviderError(
-            "Límit de peticions de l'API d'OpenAI.", kind="rate_limit", retryable=True
-        )
+        return ProviderError(lazy("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
     if code == "insufficient_quota":
-        return ProviderError("El compte d'OpenAI no té crèdit disponible.", kind="rate_limit")
+        return ProviderError(lazy("providers.openai.no_credit"), kind="rate_limit")
     if code is None or code in _SERVER_CODES:
-        return ProviderError(
-            "La resposta de ChatGPT s'ha interromput.", kind="unavailable", retryable=True
-        )
+        return _interrupted()
     return ProviderError(
-        f"L'API d'OpenAI ha rebutjat la petició ({code}): {_detail(message)}", kind="invalid"
+        lazy("providers.openai.rejected_code", code=code, detail=_detail(message)), kind="invalid"
     )
+
+
+def _interrupted() -> ProviderError:
+    return ProviderError(lazy("providers.chatgpt.interrupted"), kind="unavailable", retryable=True)
 
 
 def map_api_error(exc: openai.APIError) -> ProviderError:
     """Typed SDK errors -> ProviderError (after the SDK's own retries)."""
     if isinstance(exc, openai.APITimeoutError):
-        return ProviderError(
-            "L'API d'OpenAI ha trigat massa a respondre.", kind="timeout", retryable=True
-        )
+        return ProviderError(lazy("providers.openai.timeout"), kind="timeout", retryable=True)
     if isinstance(exc, openai.APIConnectionError):
         return ProviderError(
-            "No s'ha pogut contactar amb l'API d'OpenAI.", kind="unavailable", retryable=True
+            lazy("providers.openai.unreachable"), kind="unavailable", retryable=True
         )
     if not isinstance(exc, openai.APIStatusError):
         # An SSE error payload after the stream opened: never retried by the SDK.
@@ -261,24 +258,20 @@ def map_api_error(exc: openai.APIError) -> ProviderError:
     body = exc.body if isinstance(exc.body, dict) else {}
     message = body.get("message") or exc.message
     if status in (401, 403):
-        return ProviderError(
-            "L'API d'OpenAI ha rebutjat la clau d'API (AOS_OPENAI_API_KEY).", kind="auth"
-        )
+        return ProviderError(lazy("providers.openai.key_rejected"), kind="auth")
     if status == 429:
         if exc.code == "insufficient_quota":
-            return ProviderError("El compte d'OpenAI no té crèdit disponible.", kind="rate_limit")
-        return ProviderError(
-            "Límit de peticions de l'API d'OpenAI.", kind="rate_limit", retryable=True
-        )
+            return ProviderError(lazy("providers.openai.no_credit"), kind="rate_limit")
+        return ProviderError(lazy("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
     if status >= 500 or status in (408, 409):
         return ProviderError(
-            "L'API d'OpenAI no està disponible ara mateix.", kind="unavailable", retryable=True
+            lazy("providers.openai.unavailable"), kind="unavailable", retryable=True
         )
     if status in (400, 404, 413, 422):
         return ProviderError(
-            f"L'API d'OpenAI ha rebutjat la petició: {_detail(message)}", kind="invalid"
+            lazy("providers.openai.rejected", detail=_detail(message)), kind="invalid"
         )
-    return ProviderError(f"Error de l'API d'OpenAI ({status}).", kind="internal")
+    return ProviderError(lazy("providers.openai.error", status=status), kind="internal")
 
 
 class OpenAIApiProvider:
@@ -321,9 +314,7 @@ class OpenAIApiProvider:
         if self._client is None:
             key = self._settings.openai_api_key
             if key is None or not key.get_secret_value():
-                raise ProviderError(
-                    "Falta la clau d'API d'OpenAI (AOS_OPENAI_API_KEY).", kind="auth"
-                )
+                raise ProviderError(lazy("providers.openai.missing_key"), kind="auth")
             self._client = openai.AsyncOpenAI(
                 api_key=key.get_secret_value(), timeout=TIMEOUT, max_retries=MAX_RETRIES
             )
@@ -434,18 +425,16 @@ class OpenAIApiProvider:
                         raise response_error(event.code, event.message)
         except openai.APIError as exc:
             raise map_api_error(exc) from exc
-        raise ProviderError(
-            "La resposta de ChatGPT s'ha interromput.", kind="unavailable", retryable=True
-        )
+        raise _interrupted()
 
     async def _until[T](self, deadline: float, operation: Awaitable[T]) -> T:
         """Await with the time left of the call's wall-clock budget."""
         try:
             return await asyncio.wait_for(operation, max(0.0, deadline - time.monotonic()))
         except TimeoutError:
-            seconds = self._settings.provider_timeout_seconds
+            limit = seconds(self._settings.provider_timeout_seconds)
             raise ProviderError(
-                f"ChatGPT no ha respost a temps ({seconds:g} s).", kind="timeout"
+                lazy("providers.chatgpt.timeout", seconds=limit), kind="timeout"
             ) from None
 
     async def prewarm(self, request: GenerationRequest) -> None:
@@ -459,10 +448,10 @@ class OpenAIApiProvider:
             mode="api",
             available=configured,
             model=self.default_model,
-            detail=(
-                "Clau d'API configurada"
+            detail=lazy(
+                "providers.api_key_configured"
                 if configured
-                else "Falta la clau d'API d'OpenAI (AOS_OPENAI_API_KEY)"
+                else "providers.openai.status.missing_key"
             ),
         )
 
@@ -490,9 +479,10 @@ class OpenAIApiProvider:
             # Newest first, so new models show up at the top.
             ids = [m.id for m in sorted(listed, key=lambda m: -m.created) if is_chat_model(m.id)]
             if not ids:
-                raise ProviderError("Cap model de xat a la llista d'OpenAI.", kind="internal")
+                # Only logged (below): in English, as the logs are.
+                raise ProviderError("no chat model in the listing", kind="internal")
         except Exception as exc:
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the OpenAI models (%s); using the fallback", reason)
             ids, live = list(MODEL_DESCRIPTIONS), False
         default = self.default_model

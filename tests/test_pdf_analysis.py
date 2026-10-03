@@ -1,4 +1,4 @@
-"""What the PDF reader finds on each page (docs/adr/0009-adjunts.md, P7b), end to end
+"""What the PDF reader finds on each page (docs/adr/0009-attachments.md, P7b), end to end
 through the reader's own process (:class:`PdfReader`) on PDFs drawn in the tests: where
 each page's text is in the stored text (built page by page, as it always was), its
 letters and broken characters, whether it draws an image, and the text it shows
@@ -74,12 +74,12 @@ def page_text(info: PdfInfo, page: PdfPage) -> str | None:
 
 async def test_a_page_of_plain_text_has_its_span_and_no_warning(tmp_path: Path) -> None:
     info = await read(tmp_path, [Page(shown("Informe de vendes del segon trimestre del 2025"))])
-    assert info.text == "--- Pàgina 1 ---\nInforme de vendes del segon trimestre del 2025"
+    assert info.text == "--- Page 1 ---\nInforme de vendes del segon trimestre del 2025"
     assert info.pdf_pages == (
         PdfPage(
             number=1,
-            start=17,
-            end=63,
+            start=15,
+            end=61,
             cut=False,
             chars=39,
             letters=35,
@@ -131,15 +131,15 @@ async def test_every_page_is_analysed_past_the_text_limit(tmp_path: Path) -> Non
     path = write(tmp_path, pdf(["a" * 400, "b" * 400, "c" * 400, None]))
     info = await PdfReader(max_chars=500).read(path)
     assert info.text is not None
-    kept = info.text.partition("\n\n[Text retallat")[0]
+    kept = info.text.partition("\n\n[Text truncated")[0]
     assert len(kept) == 500
     first, second, third, fourth = analysed(info)
-    assert (first.start, first.end, first.cut) == (17, 421, False)
-    assert (second.start, second.end, second.cut) == (440, 500, True)
+    assert (first.start, first.end, first.cut) == (15, 419, False)
+    assert (second.start, second.end, second.cut) == (436, 500, True)
     assert (third.start, third.end, third.cut) == (None, None, True)
     # A page without text lost nothing to the cut.
     assert (fourth.start, fourth.end, fourth.cut) == (None, None, False)
-    assert page_text(info, second) == "b" * 60
+    assert page_text(info, second) == "b" * 64
     assert [(p.chars, p.letters) for p in (first, second, third, fourth)] == [
         (400, 400),
         (400, 400),
@@ -153,7 +153,7 @@ def stored_before(texts: Sequence[str], limit: int) -> str | None:
     if not any(text.strip() for text in texts):
         return None
     blocks = [
-        f"--- Pàgina {number} ---\n{text.lstrip(chr(13) + chr(10)).rstrip()}"
+        f"--- Page {number} ---\n{text.lstrip(chr(13) + chr(10)).rstrip()}"
         for number, text in enumerate(texts, 1)
     ]
     joined = "\n\n".join(blocks)

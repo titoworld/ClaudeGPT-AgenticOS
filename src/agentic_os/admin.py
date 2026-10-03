@@ -1,6 +1,6 @@
 """Administration commands run from the terminal on the VPS (``agentic-os init``,
-``agentic-os reset-sessions``, ``agentic-os reset-throttle``). All output is in
-Catalan.
+``agentic-os reset-sessions``, ``agentic-os reset-throttle``). Their output and
+prompts speak the command line's language (:mod:`agentic_os.i18n`).
 
 All are coroutines taking an open :class:`~agentic_os.storage.SqliteStore`. The
 input callables are called directly (blocking) because these commands run alone
@@ -19,12 +19,18 @@ from urllib.parse import urlsplit
 import qrcode  # type: ignore[import-untyped]
 
 from agentic_os.config import Settings
+from agentic_os.i18n import number, t
 from agentic_os.security import totp
-from agentic_os.security.passwords import hash_password_async, password_policy_error
+from agentic_os.security.passwords import (
+    MIN_PASSWORD_LENGTH,
+    hash_password_async,
+    password_policy_error,
+)
 from agentic_os.storage import SqliteStore, utc_now
 
 MAX_ATTEMPTS: Final = 3
 _YES: Final = frozenset({"s", "si", "sí", "y", "yes"})
+"""Answers that confirm, in any of the three languages."""
 
 Prompt = Callable[[str], str]
 Output = Callable[[str], None]
@@ -40,43 +46,42 @@ def render_qr(data: str) -> str:
     return buffer.getvalue()
 
 
+def _counted(key: str, count: int) -> str:
+    """The text ``key`` for ``count`` things: its ``_one`` form for 1, else ``_other``."""
+    return t(f"{key}_{'one' if count == 1 else 'other'}", count=number(count))
+
+
 def _closed_sessions(count: int) -> str:
     if count == 0:
-        return "No hi havia cap sessió oberta."
-    if count == 1:
-        return "S'ha tancat 1 sessió."
-    return f"S'han tancat {count} sessions."
+        return t("cli.sessions.none")
+    return _counted("cli.sessions.closed", count)
 
 
 def _forgotten_devices(count: int) -> str:
-    if count == 1:
-        return "S'ha oblidat 1 dispositiu conegut."
-    return f"S'han oblidat {count} dispositius coneguts."
+    return _counted("cli.sessions.devices_forgotten", count)
 
 
 def _cleared_throttle(count: int) -> str:
     if count == 0:
-        return "No hi havia cap bloqueig ni cap intent fallit registrat."
-    counters = (
-        "1 comptador d'intents fallits" if count == 1 else f"{count} comptadors d'intents fallits"
-    )
-    return f"S'han esborrat els bloquejos d'inici de sessió ({counters})."
+        return t("cli.throttle.none")
+    return t("cli.throttle.cleared", counters=_counted("cli.throttle.counters", count))
 
 
 def _account_label(settings: Settings) -> str:
+    """The name of the account in the authenticator app."""
     host = urlsplit(settings.public_origin).hostname
-    return f"propietari@{host}" if host else "propietari"
+    return t("cli.init.account", host=host) if host else t("cli.init.account_without_host")
 
 
 def _ask_password(getpass: Prompt, out: Output) -> str | None:
     for _ in range(MAX_ATTEMPTS):
-        password = getpass("Contrasenya nova: ")
+        password = getpass(f"{t('cli.init.new_password')} ")
         problem = password_policy_error(password)
         if problem is not None:
             out(problem)
             continue
-        if getpass("Repeteix la contrasenya: ") != password:
-            out("Les contrasenyes no coincideixen.")
+        if getpass(f"{t('cli.init.repeat_password')} ") != password:
+            out(t("cli.init.passwords_differ"))
             continue
         return password
     return None
@@ -86,11 +91,11 @@ def _confirm_totp(
     secret: str, prompt: Prompt, out: Output, clock: Callable[[], datetime]
 ) -> int | None:
     for _ in range(MAX_ATTEMPTS):
-        code = prompt("Codi de 6 xifres que mostra l'aplicació: ")
+        code = prompt(f"{t('cli.init.totp_code')} ")
         step = totp.verify(code, secret, 0, now=clock())
         if step is not None:
             return step
-        out("Codi incorrecte. Comprova que l'hora del telèfon i del servidor són correctes.")
+        out(t("cli.init.wrong_code"))
     return None
 
 
@@ -112,50 +117,44 @@ async def run_init(
     try:
         replacing = await store.get_owner() is not None
         if replacing:
-            out(
-                "Ja hi ha un propietari configurat. Si continues, se substituiran la "
-                "contrasenya i el TOTP i es tancaran totes les sessions obertes."
-            )
-            if prompt("Vols substituir-lo? [s/N] ").strip().lower() not in _YES:
-                out("Operació cancel·lada. No s'ha canviat res.")
+            out(t("cli.init.owner_exists"))
+            if prompt(f"{t('cli.init.replace')} ").strip().lower() not in _YES:
+                out(t("cli.init.cancelled_unchanged"))
                 return 1
 
-        out("Tria la contrasenya del propietari (mínim 12 caràcters; millor una frase de pas).")
+        out(t("cli.init.choose_password", min=number(MIN_PASSWORD_LENGTH)))
         password = _ask_password(getpass, out)
         if password is None:
-            out("Massa intents. No s'ha desat res.")
+            out(t("cli.init.too_many_attempts"))
             return 1
 
         secret = totp.new_secret()
         uri = totp.provisioning_uri(secret, _account_label(settings))
         out("")
-        out("Escaneja aquest codi QR amb l'aplicació d'autenticació (Aegis, Google")
-        out("Authenticator, 1Password...):")
+        for line in t("cli.init.scan").splitlines():
+            out(line)
         out("")
         out(render_qr(uri))
-        out(f"Si no el pots escanejar, introdueix aquesta clau manualment: {secret}")
+        out(t("cli.init.manual_key", secret=secret))
         out(f"URI: {uri}")
         out("")
         step = _confirm_totp(secret, prompt, out, clock)
         if step is None:
-            out("No s'ha pogut confirmar el TOTP. No s'ha desat res.")
+            out(t("cli.init.totp_unconfirmed"))
             return 1
     except (EOFError, KeyboardInterrupt):
         out("")
-        out("Operació cancel·lada. No s'ha desat res.")
+        out(t("cli.init.cancelled_unsaved"))
         return 1
 
     revoked = await store.set_owner(
         password_hash=await hash_password_async(password), totp_secret=secret, totp_last_step=step
     )
     if replacing:
-        out(
-            f"Propietari substituït. {_closed_sessions(revoked)} S'han oblidat els "
-            "dispositius coneguts i s'han esborrat els bloquejos d'inici de sessió."
-        )
+        out(t("cli.init.replaced", sessions=_closed_sessions(revoked)))
     else:
-        out("Propietari configurat.")
-    out("Ja pots iniciar sessió al navegador amb la contrasenya i el codi TOTP.")
+        out(t("cli.init.done"))
+    out(t("cli.init.log_in"))
     return 0
 
 
@@ -169,7 +168,7 @@ async def run_reset_sessions(store: SqliteStore, *, out: Output = print) -> int:
     devices = await store.delete_all_devices()
     counters = await store.clear_throttle()
     message = _closed_sessions(revoked)
-    out(f"{message} Caldrà tornar a iniciar sessió." if revoked else message)
+    out(t("cli.sessions.log_in_again", sessions=message) if revoked else message)
     if devices:
         out(_forgotten_devices(devices))
     if counters:
@@ -183,5 +182,5 @@ async def run_reset_throttle(store: SqliteStore, *, out: Output = print) -> int:
     counters = await store.clear_throttle()
     out(_cleared_throttle(counters))
     if counters:
-        out("Ja es pot tornar a iniciar sessió des de qualsevol adreça.")
+        out(t("cli.throttle.log_in"))
     return 0

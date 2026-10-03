@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
 import pytest
 
+from agentic_os import i18n
 from agentic_os.domain import AgentName, DebateOptions, ProviderMode, TurnOptions
 from agentic_os.orchestrator.engine import Engine, make_title
 from agentic_os.orchestrator.events import (
@@ -543,6 +544,14 @@ def test_make_title() -> None:
     long = make_title("a" * 100)
     assert len(long) == 60 and long.endswith("…")
     assert make_title("x" * 60) == "x" * 60
+
+
+def test_a_title_without_any_line_is_the_default_one_in_the_turns_language() -> None:
+    assert make_title(" \n ") == "Conversa nova"
+    with i18n.use("en"):
+        assert make_title("") == "New conversation"
+    with i18n.use("es"):
+        assert make_title("") == "Nueva conversación"
 
 
 async def test_new_conversation_title_uses_first_line(engine: Engine, store: InMemoryStore) -> None:

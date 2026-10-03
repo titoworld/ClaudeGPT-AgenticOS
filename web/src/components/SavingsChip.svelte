@@ -1,6 +1,7 @@
 <script lang="ts">
   import { savingsEur } from '../lib/costs';
   import { formatEur, formatInt } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { Savings, SavingKind } from '../lib/protocol';
   import { formatK } from '../lib/text';
   import Icon from './Icon.svelte';
@@ -16,12 +17,8 @@
   let open = $state(false);
   const id = $props.id();
 
-  const ROWS: { kind: SavingKind; label: string }[] = [
-    { kind: 'cache', label: 'Memòria cau' },
-    { kind: 'compaction', label: 'Compactació' },
-    { kind: 'early_stop', label: 'Parada per consens' },
-    { kind: 'unchanged', label: 'Sense canvis' },
-  ];
+  const ROWS: readonly SavingKind[] = ['cache', 'compaction', 'early_stop', 'unchanged'];
+  const t = $derived(i18n.m.turn.savings);
 </script>
 
 <span class="wrap" class:open>
@@ -32,21 +29,21 @@
     aria-expanded={open}
     onclick={() => (open = !open)}
     onblur={() => (open = false)}>
-    <Icon name="bolt" size={12} />−{formatK(savings.total)} tokens estalviats{#if value != null}<span
+    <Icon name="bolt" size={12} />{t.saved(formatK(savings.total))}{#if value != null}<span
         class="value">≈ {formatEur(value)}</span
       >{/if}
   </button>
   <span class="tip" role="tooltip" {id}>
-    <strong>Tokens estalviats en aquest torn</strong>
-    {#each ROWS as row (row.kind)}
-      <span class="row {row.kind}">
-        <i aria-hidden="true"></i>{row.label}<b>{formatInt(savings[row.kind])}</b>
+    <strong>{t.title}</strong>
+    {#each ROWS as kind (kind)}
+      <span class="row {kind}">
+        <i aria-hidden="true"></i>{t.kinds[kind]}<b>{formatInt(savings[kind])}</b>
       </span>
     {/each}
-    <span class="row total">Total<b>{formatInt(savings.total)}</b></span>
+    <span class="row total">{t.total}<b>{formatInt(savings.total)}</b></span>
     {#if value != null}
-      <span class="row money">Valor aproximat<b>≈ {formatEur(value)}</b></span>
-      <small>Valor aproximat: cada tipus d'estalvi al preu del que s'ha evitat.</small>
+      <span class="row money">{t.value}<b>≈ {formatEur(value)}</b></span>
+      <small>{t.valueNote}</small>
     {/if}
   </span>
 </span>

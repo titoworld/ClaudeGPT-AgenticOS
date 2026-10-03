@@ -1,4 +1,4 @@
-// PDF.js for the thumbnails and the previews of attached PDFs (docs/adr/0009-adjunts.md),
+// PDF.js for the thumbnails and the previews of attached PDFs (docs/adr/0009-attachments.md),
 // set up for the app's Content-Security-Policy (script-src 'self', worker-src 'self' blob:,
 // font-src 'self', connect-src 'self'): the worker is a file of the app (never a blob:
 // worker), no WebAssembly is compiled, glyphs are drawn as paths (no FontFace), and every

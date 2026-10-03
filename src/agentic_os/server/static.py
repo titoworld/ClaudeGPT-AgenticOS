@@ -5,7 +5,8 @@
 - Other ``GET``/``HEAD`` paths: the file if it exists at the top of the build
   (favicon...), otherwise ``index.html`` (client-side routes), with ``no-cache``.
 - ``/api/*`` never falls back: unknown API paths are JSON 404s.
-- Without a build, a small Catalan page explains how to build the frontend.
+- Without a build, a small page in the client's language explains how to build the
+  frontend.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
+from agentic_os import i18n
 from agentic_os.config import Settings
+from agentic_os.i18n import t
 from agentic_os.server.middleware import is_api_path
 
 IMMUTABLE: Final = "public, max-age=31536000, immutable"
@@ -30,8 +33,12 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[3]
 DIST_CANDIDATES: Final = (_REPO_ROOT / "web" / "dist", Path("/app/web/dist"))
 """Where the build is looked for when ``AOS_WEB_DIST`` is not set."""
 
-NOT_BUILT_PAGE: Final = """<!doctype html>
-<html lang="ca">
+
+def not_built_page() -> str:
+    """The page answered without a build, in the language in force. (Its texts come from
+    the catalog, which holds no markup: nothing in them needs escaping.)"""
+    return f"""<!doctype html>
+<html lang="{i18n.current()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -39,12 +46,12 @@ NOT_BUILT_PAGE: Final = """<!doctype html>
 </head>
 <body>
 <h1>ClaudeGPT OS</h1>
-<p>El servidor funciona, però no troba la interfície web compilada.</p>
-<p>Compila-la des de l'arrel del projecte:</p>
+<p>{t("server.not_built.running")}</p>
+<p>{t("server.not_built.build")}</p>
 <pre>cd web
 npm ci
 npm run build</pre>
-<p>o indica on és amb la variable <code>AOS_WEB_DIST</code>. Després reinicia el servidor.</p>
+<p>{t("server.not_built.or_variable", variable="<code>AOS_WEB_DIST</code>")}</p>
 </body>
 </html>
 """
@@ -84,7 +91,7 @@ class SpaFallback:
     async def _response(self, path: str, scope: Scope) -> Response:
         if self._files is None:
             return HTMLResponse(
-                NOT_BUILT_PAGE, status_code=503, headers={"Cache-Control": NO_CACHE}
+                not_built_page(), status_code=503, headers={"Cache-Control": NO_CACHE}
             )
         relative = os.path.normpath(path.lstrip("/")) if path.strip("/") else "index.html"
         if relative.startswith("assets" + os.sep):

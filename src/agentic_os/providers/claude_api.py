@@ -54,6 +54,7 @@ from anthropic.types.beta import (
 
 from agentic_os.config import Settings
 from agentic_os.domain import AgentName, ProviderMode, Usage
+from agentic_os.i18n import lazy, number, t
 from agentic_os.providers.base import (
     DeclinedAttempt,
     GenerationRequest,
@@ -63,6 +64,7 @@ from agentic_os.providers.base import (
     ProviderEvent,
     ProviderStatus,
     TextDelta,
+    seconds,
 )
 from agentic_os.providers.claude_cli import (
     EFFORT_BY_PURPOSE,
@@ -85,7 +87,6 @@ caps thinking and visible text together)."""
 MIN_THINKING_BUDGET = 1_024
 """The smallest budget_tokens Anthropic accepts: a smaller output budget runs without
 thinking rather than being raised."""
-INTERRUPTED_MESSAGE = "La resposta de Claude s'ha interromput."
 COMPLETE_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
 """Stop reasons of a complete reply; any other one (but a refusal) is a truncated one."""
 
@@ -266,7 +267,7 @@ def billed_usage(
 
 
 def _interrupted() -> ProviderError:
-    return ProviderError(INTERRUPTED_MESSAGE, kind="unavailable", retryable=True)
+    return ProviderError(lazy("providers.claude.interrupted"), kind="unavailable", retryable=True)
 
 
 def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...]:
@@ -276,7 +277,7 @@ def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...
     extra = ModelInfo(
         id=default,
         label=default,
-        description=family_description(default) or "Model configurat al servidor.",
+        description=family_description(default) or lazy("providers.model_configured"),
         is_default=True,
     )
     return (extra, *models)
@@ -293,39 +294,35 @@ def map_api_error(exc: anthropic.APIError) -> ProviderError:
     """Typed SDK errors -> ProviderError (after the SDK's own retries)."""
     if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
         return ProviderError(
-            "No s'ha pogut contactar amb l'API d'Anthropic.", kind="unavailable", retryable=True
+            lazy("providers.anthropic.unreachable"), kind="unavailable", retryable=True
         )
     if not isinstance(exc, anthropic.APIStatusError):
-        return ProviderError("Resposta inesperada de l'API d'Anthropic.", kind="internal")
+        return ProviderError(lazy("providers.anthropic.unexpected"), kind="internal")
     status = exc.status_code
     if status < 400:
         # An SSE ``error`` event after the stream opened: the SDK never retries these.
         if exc.type == "rate_limit_error":
             return ProviderError(
-                "Límit de peticions de l'API d'Anthropic.", kind="rate_limit", retryable=True
+                lazy("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True
             )
-        return ProviderError(
-            "La resposta de Claude s'ha interromput.", kind="unavailable", retryable=True
-        )
+        return _interrupted()
     if status in (401, 403):
-        return ProviderError(
-            "L'API d'Anthropic ha rebutjat la clau d'API (AOS_ANTHROPIC_API_KEY).", kind="auth"
-        )
+        return ProviderError(lazy("providers.anthropic.key_rejected"), kind="auth")
     if status == 402:
-        return ProviderError("Problema de facturació del compte d'Anthropic.", kind="auth")
+        return ProviderError(lazy("providers.anthropic.billing"), kind="auth")
     if status == 429:
         return ProviderError(
-            "Límit de peticions de l'API d'Anthropic.", kind="rate_limit", retryable=True
+            lazy("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True
         )
     if status >= 500:
         return ProviderError(
-            "L'API d'Anthropic no està disponible ara mateix.", kind="unavailable", retryable=True
+            lazy("providers.anthropic.unavailable"), kind="unavailable", retryable=True
         )
     if status in (400, 404, 413, 422):
         return ProviderError(
-            f"L'API d'Anthropic ha rebutjat la petició: {_error_detail(exc)}", kind="invalid"
+            lazy("providers.anthropic.rejected", detail=_error_detail(exc)), kind="invalid"
         )
-    return ProviderError(f"Error de l'API d'Anthropic ({status}).", kind="internal")
+    return ProviderError(lazy("providers.anthropic.error", status=status), kind="internal")
 
 
 class ClaudeApiProvider:
@@ -370,9 +367,7 @@ class ClaudeApiProvider:
         if self._client is None:
             key = self._settings.anthropic_api_key
             if key is None or not key.get_secret_value():
-                raise ProviderError(
-                    "Falta la clau d'API d'Anthropic (AOS_ANTHROPIC_API_KEY).", kind="auth"
-                )
+                raise ProviderError(lazy("providers.anthropic.missing_key"), kind="auth")
             self._client = anthropic.AsyncAnthropic(
                 api_key=key.get_secret_value(),
                 timeout=anthropic.Timeout(self._settings.provider_timeout_seconds, connect=10.0),
@@ -458,10 +453,7 @@ class ClaudeApiProvider:
         except anthropic.APIError as exc:
             raise map_api_error(exc) from exc
         except httpx2.TimeoutException:
-            seconds = self._settings.provider_timeout_seconds
-            raise ProviderError(
-                f"Claude no ha respost a temps ({seconds:g} s).", kind="timeout"
-            ) from None
+            raise self._timeout() from None
         except httpx2.RequestError as exc:
             # anthropic does not wrap what httpx2 raises while reading the body
             # (RemoteProtocolError, ReadError...): the connection dropped mid-reply.
@@ -480,10 +472,9 @@ class ClaudeApiProvider:
         truncated = stop_reason not in COMPLETE_STOP_REASONS
         if truncated and not text.strip():
             raise ProviderError(
-                f"Claude ha esgotat el límit de sortida de {max_tokens} tokens (raonament "
-                "inclòs) abans d'escriure cap resposta."
+                lazy("providers.claude.output_budget_spent", budget=number(max_tokens))
                 if stop_reason == "max_tokens"
-                else f"La resposta de Claude s'ha aturat abans d'escriure res ({stop_reason}).",
+                else t("providers.claude.stopped_before_text", reason=stop_reason),
                 kind="invalid",
                 usage=usage,
                 model=final.model,
@@ -505,10 +496,11 @@ class ClaudeApiProvider:
             async with asyncio.timeout_at(deadline):
                 return await operation
         except TimeoutError:
-            seconds = self._settings.provider_timeout_seconds
-            raise ProviderError(
-                f"Claude no ha respost a temps ({seconds:g} s).", kind="timeout"
-            ) from None
+            raise self._timeout() from None
+
+    def _timeout(self) -> ProviderError:
+        limit = seconds(self._settings.provider_timeout_seconds)
+        return ProviderError(lazy("providers.claude.timeout", seconds=limit), kind="timeout")
 
     @staticmethod
     async def _with_attachments(
@@ -520,7 +512,7 @@ class ClaudeApiProvider:
         blocks[-1]["cache_control"] = {"type": "ephemeral"}
         text = last["content"]
         if not isinstance(text, str):  # pragma: no cover - to_chat_messages gives text
-            raise ProviderError("Missatge inesperat per als adjunts.", kind="internal")
+            raise ProviderError(lazy("providers.claude.unexpected_message"), kind="internal")
         content = [*blocks, {"type": "text", "text": text}]
         return {"role": "user", "content": cast(list[BetaContentBlockParam], content)}
 
@@ -534,10 +526,10 @@ class ClaudeApiProvider:
             mode="api",
             available=configured,
             model=self.default_model,
-            detail=(
-                "Clau d'API configurada"
+            detail=lazy(
+                "providers.api_key_configured"
                 if configured
-                else "Falta la clau d'API d'Anthropic (AOS_ANTHROPIC_API_KEY)"
+                else "providers.anthropic.status.missing_key"
             ),
         )
 
@@ -578,9 +570,10 @@ class ClaudeApiProvider:
                     if len(listed) >= MAX_LISTED_MODELS:
                         break
             if not listed:
-                raise ProviderError("L'API d'Anthropic no ha retornat cap model.", kind="internal")
+                # Only logged (below): in English, as the logs are.
+                raise ProviderError("the Models API listed no model", kind="internal")
         except Exception as exc:
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the Anthropic models (%s); using the fallback", reason)
             listed = [
                 ModelInfo(

@@ -1,8 +1,9 @@
-// A refine turn («Perfecciona», docs/adr/0010-mode-perfecciona.md) in the turn model: what
+// A refine turn («Perfecciona», docs/adr/0010-refine-mode.md) in the turn model: what
 // its events build live (the rounds, what each call is, the stop the owner asked for, why
 // it ended), and the same view rebuilt from its stored messages after a reload.
 import { describe, expect, it } from 'vitest';
 import type { Message, TurnEvent, Usage } from './protocol';
+import { reasonText } from './refine';
 import { outcome, priced, sequence } from './test-fixtures';
 import {
   BUDGET_WORDS,
@@ -17,6 +18,8 @@ import {
   editorFallbackMessages,
   failedReviewEvents,
   failedReviewMessages,
+  legacyEvents,
+  legacyMessages,
   NO_CHANGES,
   OVER_BUDGET,
   REFINE_OPTIONS,
@@ -37,6 +40,8 @@ import {
   shortenCancelledMessages,
   shortenFailedEvents,
   shortenFailedMessages,
+  truncatedCopyEvents,
+  truncatedCopyMessages,
   V1,
   V2,
 } from './test-refine';
@@ -74,6 +79,7 @@ const ROUND_2: RefineRoundView = {
   version: 2,
   accepted: true,
   reason: null,
+  reasonCode: null,
   words: countWords(V2),
   budgetWords: BUDGET_WORDS,
   changes: [{ kind: 'defect', text: 'La fase 2 té data' }],
@@ -109,7 +115,7 @@ describe('a live refine turn', () => {
     const turn = liveRefine(refineEvents());
     const byId = (id: string) => turn.streams.find((s) => s.id === id)!;
     expect(byId('e1').refine).toEqual({
-      role: 'version', version: 1, words: countWords(V1), budgetWords: BUDGET_WORDS, accepted: true, reason: null,
+      role: 'version', version: 1, words: countWords(V1), budgetWords: BUDGET_WORDS, accepted: true, reason: null, reasonCode: null,
       changelog: [
         { kind: 'merge', text: "L'estructura en fases de Claude" },
         { kind: 'merge', text: 'La fase de seguiment de ChatGPT' },
@@ -238,9 +244,10 @@ describe('a stored refine turn (after a reload)', () => {
     });
     const turn = stored([...messages.slice(0, -1), unchanged(77, 'claude', 95), unchanged(78, 'chatgpt', 96), messages.at(-1)!]);
     expect(turn.refineRounds.at(-1)).toMatchObject({
-      round: 3, version: 2, accepted: false, reason: 'Cap dels dos hi ha trobat res a canviar.',
+      round: 3, version: 2, accepted: false, reason: null, reasonCode: 'nothing_to_change',
       proposals: { claude: 0, chatgpt: 0 }, scores: { claude: 95, chatgpt: 96 }, changes: [],
     });
+    expect(reasonText(turn.refineRounds.at(-1)!)).toBe('Cap dels dos hi ha trobat res a canviar.');
   });
 
   it('a round that ended without any version, when the models failed, says so as the live one did', () => {
@@ -266,9 +273,9 @@ describe('a stored refine turn (after a reload)', () => {
       );
     const turn = stored(messages);
     expect(turn.refineRounds.at(-1)).toMatchObject({
-      round: 3, version: 2, accepted: false, reason: 'Els models han fallat i la ronda no ha escrit cap versió.',
-      proposals: { claude: 0, chatgpt: 1 },
+      round: 3, version: 2, accepted: false, reason: null, reasonCode: 'failed_round', proposals: { claude: 0, chatgpt: 1 },
     });
+    expect(reasonText(turn.refineRounds.at(-1)!)).toBe('Els models han fallat i la ronda no ha escrit cap versió.');
     expect(turn.streams.filter((s) => s.status === 'failed').map((s) => `${s.agent} ${s.refineRole}`)).toEqual([
       'claude version',
       'chatgpt version',
@@ -447,5 +454,71 @@ describe('the calls of a stored refine turn, in the order they ran (P8 review)',
       .map((m) => (m.id === 74 ? { ...m, id: 75 } : m.id === 75 ? { ...m, id: 74 } : m))
       .sort((a, b) => a.id - b.id);
     expect(calls(stored(swapped))).toEqual(calls(liveRefine(refineEvents())));
+  });
+});
+
+describe('why a round wrote no version: its code (reason_code)', () => {
+  /** The code of each version's reason, in order. */
+  const versionCodes = (turn: TurnView) => turn.streams.flatMap((s) => (s.refine?.role === 'version' ? [s.refine.reasonCode] : []));
+
+  /** The same messages as a turn run in English stored them: the reasons in English, with their codes. */
+  const inEnglish = (messages: Message[]): Message[] =>
+    messages.map((m) => {
+      const refine = m.meta.refine;
+      if (!refine || !('role' in refine) || refine.role !== 'version' || refine.reason !== OVER_BUDGET) return m;
+      return { ...m, meta: { ...m.meta, refine: { ...refine, reason: 'The new version went over the word limit.' } } };
+    });
+
+  it('keeps the code the server sends with each reason, live and after a reload', () => {
+    const turn = liveRefine(refineEvents());
+    expect(turn.refineRounds.map((r) => [r.round, r.reason, r.reasonCode])).toEqual([
+      [1, null, null],
+      [2, null, null],
+      [3, OVER_BUDGET, 'over_budget'],
+    ]);
+    expect(versionCodes(turn)).toEqual([null, null, 'over_budget', 'over_budget']);
+    expect(stored(refineMessages()).refineRounds).toEqual(turn.refineRounds);
+    expect(versionCodes(stored(truncatedCopyMessages()))).toEqual(['incomplete', 'incomplete', null]);
+  });
+
+  it('reads the codes of a turn stored before them from its reasons, which were Catalan', () => {
+    const turns = [refineMessages(), shortenFailedMessages(), shortenCancelledMessages(), truncatedCopyMessages(), rejectedMergeCancelledMessages()];
+    for (const messages of turns) {
+      const coded = stored(messages);
+      const legacy = stored(legacyMessages(messages));
+      expect(legacy.streams.map((s) => s.refine)).toEqual(coded.streams.map((s) => s.refine));
+      expect(legacy.refineRounds).toEqual(coded.refineRounds);
+    }
+    expect(versionCodes(stored(legacyMessages(refineMessages())))).toEqual([null, null, 'over_budget', 'over_budget']);
+    expect(versionCodes(stored(legacyMessages(truncatedCopyMessages())))).toEqual(['incomplete', 'incomplete', null]);
+  });
+
+  it('reads them from the reasons of live events without them too', () => {
+    for (const events of [refineEvents(), shortenFailedEvents(), truncatedCopyEvents()]) {
+      const coded = liveRefine(events);
+      const legacy = liveRefine(legacyEvents(events));
+      expect(legacy.streams.map((s) => s.refine)).toEqual(coded.streams.map((s) => s.refine));
+      expect(legacy.refineRounds).toEqual(coded.refineRounds);
+    }
+  });
+
+  it('rebuilds the rounds by the code, whatever the language of the reason', () => {
+    // Round 3's version went over the word limit and its shortening never came: the round
+    // never ended, in English as in Catalan.
+    const english = stored(inEnglish(shortenCancelledMessages()));
+    expect(english.refineRounds.map((r) => r.round)).toEqual([1, 2]);
+    expect(english.refineRounds).toEqual(stored(shortenCancelledMessages()).refineRounds);
+    // Its shortening failed: it ended, without a new version.
+    const failed = stored(inEnglish(shortenFailedMessages())).refineRounds.at(-1)!;
+    expect([failed.round, failed.reason, failed.reasonCode]).toEqual([3, 'The new version went over the word limit.', 'over_budget']);
+  });
+
+  it('keeps the reason as it came for a code it does not know, and does not read one from it', () => {
+    const roundThree = (change: Record<string, unknown>) =>
+      refineEvents().map((e) => (e.type === 'refine.round' && e.round === 3 ? ({ ...e, ...change } as unknown as TurnEvent) : e));
+    const round = liveRefine(roundThree({ reason_code: 'too_slow', reason: 'Massa lenta.' })).refineRounds.at(-1)!;
+    expect([round.reason, round.reasonCode, reasonText(round)]).toEqual(['Massa lenta.', null, 'Massa lenta.']);
+    // The server said it has a code: a text the client knows does not stand for it.
+    expect(liveRefine(roundThree({ reason_code: 'too_slow' })).refineRounds.at(-1)?.reasonCode).toBeNull();
   });
 });

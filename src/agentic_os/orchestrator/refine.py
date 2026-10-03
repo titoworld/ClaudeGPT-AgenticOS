@@ -1,4 +1,4 @@
-"""Readers of the replies of a refine turn (docs/adr/0010-mode-perfecciona.md).
+"""Readers of the replies of a refine turn (docs/adr/0010-refine-mode.md).
 
 A review proposes changes to the current version and scores it::
 

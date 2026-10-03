@@ -1,4 +1,4 @@
-"""The prompts of a refine turn (docs/adr/0010-mode-perfecciona.md): what each call is told
+"""The prompts of a refine turn (docs/adr/0010-refine-mode.md): what each call is told
 against over-sizing the document (the brief as the scope, the word budget, at most five
 changes, the changelog against undoing earlier changes), the attachments as data, the
 stable parts first, and nothing they embed can forge one of their tags."""
@@ -258,7 +258,7 @@ def test_every_refine_prompt_explains_the_escapes() -> None:
     assert prompts.REFINE_REVIEW_ESCAPES_NOTE in review()
     assert prompts.REFINE_ANSWER_ESCAPES_NOTE in refine_answer_prompt("claude", BRIEF)
     assert "never propose to change it" in prompts.REFINE_REVIEW_ESCAPES_NOTE
-    assert "write «<» there in your answer" in prompts.REFINE_ANSWER_ESCAPES_NOTE
+    assert 'write "<" there in your answer' in prompts.REFINE_ANSWER_ESCAPES_NOTE
     for note in (
         prompts.REFINE_ESCAPES_NOTE,
         prompts.REFINE_REVIEW_ESCAPES_NOTE,

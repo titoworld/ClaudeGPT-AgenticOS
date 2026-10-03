@@ -6,6 +6,7 @@
 // proxy, `stream.text += delta` only re-renders the text that changed, instead
 // of rebuilding the whole conversation on every token.
 
+import { i18n } from './i18n/index.svelte';
 import { AGENT_LABEL } from './format';
 import { AGENTS } from './protocol';
 import type {
@@ -21,6 +22,7 @@ import type {
   Phase,
   RefineChange,
   RefineOptions,
+  RefineReasonCode,
   RefineStopReason,
   Savings,
   TurnEvent,
@@ -38,7 +40,7 @@ export type TurnStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 export type CostBasis = 'api' | 'equivalent';
 
 /**
- * What a call of a refine turn is (docs/adr/0010-mode-perfecciona.md): a first answer, a
+ * What a call of a refine turn is (docs/adr/0010-refine-mode.md): a first answer, a
  * review of the current version, a version of the editor (the merge of round 1, a later
  * edit or its shortening) or the final version (the current one, stored without a call).
  */
@@ -54,8 +56,10 @@ export type RefineInfo =
       budgetWords: number | null;
       /** It became the current version. */
       accepted: boolean;
-      /** Why it did not (Catalan). */
+      /** Why it did not, as the server wrote it (in the turn's language). */
       reason: string | null;
+      /** The code of `reason`: what the client's logic reads, and the text it shows (lib/refine.ts reasonText). */
+      reasonCode: RefineReasonCode | null;
       changelog: RefineChange[];
       /** Version 1 stored without a call, copying this answer (nobody could merge). */
       copiedFrom: number | null;
@@ -65,13 +69,16 @@ export type RefineInfo =
 /**
  * The end of a refine round, as `refine.round` says it (a stored turn rebuilds it from its
  * messages). `version`: the current version after the round; `accepted`: the round wrote
- * a new one; `proposals` and `scores`: null for an agent without a review.
+ * a new one; `reason`: why not, as the server wrote it (rebuilt from the messages, only the
+ * reason of a version that was not accepted), and `reasonCode` its code; `proposals` and
+ * `scores`: null for an agent without a review.
  */
 export interface RefineRoundView {
   round: number;
   version: number;
   accepted: boolean;
   reason: string | null;
+  reasonCode: RefineReasonCode | null;
   words: number;
   budgetWords: number;
   changes: RefineChange[];
@@ -133,7 +140,7 @@ export type PdfCheckStatus = PdfCheckState | 'interrupted';
 
 /**
  * Claude's check of a PDF of the question for ChatGPT with the subscription, as the turn's
- * `pdf.check` events tell it (docs/adr/0009-adjunts.md). Pages as in PdfReading.
+ * `pdf.check` events tell it (docs/adr/0009-attachments.md). Pages as in PdfReading.
  */
 export interface PdfCheckView {
   attachmentId: number;
@@ -146,7 +153,7 @@ export interface PdfCheckView {
   reused: boolean;
   /** What this turn's calls for the PDF billed (null while checking, or reused). */
   usage: Usage | null;
-  /** Why pages remain unchecked (Catalan); null when none does. */
+  /** Why pages remain unchecked (the server's text, in the turn's language); null when none does. */
   reason: string | null;
   /** Meaning of `usage.cost_usd`: the app sets it from Claude's provider mode. */
   costBasis: CostBasis | null;
@@ -548,14 +555,15 @@ export function synthesisNote(turn: TurnView, shown: StreamView | null = shownSy
     shown.degraded ||
     failed.includes(shown.agent) ||
     turn.streams.some((s) => s.kind === 'answer' && s.status === 'failed');
-  if (degraded) return `No s'ha pogut fer la síntesi: es mostra l'última resposta de ${who}.`;
+  const texts = i18n.m.turn.synthesis;
+  if (degraded) return texts.degraded(who);
   const chosen = turn.options?.debate.synthesizer;
   const missing = failed.find((agent) => agent !== shown.agent) ?? (chosen !== shown.agent ? chosen : undefined);
   if (!missing) return null;
-  const lead = `${AGENT_LABEL[missing]} no ha pogut fer la síntesi`;
-  if (shown.status === 'done') return `${lead}; l'ha feta ${who}.`;
-  if (shown.status === 'streaming') return `${lead}; ara la fa ${who}.`;
-  return `${lead}; ho ha intentat ${who}.`;
+  const lead = texts.failed(AGENT_LABEL[missing]);
+  if (shown.status === 'done') return texts.doneBy(lead, who);
+  if (shown.status === 'streaming') return texts.writingBy(lead, who);
+  return texts.triedBy(lead, who);
 }
 
 /**
@@ -690,10 +698,46 @@ const asScore = (v: unknown): number | null => {
   return n != null && n <= 100 ? n : null;
 };
 
-const STOP_REASONS: readonly RefineStopReason[] = ['owner', 'converged', 'unchanged', 'max_rounds', 'budget', 'failed'];
+/** Every reason a refine turn may stop for (`stop_reason`). */
+export const STOP_REASONS: readonly RefineStopReason[] = ['owner', 'converged', 'unchanged', 'max_rounds', 'budget', 'failed'];
 
 const asStopReason = (v: unknown): RefineStopReason | null =>
   STOP_REASONS.find((reason) => reason === v) ?? null;
+
+/**
+ * Why a refine round wrote no new version, or a version was not accepted (`reason_code`,
+ * orchestrator/engine.py, docs/PROTOCOL.md): the client's logic reads the code, never the
+ * text, and shows its own text for each one (lib/refine.ts reasonText).
+ */
+export const REFINE_REASON_CODES: readonly RefineReasonCode[] = [
+  'over_budget',
+  'incomplete',
+  'identical',
+  'nothing_to_change',
+  'failed_round',
+];
+
+/**
+ * The reasons of the turns stored before `reason_code` existed, by their code: they have the
+ * text alone, and it was always Catalan then (legacy data, not texts of the interface).
+ */
+const LEGACY_REASONS: ReadonlyMap<string, RefineReasonCode> = new Map([
+  ['La nova versió passava del límit de paraules.', 'over_budget'],
+  ["L'editor no ha escrit cap versió completa.", 'incomplete'],
+  ["La nova versió és igual a l'anterior.", 'identical'],
+  ['Cap dels dos hi ha trobat res a canviar.', 'nothing_to_change'],
+  ['Els models han fallat i la ronda no ha escrit cap versió.', 'failed_round'],
+]);
+
+/**
+ * The code of a reason: its `reason_code` when the server sent one (null for a code this
+ * client does not know, whose text is then shown as it came), else, for what was stored
+ * before the codes, the code of its text.
+ */
+function asReasonCode(code: unknown, reason: unknown): RefineReasonCode | null {
+  if (code !== undefined) return REFINE_REASON_CODES.find((known) => known === code) ?? null;
+  return typeof reason === 'string' ? (LEGACY_REASONS.get(reason) ?? null) : null;
+}
 
 /** The changes of a review or a version; entries without a kind or a text are left out. */
 const asChanges = (v: unknown): RefineChange[] =>
@@ -721,6 +765,7 @@ function asRefineInfo(v: unknown): RefineInfo | null {
       budgetWords,
       accepted: v.accepted === true,
       reason: asText(v.reason),
+      reasonCode: asReasonCode(v.reason_code, v.reason),
       changelog: asChanges(v.changelog),
       copiedFrom: asCount(v.copied_from),
     };
@@ -754,6 +799,7 @@ function asRoundView(ev: Extract<TurnEvent, { type: 'refine.round' }>): RefineRo
     version: asCount(ev.version) ?? 0,
     accepted: ev.accepted === true,
     reason: asText(ev.reason),
+    reasonCode: asReasonCode(ev.reason_code, ev.reason),
     words: asCount(ev.words) ?? 0,
     budgetWords: asCount(ev.budget_words) ?? 0,
     changes: asChanges(ev.changes),
@@ -848,7 +894,7 @@ function inferMode(streams: StreamView[]): TurnMode {
  * (a debate: no synthesis).
  */
 export const INCOMPLETE_KIND = 'incomplete';
-const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: 'Aquest torn no es va completar.' });
+const incomplete = (): ErrorInfo => ({ kind: INCOMPLETE_KIND, message: i18n.m.turn.incomplete });
 
 /**
  * Whether stored messages hold a finished turn, for turns stored without an outcome:
@@ -1016,16 +1062,6 @@ function withRefineFailures(streams: StreamView[], failures: TurnFailure[], edit
     .map(({ s }) => s);
 }
 
-/**
- * Why a round wrote no version, as `refine.round` says it (orchestrator/engine.py
- * REFINE_*): a reload rebuilds the rounds with them (docs/PROTOCOL.md lists them).
- */
-export const REFINE_ROUND_REASONS = {
-  unchanged: 'Cap dels dos hi ha trobat res a canviar.',
-  failed: 'Els models han fallat i la ronda no ha escrit cap versió.',
-  overBudget: 'La nova versió passava del límit de paraules.',
-} as const;
-
 const plus = (a: Usage | null, b: Usage | null): Usage | null => (a && b ? addUsage(a, b) : (a ?? b));
 
 /** Less than this is a rounding error of costs summed and subtracted, never a call (USD). */
@@ -1113,7 +1149,7 @@ function roundEnded(round: number, own: StreamView[], active: readonly Agent[]):
   const last = versions.at(-1);
   if (last) {
     const shortened = versions.filter((s) => s.agent === last.agent).length > 1;
-    return meta(last)?.reason !== REFINE_ROUND_REASONS.overBudget || shortened || editFailed.has(last.agent);
+    return meta(last)?.reasonCode !== 'over_budget' || shortened || editFailed.has(last.agent);
   }
   const reviews = own.filter((s) => s.refineRole === 'review');
   if (!active.every((agent) => reviews.some((s) => s.agent === agent))) return false;
@@ -1166,13 +1202,9 @@ function storedRefineRounds(input: StoredRefineCalls): RefineRoundView[] {
       round,
       version: current?.version ?? 0,
       accepted: last?.accepted === true,
-      reason: last
-        ? last.accepted
-          ? null
-          : last.reason
-        : unchanged
-          ? REFINE_ROUND_REASONS.unchanged
-          : REFINE_ROUND_REASONS.failed,
+      // A round without a version stored no reason: its code alone says it.
+      reason: last && !last.accepted ? last.reason : null,
+      reasonCode: last ? (last.accepted ? null : last.reasonCode) : unchanged ? 'nothing_to_change' : 'failed_round',
       words: current?.words ?? 0,
       budgetWords: budget,
       changes: last?.accepted ? last.changelog : [],

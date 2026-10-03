@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { ConversationSummary } from '../lib/protocol';
   import { routeHash } from '../lib/router.svelte';
   import { MODE_LABEL } from '../lib/text';
@@ -13,6 +14,7 @@
   }
 
   let { conv, active, running, onRename, onDelete }: Props = $props();
+  const t = $derived(i18n.m.app);
 
   let editing = $state(false);
   let draft = $state('');
@@ -61,21 +63,21 @@
       onkeydown={onKeydown}
       onblur={() => void save()}
       maxlength="200"
-      aria-label="Nou nom de la conversa"
+      aria-label={t.conversationItem.renameField}
       {@attach focusSelect} />
   {:else}
     <a href={routeHash({ name: 'chat', id: conv.id })} aria-current={active ? 'page' : undefined} ondblclick={startEdit}>
       <span class="mode" title={conv.last_mode ? MODE_LABEL[conv.last_mode] : ''}>
         <Icon name={conv.last_mode ? `mode-${conv.last_mode}` : 'mode-solo'} size={15} />
       </span>
-      <span class="title">{conv.title || 'Sense títol'}</span>
-      {#if running}<span class="running" title="Torn en curs"><span class="sr-only">Torn en curs</span></span>{/if}
+      <span class="title">{conv.title || t.untitled}</span>
+      {#if running}<span class="running" title={t.conversationItem.running}><span class="sr-only">{t.conversationItem.running}</span></span>{/if}
     </a>
     <div class="actions">
-      <button type="button" class="icon-btn small" onclick={startEdit} aria-label="Canvia el nom de «{conv.title}»">
+      <button type="button" class="icon-btn small" onclick={startEdit} aria-label={t.conversationItem.rename(conv.title)}>
         <Icon name="edit" size={14} />
       </button>
-      <button type="button" class="icon-btn small danger" onclick={onDelete} aria-label="Elimina «{conv.title}»">
+      <button type="button" class="icon-btn small danger" onclick={onDelete} aria-label={t.conversationItem.delete(conv.title)}>
         <Icon name="trash" size={14} />
       </button>
     </div>

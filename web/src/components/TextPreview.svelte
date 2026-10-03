@@ -2,6 +2,7 @@
   // A text file in the viewer: always plain text (never rendered, not even HTML or
   // Markdown), with its hidden characters revealed.
   import { api } from '../lib/api';
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { Attachment } from '../lib/protocol';
   import Icon from './Icon.svelte';
   import PlainText from './PlainText.svelte';
@@ -33,9 +34,9 @@
 </script>
 
 {#if failed}
-  <p class="state failed" role="alert"><Icon name="alert" size={15} />No s'ha pogut carregar el fitxer. Pots descarregar-lo.</p>
+  <p class="state failed" role="alert"><Icon name="alert" size={15} />{i18n.m.attachments.text.failed}</p>
 {:else if text === null}
-  <p class="state"><span class="spinner" aria-hidden="true"></span>Carregant…</p>
+  <p class="state"><span class="spinner" aria-hidden="true"></span>{i18n.m.attachments.text.loading}</p>
 {:else}
   <pre class="text"><PlainText {text} /></pre>
 {/if}

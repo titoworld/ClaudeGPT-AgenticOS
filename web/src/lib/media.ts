@@ -1,4 +1,4 @@
-// Images and PDFs prepared in the browser before their upload (docs/PROTOCOL.md «Adjunts»):
+// Images and PDFs prepared in the browser before their upload (docs/PROTOCOL.md "Attachments"):
 //
 // - An image larger than the models use (DOWNSCALE_EDGE) is downscaled in a canvas and
 //   encoded as WebP (quality 0.9): the same for the models, far less to upload. A GIF
@@ -18,7 +18,7 @@ import {
   imageSideMessage,
   SNIFF_BYTES,
   tooLargeMessage,
-  UNREADABLE_IMAGE_MESSAGE,
+  unreadableImageMessage,
   type EncodeFormat,
 } from './attachments';
 import { storedUpright, type Size } from './image-header';
@@ -55,7 +55,7 @@ function draw(source: Source, width: number, height: number, background?: string
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new AttachmentError(422, UNREADABLE_IMAGE_MESSAGE);
+  if (!context) throw new AttachmentError(422, unreadableImageMessage());
   if (background) {
     context.fillStyle = background;
     context.fillRect(0, 0, width, height);
@@ -133,7 +133,7 @@ export async function prepareImage(file: Blob, mime: string): Promise<PreparedIm
   try {
     bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
   } catch {
-    throw new AttachmentError(422, UNREADABLE_IMAGE_MESSAGE);
+    throw new AttachmentError(422, unreadableImageMessage());
   }
   try {
     const { width, height } = bitmap;

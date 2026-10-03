@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AGENT_LABEL } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import type { Agent } from '../lib/protocol';
 
   interface Props {
@@ -11,21 +12,22 @@
   let { agent, value, threshold }: Props = $props();
   const pct = $derived(value == null ? 0 : Math.max(0, Math.min(100, value)));
   const reached = $derived(value != null && value >= threshold);
+  const t = $derived(i18n.m.turn.agreement);
 </script>
 
 <div
   class="meter {agent}"
   class:reached
   role="meter"
-  aria-label="Acord de {AGENT_LABEL[agent]}"
+  aria-label={t.of(AGENT_LABEL[agent])}
   aria-valuemin={0}
   aria-valuemax={100}
   aria-valuenow={value ?? undefined}
-  aria-valuetext={value == null ? 'Pendent' : `${value} de 100 (llindar ${threshold})`}>
-  <span class="label">Acord</span>
+  aria-valuetext={value == null ? t.pending : t.value(value, threshold)}>
+  <span class="label">{t.label}</span>
   <span class="track">
     <span class="fill" style:width="{pct}%"></span>
-    <span class="mark" style:left="{threshold}%" title="Llindar de consens: {threshold}"></span>
+    <span class="mark" style:left="{threshold}%" title={t.threshold(threshold)}></span>
   </span>
   <span class="value">{value ?? '—'}</span>
 </div>

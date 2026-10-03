@@ -1,11 +1,12 @@
 // Builds the accessible table twin of a chart.
 
+import { i18n } from '../i18n/index.svelte';
 import { positive } from './stack';
 import type { ChartTable, Datum, SeriesDef } from './types';
 
 export interface TableOptions {
   caption: string;
-  /** Header of the category column (e.g. 'Dia'). */
+  /** Header of the category column (e.g. 'Day'). */
   categoryLabel: string;
   format: (v: number) => string;
   /** Add a 'Total' column (stacked charts). */
@@ -17,10 +18,11 @@ export interface TableOptions {
 export const MISSING = '—';
 
 export function chartTable(data: Datum[], series: SeriesDef[], opts: TableOptions): ChartTable {
+  const t = i18n.m.dashboard.chart;
   const columns = [
     { key: 'category', label: opts.categoryLabel, numeric: false },
     ...series.map((s) => ({ key: s.key, label: s.label, numeric: true })),
-    ...(opts.total ? [{ key: 'total', label: 'Total', numeric: true }] : []),
+    ...(opts.total ? [{ key: 'total', label: t.total, numeric: true }] : []),
   ];
   let omitted = 0;
   const rows: ChartTable['rows'] = [];
@@ -38,9 +40,6 @@ export function chartTable(data: Datum[], series: SeriesDef[], opts: TableOption
     ];
     rows.push({ key: d.key, cells });
   }
-  const note =
-    omitted > 0 && rows.length > 0
-      ? `Només es mostren els dies amb activitat (${rows.length} de ${data.length}).`
-      : undefined;
+  const note = omitted > 0 && rows.length > 0 ? t.activeDays(rows.length, data.length) : undefined;
   return { caption: opts.caption, columns, rows, ...(note ? { note } : {}) };
 }

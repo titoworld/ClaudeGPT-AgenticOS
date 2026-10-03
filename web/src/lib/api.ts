@@ -1,4 +1,5 @@
 // Typed REST client (docs/PROTOCOL.md). Same-origin, cookie session.
+import { i18n } from './i18n/index.svelte';
 import {
   BACKGROUND_HEADER,
   type Attachment,
@@ -39,7 +40,7 @@ export const GATING_REQUEST_TIMEOUT_MS = 15_000;
 /** A request that did not answer within its time limit. */
 export class RequestTimeoutError extends Error {
   constructor() {
-    super('El servidor no ha respost a temps.');
+    super(i18n.m.app.api.timeout);
     this.name = 'RequestTimeoutError';
   }
 }
@@ -93,7 +94,8 @@ async function send<T>(
   background: boolean,
   signal: AbortSignal | null,
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  // The server answers in the interface's language (its errors, its texts).
+  const headers: Record<string, string> = { 'Accept-Language': i18n.locale };
   // A file goes as it is: the server takes its type from the content, never from this.
   if (body !== undefined) headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json';
   if (background) headers[BACKGROUND_HEADER] = '1';
@@ -122,7 +124,7 @@ function failure(res: Response, path: string, payload: unknown): ApiError {
   const detail =
     payload && typeof payload === 'object' && 'detail' in payload && typeof payload.detail === 'string'
       ? payload.detail
-      : `Error ${res.status}`;
+      : i18n.m.app.api.httpError(res.status);
   const retryHeader = res.headers.get('Retry-After');
   const retryAfter = retryHeader ? Number.parseInt(retryHeader, 10) : null;
   if (res.status === 401 && !OWN_401.has(path)) onUnauthorized?.();
@@ -136,7 +138,8 @@ function failure(res: Response, path: string, payload: unknown): ApiError {
 async function attachmentText(id: number, options: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<string> {
   const { maxBytes, signal } = options;
   const path = `/api/attachments/${id}/content`;
-  const headers: Record<string, string> = maxBytes === undefined ? {} : { Range: `bytes=0-${maxBytes - 1}` };
+  const headers: Record<string, string> = { 'Accept-Language': i18n.locale };
+  if (maxBytes !== undefined) headers.Range = `bytes=0-${maxBytes - 1}`;
   const res = await fetch(path, { credentials: 'same-origin', headers, signal: signal ?? null });
   if (!res.ok) {
     let payload: unknown = null;
@@ -186,7 +189,7 @@ export const api = {
   stats: (days = 30) => request<Stats>('GET', `/api/stats?days=${days}`),
   /**
    * Uploads a file (the body is the file itself, not multipart): 201 with the Attachment;
-   * 413, 415, 422 or 507 with the reason (docs/PROTOCOL.md «Adjunts»).
+   * 413, 415, 422 or 507 with the reason (docs/PROTOCOL.md, attachments).
    */
   uploadAttachment: (file: Blob, name: string, signal?: AbortSignal) =>
     request<Attachment>('PUT', `/api/attachments?${new URLSearchParams({ name })}`, undefined, { raw: file, signal }),

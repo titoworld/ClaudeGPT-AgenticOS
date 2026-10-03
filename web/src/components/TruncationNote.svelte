@@ -1,13 +1,14 @@
 <script lang="ts">
   // Says that a reply was cut off before the end, and why. By default it speaks of
   // the answer above it: a usable partial answer, never a complete one.
+  import { i18n } from '../lib/i18n/index.svelte';
   import { truncationReason } from '../lib/text';
   import Icon from './Icon.svelte';
 
   interface Props {
     /** `finish_reason` of the stored message (null live: the event does not carry it). */
     reason: string | null;
-    /** What is incomplete, before the reason. */
+    /** What is incomplete, before the reason (by default, «Incomplete answer»). */
     lead?: string;
     /** A sentence after the reason (what is shown instead). */
     detail?: string | null;
@@ -15,12 +16,12 @@
     compact?: boolean;
   }
 
-  let { reason, lead = 'Resposta incompleta', detail = null, compact = false }: Props = $props();
+  let { reason, lead, detail = null, compact = false }: Props = $props();
 </script>
 
 <p class="truncation-note" class:compact role="note">
   <Icon name="alert" size={compact ? 14 : 16} />
-  <span><strong>{lead}:</strong> {truncationReason(reason)}.{#if detail}{' '}{detail}{/if}</span>
+  <span><strong>{lead ?? i18n.m.turn.truncated}:</strong> {truncationReason(reason)}.{#if detail}{' '}{detail}{/if}</span>
 </p>
 
 <style>

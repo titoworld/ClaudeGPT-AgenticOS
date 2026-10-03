@@ -1,6 +1,6 @@
 <script lang="ts">
   // Claude's check of each PDF of the question for ChatGPT with the subscription, live
-  // (docs/adr/0009-adjunts.md): ChatGPT cannot open a PDF, so it reads the text the server
+  // (docs/adr/0009-attachments.md): ChatGPT cannot open a PDF, so it reads the text the server
   // extracted, and Claude checks that text against the document while it answers. Each
   // PDF says that it is being checked, then what ChatGPT reads through Claude and what the
   // check cost (tokens and euros, like the rest of the turn's usage), why nobody could
@@ -10,6 +10,7 @@
   // and a PDF's only event may be its end (a check an earlier turn stored).
   import { approxEur, costTitle, processedTokens, tokenBreakdown } from '../lib/costs';
   import { formatInt } from '../lib/format';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { afterColon, checkDetails } from '../lib/pdf-pages';
   import type { PdfCheckView } from '../lib/turns.svelte';
   import Icon from './Icon.svelte';
@@ -24,6 +25,8 @@
 
   let { checks, eurPerUsd }: Props = $props();
 
+  const t = $derived(i18n.m.pdf.check);
+
   /** What a check's calls billed in this turn, as the turn shows usage; null when nothing. */
   function billed(check: PdfCheckView): { tokens: string; tokensTitle: string; cost: string | null; costTitle: string } | null {
     const usage = check.usage;
@@ -33,7 +36,7 @@
     const cost = usd != null && usd > 0 ? approxEur(usd, eurPerUsd) : null;
     if (!tokens && !cost) return null;
     return {
-      tokens: tokens ? `${formatInt(tokens)} tokens` : '',
+      tokens: tokens ? t.tokens(formatInt(tokens)) : '',
       tokensTitle: tokenBreakdown(usage),
       cost,
       costTitle: cost ? costTitle(check.costBasis, usd!) : '',
@@ -43,7 +46,7 @@
 
 <div class="pdf-live" class:sr-only={!checks.length} aria-live="polite">
   {#if checks.length}
-    <ul class="pdf-checks" aria-label="Contrast dels PDF per a ChatGPT">
+    <ul class="pdf-checks" aria-label={t.label}>
       {#each checks as check (check.attachmentId)}
         {@const details = checkDetails(check)}
         {@const reused = check.reused && check.state === 'checked'}
@@ -63,13 +66,13 @@
           <div class="body">
             <p class="head">
               {#if check.state === 'checking'}
-                Claude contrasta «<PlainText text={check.name} />» per a ChatGPT…
+                {t.checking.before}<PlainText text={check.name} />{t.checking.after}
               {:else if check.state === 'checked'}
-                ChatGPT llegeix «<PlainText text={check.name} />» contrastat per Claude
+                {t.checked.before}<PlainText text={check.name} />{t.checked.after}
               {:else if check.state === 'interrupted'}
-                El torn s'ha aturat abans que Claude acabés de contrastar «<PlainText text={check.name} />».
+                {t.interrupted.before}<PlainText text={check.name} />{t.interrupted.after}
               {:else}
-                ChatGPT llegeix el text de «<PlainText text={check.name} />» sense contrastar{check.reason
+                {t.unchecked.before}<PlainText text={check.name} />{t.unchecked.after}{check.reason
                   ? `: ${afterColon(check.reason)}`
                   : '.'}
               {/if}
@@ -80,7 +83,7 @@
                   <li class="detail">{detail}</li>
                 {/each}
                 {#if reused}
-                  <li class="detail">ja contrastat abans</li>
+                  <li class="detail">{t.reused}</li>
                 {:else if bill}
                   {#if bill.tokens}
                     <li class="detail tokens" title={bill.tokensTitle}>

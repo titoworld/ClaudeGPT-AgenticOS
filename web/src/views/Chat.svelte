@@ -6,6 +6,7 @@
   import Markdown from '../components/Markdown.svelte';
   import Turn from '../components/Turn.svelte';
   import { app } from '../lib/app.svelte';
+  import { i18n } from '../lib/i18n/index.svelte';
   import { prefs } from '../lib/prefs.svelte';
   import { stopBars } from '../lib/stop-bars.svelte';
 
@@ -21,9 +22,10 @@
   const turns = $derived(app.viewTurns);
   const plannedRounds = $derived(app.settings.debate.rounds);
   const showEmpty = $derived(turns.length === 0 && convs.currentId == null);
+  const t = $derived(i18n.m.turn.chat);
   /**
    * While a refine turn's stop bar sticks to the bottom (RefineControls.svelte: its height,
-   * its offset and the room of «Baixa al final»), what gets the keyboard focus is brought into
+   * its offset and the room of «Jump to the end»), what gets the keyboard focus is brought into
    * view above it, with a gap, never behind it (WCAG 2.2, 2.4.11).
    */
   const focusRoom = $derived(
@@ -128,12 +130,12 @@
   });
 
   // Screen readers get a short status instead of every streamed token.
-  let announce = $state('');
+  let announce: 'running' | 'finished' | null = $state(null);
   $effect(() => {
     const running = !!app.runningTurn;
     untrack(() => {
-      if (running) announce = 'Generant la resposta…';
-      else if (announce) announce = 'Resposta completada.';
+      if (running) announce = 'running';
+      else if (announce) announce = 'finished';
     });
   });
 
@@ -143,7 +145,7 @@
   }
 </script>
 
-<!-- While «Baixa al final» shows, what sticks to the bottom of the conversation (a refine turn's
+<!-- While «Jump to the end» shows, what sticks to the bottom of the conversation (a refine turn's
      controls) leaves it room. -->
 <div class="chat" style:--pill-room={!stick && turns.length > 0 ? '2.9rem' : null}>
   <div
@@ -158,19 +160,19 @@
       {:else}
         {#if convs.loading && turns.length === 0}
           <div class="loading" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>Carregant la conversa…
+            <span class="spinner" aria-hidden="true"></span>{t.loading}
           </div>
         {/if}
         {#if convs.loadError}
           <div class="load-error" role="alert">
             <Icon name="alert" size={16} />
             <span>{convs.loadError}</span>
-            <button type="button" class="btn" onclick={() => void convs.reload()}>Torna-ho a provar</button>
+            <button type="button" class="btn" onclick={() => void convs.reload()}>{t.retry}</button>
           </div>
         {/if}
         {#if convs.detail?.summary}
           <details class="summary">
-            <summary><Icon name="refresh" size={14} />Part anterior compactada per estalviar tokens</summary>
+            <summary><Icon name="refresh" size={14} />{t.summary}</summary>
             <Markdown text={convs.detail.summary} />
           </details>
         {/if}
@@ -178,18 +180,18 @@
           <Turn {turn} {plannedRounds} />
         {/each}
         {#if !convs.loading && !convs.loadError && turns.length === 0}
-          <p class="empty-conv">Aquesta conversa encara no té missatges.</p>
+          <p class="empty-conv">{t.empty}</p>
         {/if}
       {/if}
     </div>
   </div>
 
-  <p class="sr-only" role="status">{announce}</p>
+  <p class="sr-only" role="status">{announce ? t[announce] : ''}</p>
 
   <div class="composer-wrap">
     {#if !stick && turns.length > 0}
       <button type="button" class="to-bottom glass" onclick={() => toBottom(true)}>
-        <Icon name="arrow-down" size={16} />Baixa al final
+        <Icon name="arrow-down" size={16} />{t.toBottom}
       </button>
     {/if}
     <Composer />
