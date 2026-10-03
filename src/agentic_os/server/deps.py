@@ -18,6 +18,7 @@ from starlette.requests import ClientDisconnect, HTTPConnection
 
 from agentic_os.attachments import PdfReader
 from agentic_os.config import Settings
+from agentic_os.i18n import t
 from agentic_os.security.devices import DeviceManager
 from agentic_os.security.sessions import SessionManager, hash_token, is_well_formed
 from agentic_os.security.throttle import LoginThrottle
@@ -32,10 +33,6 @@ SECURE_COOKIE_NAME: Final = "__Host-aos_session"
 DEV_COOKIE_NAME: Final = "aos_session"
 SECURE_DEVICE_COOKIE_NAME: Final = "__Host-aos_device"
 DEV_DEVICE_COOKIE_NAME: Final = "aos_device"
-UNAUTHORIZED_DETAIL: Final = "Cal iniciar sessió."
-CLIENT_DISCONNECT_DETAIL: Final = "La connexió s'ha tancat abans de rebre la petició sencera."
-INVALID_JSON_DETAIL: Final = "El cos de la petició ha de ser JSON vàlid."
-INVALID_TEXT_DETAIL: Final = "La petició conté text que no és UTF-8 vàlid."
 BACKGROUND_HEADER: Final = "X-AOS-Background"
 """With the value ``1``, marks a request the client makes by itself, not because the
 owner did something (refreshes after ``hello`` or a reconnection, periodic refreshes,
@@ -157,7 +154,7 @@ async def require_session(request: Request, state: StateDep) -> SessionRecord:
     """Dependency of every authenticated route: 401 without a live session."""
     session = await state.session_for(request)
     if session is None:
-        raise HTTPException(status_code=401, detail=UNAUTHORIZED_DETAIL)
+        raise HTTPException(status_code=401, detail=t("server.login_required"))
     return session
 
 
@@ -208,11 +205,11 @@ async def read_json(request: Request, *, utf8_only: bool = True) -> object:
     try:
         body = await request.body()
     except ClientDisconnect:
-        raise HTTPException(status_code=400, detail=CLIENT_DISCONNECT_DETAIL) from None
+        raise HTTPException(status_code=400, detail=t("server.client_disconnected")) from None
     try:
         value = json.loads(body)
     except (ValueError, RecursionError):
-        raise HTTPException(status_code=422, detail=INVALID_JSON_DETAIL) from None
+        raise HTTPException(status_code=422, detail=t("server.invalid_json")) from None
     if utf8_only and has_invalid_text(value):
-        raise HTTPException(status_code=422, detail=INVALID_TEXT_DETAIL)
+        raise HTTPException(status_code=422, detail=t("server.invalid_text"))
     return value

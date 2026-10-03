@@ -24,15 +24,17 @@ from agentic_os.domain import (
     TurnOptions,
 )
 from agentic_os.fx import DEFAULT_EUR_PER_USD, FxRate, manual_rate
+from agentic_os.i18n import lazy, number, t
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.pdf_facts import PdfNotes
 from agentic_os.pricing import ModelPrice, normalize_model
 from agentic_os.providers.base import MODEL_ID_PATTERN, AttachmentKind, AttachmentMode
 
 TURN_MODES: Final[tuple[TurnMode, ...]] = ("solo", "duel", "debate", "refine")
-DEFAULT_MODE_REFINE: Final = "El mode per defecte no pot ser «refine»."
-"""A refine turn runs until the owner stops it (docs/adr/0010-refine-mode.md), so it
-is only ever chosen on purpose: never the mode a turn gets without asking."""
+DEFAULT_MODE_REFINE: Final = lazy("storage.settings.default_mode_refine")
+"""Why ``refine`` cannot be the default mode (``str()`` makes it). A refine turn runs
+until the owner stops it (docs/adr/0010-refine-mode.md), so it is only ever chosen on
+purpose: never the mode a turn gets without asking."""
 
 ROUNDS_RANGE: Final = (0, 4)
 CONSENSUS_THRESHOLD_RANGE: Final = (50, 100)
@@ -93,7 +95,7 @@ def _int_in_range(value: object, name: str, bounds: tuple[int, int]) -> int:
     low, high = bounds
     # bool is a subclass of int: reject it explicitly.
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-        raise ValueError(f"«{name}» ha de ser un enter entre {low} i {high}.")
+        raise ValueError(t("storage.settings.int_range", name=name, low=low, high=high))
     return value
 
 
@@ -101,13 +103,13 @@ def _mode(value: object, name: str) -> TurnMode:
     for mode in TURN_MODES:
         if value == mode:
             return mode
-    raise ValueError(f"«{name}» ha de ser «solo», «duel», «debate» o «refine».")
+    raise ValueError(t("storage.settings.mode", name=name))
 
 
 def _default_mode(value: object) -> TurnMode:
     mode = _mode(value, "default_mode")
     if mode == "refine":
-        raise ValueError(DEFAULT_MODE_REFINE)
+        raise ValueError(str(DEFAULT_MODE_REFINE))
     return mode
 
 
@@ -115,12 +117,12 @@ def _agent(value: object, name: str) -> AgentName:
     for agent in AGENTS:
         if value == agent:
             return agent
-    raise ValueError(f"«{name}» ha de ser «claude» o «chatgpt».")
+    raise ValueError(t("storage.settings.agent", name=name))
 
 
 def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
-        raise ValueError(f"«{name}» ha de ser un booleà (true o false).")
+        raise ValueError(t("storage.settings.bool", name=name))
     return value
 
 
@@ -128,7 +130,7 @@ def _pdf_in_revisions(value: object) -> AttachmentMode:
     for mode in PDF_IN_REVISIONS:
         if value == mode:
             return mode
-    raise ValueError("«pdf_in_revisions» ha de ser «full» o «text».")
+    raise ValueError(t("storage.settings.pdf_in_revisions"))
 
 
 def is_revision(value: object) -> TypeGuard[int]:
@@ -139,14 +141,16 @@ def is_revision(value: object) -> TypeGuard[int]:
 def _revision(value: object) -> int:
     if is_revision(value):
         return value
-    raise ValueError("«revision» ha de ser un enter igual o més gran que 0.")
+    raise ValueError(t("storage.settings.revision"))
 
 
 def _format_number(value: float) -> str:
-    """Catalan notation for error messages (``0,2``, ``100.000``)."""
+    """A bound of a range for an error message, written as the web writes numbers in the
+    language in force (:func:`~agentic_os.i18n.number`: ``0,2`` and ``100.000`` in
+    Catalan), with the decimals it has."""
     if value == int(value):
-        return f"{int(value):,}".replace(",", ".")
-    return f"{value:g}".replace(".", ",")
+        return number(value)
+    return number(value, len(f"{value:g}".partition(".")[2]))
 
 
 def _number_in_range(value: object, name: str, bounds: tuple[float, float]) -> float:
@@ -160,7 +164,12 @@ def _number_in_range(value: object, name: str, bounds: tuple[float, float]) -> f
         or not low <= value <= high
     ):
         raise ValueError(
-            f"«{name}» ha de ser un nombre entre {_format_number(low)} i {_format_number(high)}."
+            t(
+                "storage.settings.number_range",
+                name=name,
+                low=_format_number(low),
+                high=_format_number(high),
+            )
         )
     return float(value)
 
@@ -168,10 +177,7 @@ def _number_in_range(value: object, name: str, bounds: tuple[float, float]) -> f
 def model_id(value: object, name: str) -> str:
     """A model id typed by the owner (any id of :data:`MODEL_ID_PATTERN`)."""
     if not isinstance(value, str) or not _MODEL_ID.fullmatch(value):
-        raise ValueError(
-            f"«{name}» ha de ser un identificador de model vàlid: fins a 100 lletres, xifres "
-            "o els signes . _ : / @ [ ] -, sense espais."
-        )
+        raise ValueError(t("storage.settings.model_id", name=name))
     return value
 
 
@@ -199,9 +205,7 @@ def _max_words(value: object) -> int | None:
         return None
     low, high = REFINE_WORDS_RANGE
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-        raise ValueError(
-            f"«refine.max_words» ha de ser null (automàtic) o un enter entre {low} i {high}."
-        )
+        raise ValueError(t("storage.settings.max_words", low=low, high=high))
     return value
 
 
@@ -209,7 +213,7 @@ def _refine(value: object) -> RefineOptions:
     """``refine`` of the settings or of a turn's options; missing keys take their
     defaults."""
     if not isinstance(value, Mapping):
-        raise ValueError("«refine» ha de ser un objecte.")
+        raise ValueError(t("storage.settings.not_object", name="refine"))
     defaults = RefineOptions()
     return RefineOptions(
         max_rounds=_int_in_range(
@@ -251,10 +255,10 @@ def _agent_map[T](
 ) -> dict[AgentName, T | None]:
     """``Record<Agent, T | null>``: missing agents are ``None``; unknown ones are rejected."""
     if not isinstance(value, Mapping):
-        raise ValueError(f"«{name}» ha de ser un objecte amb les claus «claude» i «chatgpt».")
+        raise ValueError(t("storage.settings.agent_map", name=name))
     for key in value:
         if key not in AGENTS:
-            raise ValueError(f"«{name}» només admet les claus «claude» i «chatgpt».")
+            raise ValueError(t("storage.settings.agent_map_keys", name=name))
     return {agent: item(value.get(agent), f"{name}.{agent}") for agent in AGENTS}
 
 
@@ -268,17 +272,15 @@ def _no_amounts() -> dict[AgentName, float | None]:
 
 def _price(value: object, name: str) -> ModelPrice:
     if not isinstance(value, Mapping):
-        raise ValueError(
-            f"«{name}» ha de ser un objecte amb «input», «output», «cache_read» i «cache_write»."
-        )
+        raise ValueError(t("storage.settings.price_object", name=name))
     try:
         price = ModelPrice.from_wire(value)
     except ValueError as exc:
-        raise ValueError(f"«{name}»: {exc}") from None
+        raise ValueError(t("storage.settings.field_error", name=name, error=exc)) from None
     for key, amount in price.to_wire().items():
         if not math.isfinite(amount) or amount > MAX_PRICE_PER_MTOK:
             limit = _format_number(MAX_PRICE_PER_MTOK)
-            raise ValueError(f"«{name}.{key}» ha de ser un preu entre 0 i {limit} $.")
+            raise ValueError(t("storage.settings.price_range", name=f"{name}.{key}", limit=limit))
     return price
 
 
@@ -288,26 +290,25 @@ def _prices(value: object) -> dict[str, ModelPrice]:
     (``openai/``, ``x/[1m]``...) would match, and reprice, every model, and two ids
     of the same model would leave only one of them in effect, so both are refused."""
     if not isinstance(value, Mapping):
-        raise ValueError("«prices» ha de ser un objecte (model → preus).")
+        raise ValueError(t("storage.settings.prices_object"))
     if len(value) > MAX_CUSTOM_PRICES:
-        raise ValueError(f"«prices» admet com a màxim {MAX_CUSTOM_PRICES} models.")
+        raise ValueError(t("storage.settings.prices_max", max=number(MAX_CUSTOM_PRICES)))
     prices: dict[str, ModelPrice] = {}
     seen: dict[str, str] = {}
     for model, price in value.items():
         if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
-            raise ValueError(
-                f"«prices»: «{str(model)[:100]}» no és un identificador de model vàlid."
-            )
+            raise ValueError(t("storage.settings.prices_bad_id", model=str(model)[:100]))
         normalized = normalize_model(model)
         if not normalized:
-            raise ValueError(
-                f"«prices»: «{model}» no identifica cap model (sense el prefix del proveïdor, "
-                "la data o el context no en queda res)."
-            )
+            raise ValueError(t("storage.settings.prices_no_model", model=model))
         if normalized in seen:
             raise ValueError(
-                f"«prices»: «{seen[normalized]}» i «{model}» són el mateix model "
-                f"(«{normalized}»). Deixa'n només un."
+                t(
+                    "storage.settings.prices_same_model",
+                    first=seen[normalized],
+                    second=model,
+                    model=normalized,
+                )
             )
         seen[normalized] = model
         prices[model] = _price(price, f"prices.{model}")
@@ -330,7 +331,7 @@ class FxSettings:
     @classmethod
     def from_wire(cls, data: object) -> FxSettings:
         if not isinstance(data, Mapping):
-            raise ValueError("«fx» ha de ser un objecte.")
+            raise ValueError(t("storage.settings.not_object", name="fx"))
         defaults = cls()
         return cls(
             mode=_fx_mode(data.get("mode", defaults.mode)),
@@ -344,7 +345,7 @@ def _fx_mode(value: object) -> FxMode:
     for mode in FX_MODES:
         if value == mode:
             return mode
-    raise ValueError("«fx.mode» ha de ser «auto» o «manual».")
+    raise ValueError(t("storage.settings.fx_mode"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,7 +353,7 @@ class RuntimeSettings:
     """Owner preferences stored in the database (``RuntimeSettings`` in PROTOCOL.md).
 
     Construction validates every field and raises :class:`ValueError` with a
-    Catalan message that can be shown to the owner as is.
+    message, in the language in force, that can be shown to the owner as is.
     """
 
     default_mode: TurnMode = "debate"
@@ -390,7 +391,7 @@ class RuntimeSettings:
         _default_mode(self.default_mode)
         _agent(self.default_target, "default_target")
         if not isinstance(self.debate, DebateOptions):
-            raise ValueError("«debate» ha de ser un objecte.")
+            raise ValueError(t("storage.settings.not_object", name="debate"))
         _int_in_range(self.debate.rounds, "debate.rounds", ROUNDS_RANGE)
         _int_in_range(
             self.debate.consensus_threshold,
@@ -399,7 +400,7 @@ class RuntimeSettings:
         )
         _agent(self.debate.synthesizer, "debate.synthesizer")
         if not isinstance(self.refine, RefineOptions):
-            raise ValueError("«refine» ha de ser un objecte.")
+            raise ValueError(t("storage.settings.not_object", name="refine"))
         _refine(refine_to_wire(self.refine))
         _bool(self.use_cache, "use_cache")
         _int_in_range(
@@ -410,7 +411,7 @@ class RuntimeSettings:
         _agent_map(self.models, "models", _exact_model)
         _agent_map(self.fast_models, "fast_models", _exact_model)
         if not isinstance(self.prices, Mapping):
-            raise ValueError("«prices» ha de ser un objecte (model → preus).")
+            raise ValueError(t("storage.settings.prices_object"))
         _prices(
             {
                 model: price.to_wire() if isinstance(price, ModelPrice) else price
@@ -418,7 +419,7 @@ class RuntimeSettings:
             }
         )
         if not isinstance(self.fx, FxSettings):
-            raise ValueError("«fx» ha de ser un objecte.")
+            raise ValueError(t("storage.settings.not_object", name="fx"))
         _agent_map(self.budgets_eur, "budgets_eur", _optional_amount)
         _agent_map(self.plans_eur, "plans_eur", _optional_amount)
         _pdf_in_revisions(self.pdf_in_revisions)
@@ -427,15 +428,15 @@ class RuntimeSettings:
     def from_wire(cls, data: object) -> RuntimeSettings:
         """Build from decoded JSON. Missing keys take their defaults (``revision``: 0;
         the store reads settings saved before revisions existed as revision 1); unknown
-        keys are ignored. Raises :class:`ValueError` (Catalan message) on invalid
-        values, the revision first."""
+        keys are ignored. Raises :class:`ValueError` (a message for the owner) on
+        invalid values, the revision first."""
         if not isinstance(data, Mapping):
-            raise ValueError("La configuració ha de ser un objecte JSON.")
+            raise ValueError(t("storage.settings.not_json_object"))
         revision = _revision(data.get("revision", 0))
         defaults = cls()
         debate_raw = data.get("debate", {})
         if not isinstance(debate_raw, Mapping):
-            raise ValueError("«debate» ha de ser un objecte.")
+            raise ValueError(t("storage.settings.not_object", name="debate"))
         debate = DebateOptions(
             rounds=_int_in_range(
                 debate_raw.get("rounds", defaults.debate.rounds), "debate.rounds", ROUNDS_RANGE

@@ -1,24 +1,16 @@
 """REST routes of docs/PROTOCOL.md (except ``/api/auth``, see ``routes_auth``)."""
 
 import asyncio
-from typing import Annotated, Final
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from agentic_os.i18n import t
 from agentic_os.server.catalog import pricing_to_wire
 from agentic_os.server.deps import MAX_SQLITE_ID, StateDep, read_json, require_session
 from agentic_os.server.status import status_to_wire
 from agentic_os.storage import MAX_LIST_LIMIT, RuntimeSettings, SettingsConflictError
-
-NOT_FOUND_DETAIL: Final = "La conversa no existeix."
-REVISION_REQUIRED_DETAIL: Final = (
-    "Cal indicar «revision» (la revisió de la configuració en què es basa el canvi). "
-    "Torna a carregar la pàgina."
-)
-SETTINGS_CONFLICT_DETAIL: Final = (
-    "La configuració ha canviat en una altra pestanya o dispositiu. Revisa-la i torna-la a desar."
-)
 
 ConversationId = Annotated[int, Path(ge=1, le=MAX_SQLITE_ID)]
 """A conversation id in a path: 422 outside SQLite's positive INTEGER range."""
@@ -75,17 +67,17 @@ async def put_settings(request: Request, state: StateDep) -> JSONResponse:
     another tab or device saved since (the comparison and the write are atomic)."""
     body = await read_json(request)
     if isinstance(body, dict) and "revision" not in body:
-        raise HTTPException(status_code=422, detail=REVISION_REQUIRED_DETAIL)
+        raise HTTPException(status_code=422, detail=t("server.settings.revision_required"))
     try:
         settings = RuntimeSettings.from_wire(body)
     except (ValueError, OverflowError) as exc:  # OverflowError: a backstop for huge ints
-        detail = str(exc) if isinstance(exc, ValueError) else "Hi ha un nombre massa gran."
+        detail = str(exc) if isinstance(exc, ValueError) else t("server.number_too_large")
         raise HTTPException(status_code=422, detail=detail) from None
     try:
         stored = await state.store.put_runtime_settings(settings, base_revision=settings.revision)
     except SettingsConflictError as exc:
         return JSONResponse(
-            {"detail": SETTINGS_CONFLICT_DETAIL, "settings": exc.current.to_wire()},
+            {"detail": t("server.settings.conflict"), "settings": exc.current.to_wire()},
             status_code=409,
         )
     if stored.fx.mode == "auto":
@@ -113,7 +105,7 @@ async def list_conversations(
 async def get_conversation(conversation_id: ConversationId, state: StateDep) -> JSONResponse:
     detail = await state.store.get_conversation(conversation_id)
     if detail is None:
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.conversation_not_found"))
     return JSONResponse(detail.to_wire())
 
 
@@ -124,13 +116,13 @@ async def rename_conversation(
     body = await read_json(request)
     title = body.get("title") if isinstance(body, dict) else None
     if not isinstance(title, str):
-        raise HTTPException(status_code=422, detail="Cal indicar el títol (text).")
+        raise HTTPException(status_code=422, detail=t("server.title_required"))
     try:
         summary = await state.store.rename_conversation(conversation_id, title)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     if summary is None:
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.conversation_not_found"))
     return JSONResponse(summary.to_wire())
 
 
@@ -139,7 +131,7 @@ async def delete_conversation(conversation_id: ConversationId, state: StateDep) 
     # A running turn would fail on the deleted conversation: stop it first.
     state.turns.cancel_conversation(conversation_id)
     if not await state.store.delete_conversation(conversation_id):
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.conversation_not_found"))
     # Its turns cannot be replayed any more (turn.subscribe answers turn.unknown).
     state.turns.forget_conversation(conversation_id)
     return Response(status_code=204)

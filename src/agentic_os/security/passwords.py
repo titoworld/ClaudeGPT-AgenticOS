@@ -15,6 +15,8 @@ from typing import Final
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
+from agentic_os.i18n import number, t
+
 MIN_PASSWORD_LENGTH: Final = 12
 MAX_PASSWORD_LENGTH: Final = 1024
 """Longer inputs are rejected without hashing (cheap denial-of-service guard)."""
@@ -25,16 +27,14 @@ _slots: Final = threading.BoundedSemaphore(MAX_CONCURRENT_HASHES)
 
 
 def password_policy_error(password: str) -> str | None:
-    """Why ``password`` is not acceptable as the owner password (Catalan), or ``None``."""
+    """Why ``password`` is not acceptable as the owner password (in the language in
+    force), or ``None``."""
     if len(password) < MIN_PASSWORD_LENGTH:
-        return (
-            f"La contrasenya ha de tenir com a mínim {MIN_PASSWORD_LENGTH} caràcters "
-            "(millor una frase de pas)."
-        )
+        return t("server.password.too_short", min=number(MIN_PASSWORD_LENGTH))
     if len(password) > MAX_PASSWORD_LENGTH:
-        return f"La contrasenya no pot tenir més de {MAX_PASSWORD_LENGTH} caràcters."
+        return t("server.password.too_long", max=MAX_PASSWORD_LENGTH)
     if not password.strip():
-        return "La contrasenya no pot ser només espais."
+        return t("server.password.blank")
     return None
 
 

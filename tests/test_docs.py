@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from pydantic import AliasChoices
 
-from agentic_os import __version__, attachments, pdf_facts
+from agentic_os import __version__, attachments, i18n, pdf_facts
 from agentic_os.config import Settings
 from agentic_os.domain import (
     REFINE_BUDGET_FACTOR,
@@ -227,8 +227,9 @@ def test_every_number_the_docs_give_is_the_one_the_code_uses(
 
 def test_the_413_answer_of_the_docs_names_the_limit_it_applies() -> None:
     protocol = read(PROTOCOL)
-    for limit in (middleware.MAX_BODY_BYTES, LOGIN_BODY, UPLOAD_MB * 1_000_000):
-        assert f"`{middleware.too_large_detail(limit)}`" in protocol
+    with i18n.use("en"):
+        for limit in (middleware.MAX_BODY_BYTES, LOGIN_BODY, UPLOAD_MB * 1_000_000):
+            assert f"`{middleware.too_large_detail(limit)}`" in protocol
 
 
 # -- the refine mode (docs/adr/0010-refine-mode.md) ---------------------------------
@@ -382,11 +383,12 @@ def test_the_refine_reasons_the_protocol_quotes_are_the_engines() -> None:
 
 def test_the_refine_answers_the_protocol_quotes_are_the_servers() -> None:
     protocol = read(PROTOCOL)
-    assert f"`{turns.STOP_ONLY_REFINE}`" in protocol
-    assert f"`{DEFAULT_MODE_REFINE}`" in protocol
-    with pytest.raises(ValueError) as refused:
-        RuntimeSettings.from_wire({"refine": {"max_rounds": REFINE_ROUNDS_RANGE[0] - 1}})
-    assert f"`{refused.value}`" in protocol
+    with i18n.use("en"):
+        assert f"`{turns.STOP_ONLY_REFINE}`" in protocol
+        assert f"`{DEFAULT_MODE_REFINE}`" in protocol
+        with pytest.raises(ValueError) as refused:
+            RuntimeSettings.from_wire({"refine": {"max_rounds": REFINE_ROUNDS_RANGE[0] - 1}})
+        assert f"`{refused.value}`" in protocol
 
 
 # -- AOS_* variables (N24) -------------------------------------------------------------

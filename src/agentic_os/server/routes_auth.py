@@ -8,6 +8,7 @@ from typing import Final
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from agentic_os.i18n import number, t
 from agentic_os.security import totp
 from agentic_os.security.passwords import (
     hash_password_async,
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth")
 
-LOGIN_FAILED_DETAIL: Final = "Credencials incorrectes."
 MAX_TOTP_LENGTH: Final = 32
 
 _dummy_hash: str | None = None
@@ -44,16 +44,17 @@ async def _dummy_password_hash() -> str:
 
 
 def _wait_text(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds} segon" if seconds == 1 else f"{seconds} segons"
-    minutes = math.ceil(seconds / 60)
-    return f"{minutes} minut" if minutes == 1 else f"{minutes} minuts"
+    """The wait before the next login attempt: seconds below a minute, else whole
+    minutes (rounded up)."""
+    unit, count = ("seconds", seconds) if seconds < 60 else ("minutes", math.ceil(seconds / 60))
+    form = "one" if count == 1 else "other"
+    return t(f"server.login.{unit}_{form}", count=number(count))
 
 
 def _too_many_attempts(wait: int) -> JSONResponse:
     return JSONResponse(
         {
-            "detail": f"Massa intents fallits. Torna-ho a provar d'aquí a {_wait_text(wait)}.",
+            "detail": t("server.login.locked", wait=_wait_text(wait)),
             "retry_after": wait,
         },
         status_code=429,
@@ -66,7 +67,7 @@ def _credentials(body: object) -> tuple[str, str]:
         password, code = body.get("password"), body.get("totp")
         if isinstance(password, str) and isinstance(code, str) and len(code) <= MAX_TOTP_LENGTH:
             return password, code
-    raise HTTPException(status_code=422, detail="Cal indicar la contrasenya i el codi TOTP.")
+    raise HTTPException(status_code=422, detail=t("server.login.credentials_required"))
 
 
 def _token_hash(token: str | None) -> str | None:
@@ -168,7 +169,7 @@ async def login(request: Request, state: StateDep) -> Response:
                 tokens = await _complete_login(state, request, owner, step, password, now)
         if tokens is None:
             await state.throttle.record_failure(ip, now, device=device)
-            raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
+            raise HTTPException(status_code=401, detail=t("server.login.failed"))
         await state.throttle.record_success(ip, device=device)
 
     token, new_device = tokens

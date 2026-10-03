@@ -33,6 +33,7 @@ from typing import Final
 
 import aiosqlite
 
+from agentic_os.i18n import t
 from agentic_os.storage.search import FOLD_FUNCTION, sql_fold
 
 logger = logging.getLogger(__name__)
@@ -386,10 +387,7 @@ class Database:
     async def _migrate(self) -> None:
         current = await self.schema_version()
         if current > SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"La base de dades té la versió d'esquema {current}, més nova que la "
-                f"{SCHEMA_VERSION} que coneix aquesta versió de l'aplicació. Actualitza-la."
-            )
+            raise SchemaVersionError(t("storage.newer_schema", found=current, known=SCHEMA_VERSION))
         for version in range(current + 1, SCHEMA_VERSION + 1):
             async with self.transaction() as tx:
                 # Re-check under the write lock: another process may have migrated.

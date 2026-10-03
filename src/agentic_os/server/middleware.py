@@ -27,6 +27,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agentic_os import i18n
 from agentic_os.attachments import MAX_UPLOAD_BYTES
+from agentic_os.i18n import t
 
 CONTENT_SECURITY_POLICY: Final = "; ".join(
     (
@@ -62,9 +63,6 @@ UPLOAD_TIMEOUT_SECONDS: Final = 120.0
 170 kB/s (1.4 Mbit/s)."""
 STATE_CHANGING_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-FORBIDDEN_ORIGIN_DETAIL: Final = "Origen no permès."
-TOO_SLOW_DETAIL: Final = "La petició ha trigat massa a arribar. Torna-ho a provar."
-
 
 def size_text(size: int) -> str:
     """A number of bytes as the docs write it: ``1 MiB``, ``4 KiB``, ``20 MB``,
@@ -78,7 +76,7 @@ def size_text(size: int) -> str:
 def too_large_detail(limit: int) -> str:
     """The ``detail`` of a 413: it names the limit that applied (the login's is far
     smaller than the others)."""
-    return f"La petició és massa gran (màxim {size_text(limit)})."
+    return t("server.request_too_large", limit=size_text(limit))
 
 
 def is_api_path(path: str) -> bool:
@@ -218,7 +216,7 @@ class OriginCheckMiddleware:
         if scope["type"] == "http" and scope["method"] in STATE_CHANGING_METHODS:
             origin = Headers(raw=scope["headers"]).get("origin")
             if not origin_allowed(origin, self._allowed):
-                response = JSONResponse({"detail": FORBIDDEN_ORIGIN_DETAIL}, status_code=403)
+                response = JSONResponse({"detail": t("server.forbidden_origin")}, status_code=403)
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -240,7 +238,9 @@ class RequestTimeoutError(BodyError):
     connection after the answer instead of waiting for the rest of the body."""
 
     def __init__(self) -> None:
-        super().__init__(status_code=408, detail=TOO_SLOW_DETAIL, headers={"Connection": "close"})
+        super().__init__(
+            status_code=408, detail=t("server.request_too_slow"), headers={"Connection": "close"}
+        )
 
 
 class BodyLimitMiddleware:

@@ -25,6 +25,7 @@ from typing import Final, Self, cast
 from agentic_os.attachments import ORPHAN_TTL, is_sha256
 from agentic_os.domain import AGENTS, MessageKind
 from agentic_os.fx import FxRate
+from agentic_os.i18n import number, t
 from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.orchestrator.store import (
     AttachmentNotFoundError,
@@ -73,7 +74,6 @@ from agentic_os.storage.stats import MonthSpend, Stats, compute_month_spend, com
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TITLE: Final = "Conversa nova"
 MAX_TITLE_LENGTH: Final = 200
 MAX_LIST_LIMIT: Final = 200
 _MAX_IP_LENGTH: Final = 64
@@ -108,11 +108,17 @@ _UNLINKED: Final = (
 """Condition on ``attachments AS a``: never sent in a turn (or no longer)."""
 
 
+def default_title() -> str:
+    """The title of a conversation created without one, in the language in force (the
+    turn's)."""
+    return t("storage.default_title")
+
+
 class ConversationNotFoundError(LookupError):
     """The conversation does not exist (never created or deleted)."""
 
     def __init__(self, conversation_id: int) -> None:
-        super().__init__(f"La conversa {conversation_id} no existeix.")
+        super().__init__(t("storage.conversation_not_found", id=conversation_id))
         self.conversation_id = conversation_id
 
 
@@ -120,7 +126,7 @@ class AttachmentInUseError(Exception):
     """The attachment was sent in a turn: it stays while its conversation exists."""
 
     def __init__(self, attachment_id: int) -> None:
-        super().__init__(f"L'adjunt {attachment_id} ja forma part d'una conversa.")
+        super().__init__(t("storage.attachment_in_use", id=attachment_id))
         self.attachment_id = attachment_id
 
 
@@ -365,7 +371,7 @@ class SqliteStore:
 
     async def create_conversation(self, title: str) -> int:
         """Create a conversation; the title is whitespace-normalized and truncated."""
-        clean = _clean_title(title)[:MAX_TITLE_LENGTH] or DEFAULT_TITLE
+        clean = _clean_title(title)[:MAX_TITLE_LENGTH] or default_title()
         now = self._now()
         async with self._db.transaction() as tx:
             return await tx.insert(
@@ -608,10 +614,10 @@ class SqliteStore:
         exists). ``limit`` must be 1..:data:`MAX_LIST_LIMIT`. ``query`` keeps only
         the titles that contain it, without telling case or accents apart
         (:mod:`agentic_os.storage.search`); a blank one is no search. Raises
-        :class:`ValueError` (Catalan) for a ``limit`` out of range or a ``query``
+        :class:`ValueError` (for the owner) for a ``limit`` out of range or a ``query``
         longer than :data:`~agentic_os.storage.search.MAX_SEARCH_LENGTH`."""
         if not 1 <= limit <= MAX_LIST_LIMIT:
-            raise ValueError(f"«limit» ha de ser un enter entre 1 i {MAX_LIST_LIMIT}.")
+            raise ValueError(t("storage.list_limit", max=MAX_LIST_LIMIT))
         pattern = search_pattern(query)
         conditions: list[str] = []
         params: list[object] = []
@@ -654,12 +660,13 @@ class SqliteStore:
         self, conversation_id: int, title: str
     ) -> ConversationSummary | None:
         """Rename (``updated_at`` is kept). Returns ``None`` if the conversation does
-        not exist; raises :class:`ValueError` (Catalan) for an empty or long title."""
+        not exist; raises :class:`ValueError` (for the owner) for an empty or long
+        title."""
         clean = _clean_title(title)
         if not clean:
-            raise ValueError("El títol no pot estar buit.")
+            raise ValueError(t("storage.title_empty"))
         if len(clean) > MAX_TITLE_LENGTH:
-            raise ValueError(f"El títol no pot tenir més de {MAX_TITLE_LENGTH} caràcters.")
+            raise ValueError(t("storage.title_too_long", max=number(MAX_TITLE_LENGTH)))
         async with self._db.transaction() as tx:
             updated = await tx.execute(
                 "UPDATE conversations SET title = ? WHERE id = ?", (clean, conversation_id)
@@ -1299,7 +1306,7 @@ class SqliteStore:
 
     async def stats(self, days: int, now: datetime) -> Stats:
         """``Stats`` of PROTOCOL.md for the ``days`` (1-365) UTC days ending on
-        ``now``'s date; raises :class:`ValueError` (Catalan) for other values.
+        ``now``'s date; raises :class:`ValueError` (for the owner) for other values.
         See :mod:`agentic_os.storage.stats` for the exact definitions."""
         async with self._db.transaction(write=False) as tx:
             settings = await _read_runtime_settings(tx)
@@ -1489,10 +1496,10 @@ async def _read_ecb_rate(tx: Tx) -> StoredFxRate | None:
 
 
 __all__ = [
-    "DEFAULT_TITLE",
     "MAX_LIST_LIMIT",
     "AttachmentInUseError",
     "ConversationNotFoundError",
     "SettingsConflictError",
     "SqliteStore",
+    "default_title",
 ]

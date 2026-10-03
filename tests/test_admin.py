@@ -6,6 +6,7 @@ from pathlib import Path
 import pyotp
 import pytest
 
+from agentic_os import i18n
 from agentic_os.admin import render_qr, run_init, run_reset_sessions, run_reset_throttle
 from agentic_os.config import Settings
 from agentic_os.security.passwords import verify_password
@@ -225,3 +226,50 @@ def test_render_qr_draws_blocks() -> None:
     assert len(lines) > 10
     assert all(len(line) == len(lines[0]) for line in lines)
     assert set("".join(lines)) <= {" ", "\u00a0", "▀", "▄", "█"}
+
+
+# -- languages (docs/adr/0011-internationalization.md) ---------------------------------
+
+
+async def test_init_speaks_the_language_of_the_command_line(store: SqliteStore) -> None:
+    console = Console(answers=[pyotp.TOTP(SECRET).at(NOW)], passwords=["short", PASSWORD, PASSWORD])
+    with i18n.use("en"):
+        assert await init(store, console) == 0
+    assert console.prompts == [
+        "New password: ",
+        "New password: ",
+        "Repeat the password: ",
+        "6-digit code the app shows: ",
+    ]
+    assert console.lines[:2] == [
+        "Choose the owner's password (at least 12 characters; a passphrase is better).",
+        "The password must be at least 12 characters long (a passphrase is better).",
+    ]
+    assert f"If you cannot scan it, enter this key by hand: {SECRET}" in console.lines
+    assert "otpauth://totp/ClaudeGPT%20OS:owner%40ai.example.com" in console.text
+    assert console.lines[-2:] == [
+        "Owner set up.",
+        "You can now log in from the browser with the password and the TOTP code.",
+    ]
+
+
+async def test_the_resets_speak_the_language_of_the_command_line(store: SqliteStore) -> None:
+    for name in ("h1", "h2"):
+        await store.create_session(
+            name, created_at=NOW, expires_at=NOW + timedelta(days=1), ip=None, user_agent=None
+        )
+    await store.create_device("d1", created_at=NOW, expires_at=NOW + timedelta(days=365))
+    await lock(store, "global")
+    lines: list[str] = []
+    with i18n.use("es"):
+        assert await run_reset_sessions(store, out=lines.append) == 0
+        assert await run_reset_throttle(store, out=lines.append) == 0
+    with i18n.use("en"):
+        assert await run_reset_sessions(store, out=lines.append) == 0
+    assert lines == [
+        "Se han cerrado 2 sesiones. Habrá que volver a iniciar sesión.",
+        "Se ha olvidado 1 dispositivo conocido.",
+        "Se han borrado los bloqueos de inicio de sesión (1 contador de intentos fallidos).",
+        "No había ningún bloqueo ni ningún intento fallido registrado.",
+        "There was no open session.",
+    ]

@@ -40,8 +40,8 @@ from agentic_os.attachments import (
     upload_type,
 )
 from agentic_os.attachments import display_name as sanitized_name
+from agentic_os.i18n import t
 from agentic_os.server.deps import (
-    CLIENT_DISCONNECT_DETAIL,
     MAX_SQLITE_ID,
     AppState,
     StateDep,
@@ -49,12 +49,6 @@ from agentic_os.server.deps import (
 )
 from agentic_os.storage import AttachmentInUseError, AttachmentRecord, IncomingFile
 
-NOT_FOUND_DETAIL: Final = "L'adjunt no existeix."
-NO_THUMBNAIL_DETAIL: Final = "Aquest adjunt no té miniatura."
-IN_USE_DETAIL: Final = (
-    "Aquest adjunt ja s'ha enviat en una conversa: s'esborrarà quan s'esborri la conversa."
-)
-DISK_FULL_DETAIL: Final = "El servidor no té prou espai al disc per desar el fitxer."
 FILE_CSP: Final = "default-src 'none'; sandbox"
 """Policy of every served file: even opened on its own, it can run nothing and load
 nothing (on top of ``nosniff`` and the downloads' ``Content-Disposition``)."""
@@ -137,8 +131,8 @@ async def upload_attachment(
     name: Annotated[str | None, Query()] = None,
 ) -> JSONResponse:
     """Upload a file (the raw body); ``name`` is the file's name, only shown and used
-    for text files' extension. 201 with the ``Attachment``; 413, 415 or 422 (Catalan
-    ``detail``) when it is refused. It stays unsent (an orphan) until a turn names
+    for text files' extension. 201 with the ``Attachment``; 413, 415 or 422 (a ``detail``
+    in the client's language) when it is refused. It stays unsent (an orphan) until a turn names
     it, and an orphan is deleted after a day."""
     try:
         clean_name = sanitized_name(name)
@@ -151,10 +145,10 @@ async def upload_attachment(
     except AttachmentError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from None
     except ClientDisconnect:
-        raise HTTPException(status_code=400, detail=CLIENT_DISCONNECT_DETAIL) from None
+        raise HTTPException(status_code=400, detail=t("server.client_disconnected")) from None
     except OSError as exc:
         if exc.errno in _DISK_FULL:
-            raise HTTPException(status_code=507, detail=DISK_FULL_DETAIL) from None
+            raise HTTPException(status_code=507, detail=t("server.attachment.disk_full")) from None
         raise
     return JSONResponse(record.to_wire(), status_code=201)
 
@@ -162,7 +156,7 @@ async def upload_attachment(
 async def _record(state: AppState, attachment_id: int) -> AttachmentRecord:
     record = await state.store.get_attachment(attachment_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.attachment.not_found"))
     return record
 
 
@@ -199,7 +193,7 @@ async def get_content(attachment_id: AttachmentId, state: StateDep) -> Response:
     record = await _record(state, attachment_id)
     path = state.store.content_path(record.sha256)
     if not path.is_file():
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.attachment.not_found"))
     media_type = "text/plain; charset=utf-8" if record.kind == "text" else record.mime
     return FileResponse(
         path,
@@ -232,9 +226,9 @@ async def put_thumbnail(attachment_id: AttachmentId, request: Request, state: St
     except AttachmentError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from None
     except ClientDisconnect:
-        raise HTTPException(status_code=400, detail=CLIENT_DISCONNECT_DETAIL) from None
+        raise HTTPException(status_code=400, detail=t("server.client_disconnected")) from None
     if not await state.store.set_thumbnail(attachment_id, data):
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.attachment.not_found"))
     return Response(status_code=204)
 
 
@@ -248,7 +242,7 @@ async def get_thumbnail(attachment_id: AttachmentId, state: StateDep) -> Respons
         data = b""
     found = sniff(data[:SNIFF_BYTES])
     if found is None or found.mime not in ("image/png", "image/webp"):
-        raise HTTPException(status_code=404, detail=NO_THUMBNAIL_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.attachment.no_thumbnail"))
     extension = found.mime.removeprefix("image/")
     return Response(
         data, media_type=found.mime, headers=file_headers(f"miniatura.{extension}", inline=True)
@@ -262,7 +256,7 @@ async def delete_attachment(attachment_id: AttachmentId, state: StateDep) -> Res
     try:
         deleted = await state.store.delete_attachment(attachment_id)
     except AttachmentInUseError:
-        raise HTTPException(status_code=409, detail=IN_USE_DETAIL) from None
+        raise HTTPException(status_code=409, detail=t("server.attachment.in_use")) from None
     if not deleted:
-        raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        raise HTTPException(status_code=404, detail=t("server.attachment.not_found"))
     return Response(status_code=204)

@@ -12,6 +12,8 @@ from __future__ import annotations
 import unicodedata
 from typing import Final
 
+from agentic_os.i18n import number, t
+
 MAX_SEARCH_LENGTH: Final = 200
 """Longest searched text, once trimmed (as long as the longest title)."""
 FOLD_FUNCTION: Final = "aos_fold"
@@ -40,13 +42,13 @@ def search_pattern(query: str | None) -> str | None:
     """The ``LIKE`` pattern (with :data:`LIKE_ESCAPE`) of a searched text, to compare
     with the folded titles; ``None`` when there is nothing to search (no text, or only
     blank space). The text is trimmed and its runs of blank space count as one, as in
-    the stored titles. Raises :class:`ValueError` (Catalan) for a text longer than
+    the stored titles. Raises :class:`ValueError` (for the owner) for a text longer than
     :data:`MAX_SEARCH_LENGTH` once trimmed."""
     if query is None:
         return None
     text = query.strip()
     if len(text) > MAX_SEARCH_LENGTH:
-        raise ValueError(f"La cerca no pot tenir més de {MAX_SEARCH_LENGTH} caràcters.")
+        raise ValueError(t("storage.search_too_long", max=number(MAX_SEARCH_LENGTH)))
     folded = fold(" ".join(text.split()))
     if not folded:
         return None

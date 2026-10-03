@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException
 from agentic_os import __version__
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName
+from agentic_os.i18n import t
 from agentic_os.orchestrator.engine import Engine
 from agentic_os.orchestrator.types import EngineConfig
 from agentic_os.providers.base import Provider
@@ -45,35 +46,44 @@ logger = logging.getLogger(__name__)
 MAINTENANCE_INTERVAL_SECONDS: Final = 3600.0
 
 _DEFAULT_DETAILS: Final[dict[int, str]] = {
-    400: "Petició incorrecta.",
-    401: "Cal iniciar sessió.",
-    403: "Accés denegat.",
-    404: "No s'ha trobat.",
-    405: "Mètode no permès.",
-    413: "La petició és massa gran.",
-    415: "Aquest tipus de fitxer no s'admet.",
-    422: "Dades no vàlides.",
-    429: "Massa intents.",
-    500: "Error intern del servidor.",
-    503: "Servei no disponible.",
+    400: "server.http.bad_request",
+    401: "server.login_required",
+    403: "server.http.forbidden",
+    404: "server.http.not_found",
+    405: "server.http.method_not_allowed",
+    413: "server.http.too_large",
+    415: "server.http.unsupported_media_type",
+    422: "server.http.invalid_data",
+    429: "server.http.too_many_requests",
+    500: "server.http.internal_error",
+    503: "server.http.unavailable",
 }
+"""The key of the ``detail`` of an HTTP error raised without one, by status."""
+
+
+def default_detail(status: int) -> str | None:
+    """The ``detail`` of an HTTP error raised without one, in the client's language
+    (None for a status without its own text)."""
+    key = _DEFAULT_DETAILS.get(status)
+    return t(key) if key is not None else None
 
 
 async def _http_error(request: Request, exc: Exception) -> Response:
-    """``{"detail"}`` in Catalan for every HTTP error (Starlette's defaults are the
-    English status phrases)."""
+    """``{"detail"}`` in the client's language for every HTTP error (Starlette's defaults
+    are the English status phrases)."""
     if not isinstance(exc, HTTPException):  # pragma: no cover - registered for it
         raise exc
     detail: object = exc.detail
     if detail == HTTPStatus(exc.status_code).phrase:
-        detail = _DEFAULT_DETAILS.get(exc.status_code, detail)
+        detail = default_detail(exc.status_code) or detail
     if exc.status_code in (204, 304) or exc.status_code < 200:
         return Response(status_code=exc.status_code, headers=exc.headers)
     return JSONResponse({"detail": detail}, status_code=exc.status_code, headers=exc.headers)
 
 
 async def _validation_error(request: Request, exc: Exception) -> Response:
-    """422 with a Catalan string ``detail`` naming the invalid fields."""
+    """422 with a string ``detail`` naming the invalid fields, in the client's
+    language."""
     fields: list[str] = []
     if isinstance(exc, RequestValidationError):
         for error in exc.errors():
@@ -81,13 +91,14 @@ async def _validation_error(request: Request, exc: Exception) -> Response:
             name = ".".join(location)
             if name and name not in fields:
                 fields.append(name)
-    listed = ", ".join(f"«{name}»" for name in fields)
-    detail = f"Dades no vàlides: {listed}." if listed else "Dades no vàlides."
-    return JSONResponse({"detail": detail}, status_code=422)
+    if not fields:
+        return JSONResponse({"detail": t("server.http.invalid_data")}, status_code=422)
+    listed = ", ".join(t("server.quoted", text=name) for name in fields)
+    return JSONResponse({"detail": t("server.http.invalid_fields", fields=listed)}, status_code=422)
 
 
 async def _internal_error(request: Request, exc: Exception) -> Response:
-    return JSONResponse({"detail": _DEFAULT_DETAILS[500]}, status_code=500)
+    return JSONResponse({"detail": t("server.http.internal_error")}, status_code=500)
 
 
 async def _maintenance(state: AppState) -> None:

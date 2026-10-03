@@ -45,6 +45,7 @@ from typing import Final, TypedDict
 
 from agentic_os.domain import AGENTS, AgentName, DebateOptions, SavingKind
 from agentic_os.fx import FxRate
+from agentic_os.i18n import t
 from agentic_os.storage.db import Tx
 from agentic_os.storage.models import TURN_MODES, as_utc, format_ts
 
@@ -183,7 +184,7 @@ def percentile(values: Sequence[int], pct: float) -> int | None:
 def window(days: int, now: datetime) -> tuple[list[str], str, str]:
     """Dates (``YYYY-MM-DD``) of the window plus its ``[start, end)`` timestamps."""
     if not 1 <= days <= MAX_DAYS:
-        raise ValueError(f"«days» ha de ser un enter entre 1 i {MAX_DAYS}.")
+        raise ValueError(t("storage.stats_days", max=MAX_DAYS))
     today = as_utc(now).date()
     first = today - timedelta(days=days - 1)
     dates = [(first + timedelta(days=i)).isoformat() for i in range(days)]

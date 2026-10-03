@@ -1,4 +1,5 @@
-"""Command-line entry point (``agentic-os``). All output is in Catalan.
+"""Command-line entry point (``agentic-os``). Its output, help included, is in the
+language of the system locale (English, Spanish or Catalan; English for any other).
 
 - ``agentic-os serve [--host] [--port] [--dev]``: run the web server (uvicorn).
 - ``agentic-os init``: configure the owner (password + TOTP).
@@ -33,6 +34,7 @@ from agentic_os import __version__, i18n
 from agentic_os.config import Settings, get_settings
 from agentic_os.domain import AgentName, ProviderMode
 from agentic_os.fx import FxRate, manual_rate
+from agentic_os.i18n import number, t
 from agentic_os.providers.base import Provider, ProviderStatus
 from agentic_os.providers.prompt_format import AGENT_LABELS
 from agentic_os.storage import RuntimeSettings, SchemaVersionError, SqliteStore, utc_now
@@ -44,7 +46,6 @@ never reuses a connection uvicorn has just closed (sporadic 502s)."""
 STATUS_TIMEOUT_SECONDS: Final = 30.0
 VERSION_TIMEOUT_SECONDS: Final = 15.0
 LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
-INVALID_SETTINGS: Final = "La configuració (variables AOS_*) no és vàlida:"
 _SHOWN_VALUE_CHARS: Final = 60
 _FIELD_RE: Final = re.compile(r'field "(\w+)"')
 _QUOTED_RE: Final = re.compile(r"'([^']*)'")
@@ -60,7 +61,9 @@ class _HelpFormatter(argparse.HelpFormatter):
         groups: Iterable[argparse._MutuallyExclusiveGroup],
         prefix: str | None = None,
     ) -> None:
-        super().add_usage(usage, actions, groups, "ús: " if prefix is None else prefix)
+        super().add_usage(
+            usage, actions, groups, f"{t('cli.help.usage')} " if prefix is None else prefix
+        )
 
 
 def _parser(
@@ -77,49 +80,32 @@ def _parser(
         parser = argparse.ArgumentParser(prog=name, **kwargs)
     else:
         parser = parent.add_parser(name, help=description, **kwargs)
-    parser._optionals.title = "opcions"
-    parser.add_argument("-h", "--help", action="help", help="mostra aquesta ajuda i surt")
+    parser._optionals.title = t("cli.help.options")
+    parser.add_argument("-h", "--help", action="help", help=t("cli.help.help"))
     return parser
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = _parser(
-        None,
-        "agentic-os",
-        "ClaudeGPT OS: Claude i ChatGPT responen, es critiquen i sintetitzen una resposta millor.",
-    )
+    """The parser, its help in the language in force (build it after choosing one)."""
+    parser = _parser(None, "agentic-os", t("cli.help.description"))
     parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
-        help="mostra la versió i surt",
+        help=t("cli.help.version"),
     )
-    commands = parser.add_subparsers(dest="command", title="ordres", metavar="ORDRE")
+    commands = parser.add_subparsers(
+        dest="command", title=t("cli.help.commands"), metavar=t("cli.help.command")
+    )
 
-    serve = _parser(commands, "serve", "Arrenca el servidor web.")
-    serve.add_argument("--host", help="adreça on escoltar (per defecte, AOS_HOST)")
-    serve.add_argument("--port", type=int, help="port on escoltar (per defecte, AOS_PORT)")
-    serve.add_argument(
-        "--dev",
-        action="store_true",
-        help=(
-            "desenvolupament: registre detallat i consells de configuració. No relaxa "
-            "les cookies: per a http local defineix AOS_SECURE_COOKIES=false"
-        ),
-    )
-    _parser(commands, "init", "Configura el propietari: contrasenya i codi TOTP.")
-    _parser(
-        commands,
-        "reset-sessions",
-        "Tanca totes les sessions obertes, oblida els dispositius coneguts i esborra els "
-        "bloquejos d'inici de sessió.",
-    )
-    _parser(
-        commands,
-        "reset-throttle",
-        "Esborra els bloquejos per intents d'inici de sessió fallits (no tanca cap sessió).",
-    )
-    _parser(commands, "doctor", "Comprova la instal·lació, la configuració i els proveïdors.")
+    serve = _parser(commands, "serve", t("cli.help.serve"))
+    serve.add_argument("--host", help=t("cli.help.host"))
+    serve.add_argument("--port", type=int, help=t("cli.help.port"))
+    serve.add_argument("--dev", action="store_true", help=t("cli.help.dev"))
+    _parser(commands, "init", t("cli.help.init"))
+    _parser(commands, "reset-sessions", t("cli.help.reset_sessions"))
+    _parser(commands, "reset-throttle", t("cli.help.reset_throttle"))
+    _parser(commands, "doctor", t("cli.help.doctor"))
     return parser
 
 
@@ -144,16 +130,12 @@ def _main(argv: Sequence[str] | None) -> int:
         print(describe_invalid_settings(exc), file=sys.stderr)
         return 2
     except UnicodeError:
-        print("No s'ha pogut llegir la configuració: el fitxer .env no és UTF-8.", file=sys.stderr)
+        print(t("cli.settings.env_not_utf8"), file=sys.stderr)
         return 2
     except OSError as exc:
-        print(
-            f"No s'ha pogut llegir la configuració (fitxer .env): {exc.strerror or exc}.",
-            file=sys.stderr,
-        )
+        print(t("cli.settings.env_unreadable", error=exc.strerror or exc), file=sys.stderr)
         return 2
     if args.command == "serve":
-        i18n.set_lang(None)
         return serve(settings, host=args.host, port=args.port, dev=args.dev)
     if args.command == "doctor":
         return asyncio.run(run_doctor(settings))
@@ -181,73 +163,77 @@ def _number(value: object) -> str:
 
 
 def _alternatives(options: Sequence[str]) -> str:
-    quoted = [f"«{option}»" for option in options]
-    return quoted[0] if len(quoted) == 1 else f"{', '.join(quoted[:-1])} o {quoted[-1]}"
+    quoted = [t("cli.quoted", text=option) for option in options]
+    if len(quoted) == 1:
+        return quoted[0]
+    return t("cli.either", first=", ".join(quoted[:-1]), last=quoted[-1])
 
 
 _BOUNDS: Final = (
-    ("ge", "com a mínim"),
-    ("gt", "més gran que"),
-    ("le", "com a màxim"),
-    ("lt", "més petit que"),
+    ("ge", "cli.settings.bound.ge"),
+    ("gt", "cli.settings.bound.gt"),
+    ("le", "cli.settings.bound.le"),
+    ("lt", "cli.settings.bound.lt"),
 )
+"""The bounds of a field and the key of their text."""
 _BOUND_ERRORS: Final = frozenset(
     {"greater_than_equal", "greater_than", "less_than_equal", "less_than"}
 )
 
 
 def _range(field: object) -> str:
-    """The bounds of a :class:`Settings` field in Catalan (``com a mínim 1 i com a
-    màxim 8760``), or ``""``."""
+    """The bounds of a :class:`Settings` field in the language in force (``at least 1
+    and at most 8760``), or ``""``."""
     info = Settings.model_fields.get(str(field))
     parts = [
-        f"{text} {_number(getattr(item, key))}"
+        t(text, value=_number(getattr(item, key)))
         for item in (info.metadata if info is not None else ())
         for key, text in _BOUNDS
         if getattr(item, key, None) is not None
     ]
-    return " i ".join(parts)
+    if len(parts) < 2:
+        return "".join(parts)
+    return t("cli.both", first=", ".join(parts[:-1]), last=parts[-1])
 
 
 def _reason(error: ErrorDetails) -> str:
-    """Why a value is invalid, in Catalan (pydantic's own messages are English)."""
+    """Why a value is invalid, in the language in force (pydantic's own messages are
+    English)."""
     kind, ctx = error["type"], error.get("ctx") or {}
     if kind in _BOUND_ERRORS and (bounds := _range(error["loc"][0])):
-        return f"ha de ser {bounds}"
+        return t("cli.settings.must_be", what=bounds)
     if kind in ("int_parsing", "int_from_float", "int_type"):
-        return "ha de ser un nombre enter"
+        return t("cli.settings.integer")
     if kind in ("float_parsing", "float_type", "finite_number"):
-        return "ha de ser un número"
+        return t("cli.settings.number")
     if kind in ("bool_parsing", "bool_type"):
-        return "ha de ser true o false"
+        return t("cli.settings.boolean")
     if kind == "literal_error" and (options := _QUOTED_RE.findall(str(ctx.get("expected")))):
-        return f"ha de ser {_alternatives(options)}"
+        return t("cli.settings.must_be", what=_alternatives(options))
     if kind == "value_error" and ctx.get("error") is not None:
-        return str(ctx["error"])  # our own validators' messages are Catalan
-    return "no és vàlid"
+        return str(ctx["error"])  # our own validators' messages, already in this language
+    return t("cli.settings.invalid")
 
 
 def _shown(error: ErrorDetails, variable: str) -> str:
-    """`` (valor: «…»)`` for a value read from the environment (never for keys)."""
+    """`` (value: "…")`` for a value read from the environment (never for keys)."""
     value = error.get("input")
     if not isinstance(value, str) or "KEY" in variable:
         return ""
     if len(value) > _SHOWN_VALUE_CHARS:
         value = value[: _SHOWN_VALUE_CHARS - 1] + "…"
-    return f" (valor: «{value}»)"
+    return f" ({t('cli.settings.value', value=value)})"
 
 
 def describe_invalid_settings(exc: ValidationError | SettingsError) -> str:
-    """The invalid ``AOS_*`` variables, one per line, in Catalan."""
-    lines = [INVALID_SETTINGS]
+    """The invalid ``AOS_*`` variables, one per line, in the language in force."""
+    lines = [t("cli.settings.invalid_title")]
     if isinstance(exc, SettingsError):
         # pydantic-settings reads lists (AOS_EXTRA_ORIGINS) as JSON.
         match = _FIELD_RE.search(str(exc))
         variable = _variable(match.group(1)) if match else "AOS_EXTRA_ORIGINS"
-        lines.append(
-            f"- {variable}: ha de ser JSON; per exemple, una llista d'orígens s'escriu "
-            f"{variable}='[\"http://localhost:5173\"]'."
-        )
+        example = f"{variable}='[\"http://localhost:5173\"]'"
+        lines.append(f"- {variable}: {t('cli.settings.json', example=example)}")
         return "\n".join(lines)
     for error in exc.errors():
         variable = _variable(error["loc"][0]) if error["loc"] else "?"
@@ -266,7 +252,7 @@ def _with_store(settings: Settings, command: Callable[[SqliteStore], Awaitable[i
         print(str(exc), file=sys.stderr)
         return 1
     except (OSError, sqlite3.Error) as exc:
-        print(f"No s'ha pogut obrir la base de dades {settings.db_path}: {exc}", file=sys.stderr)
+        print(t("cli.db_unavailable", path=settings.db_path, error=exc), file=sys.stderr)
         return 1
 
 
@@ -314,27 +300,24 @@ def log_config(level: str) -> dict[str, Any]:
 
 
 def _dev_hints(settings: Settings, out: Output) -> None:
-    out("Mode de desenvolupament: registre detallat.")
+    out(t("cli.serve.dev"))
     origin = urlsplit(settings.public_origin)
     if settings.secure_cookies and origin.scheme == "http":
-        out(
-            "Avís: AOS_PUBLIC_ORIGIN és http:// i les cookies són segures. Si el navegador "
-            "no desa la sessió, defineix AOS_SECURE_COOKIES=false (només en local)."
-        )
+        out(t("cli.serve.http_secure_cookies"))
     if "http://localhost:5173" not in settings.allowed_origins:
-        out(
-            "Si fas servir el servidor de Vite (npm run dev), afegeix el seu origen: "
-            "AOS_EXTRA_ORIGINS='[\"http://localhost:5173\"]'."
-        )
+        out(t("cli.serve.vite_origin", example="AOS_EXTRA_ORIGINS='[\"http://localhost:5173\"]'"))
 
 
 def serve(settings: Settings, *, host: str | None, port: int | None, dev: bool) -> int:
-    """Run uvicorn with the app factory until interrupted."""
+    """Run uvicorn with the app factory until interrupted. Its own output speaks the
+    language of the command line; the server, the language of each client (and of none:
+    :data:`~agentic_os.i18n.DEFAULT_LANG`, for what no client caused)."""
     import uvicorn
 
     level = "debug" if dev else settings.log_level  # checked by Settings
     if dev:
         _dev_hints(settings, print)
+    i18n.set_lang(None)
     uvicorn.run(
         "agentic_os.server.app:create_app",
         factory=True,
@@ -374,7 +357,7 @@ class _Report:
 
     def warn(self, message: str) -> None:
         self.warnings += 1
-        self.out(f"[AVÍS] {message}")
+        self.out(f"{t('cli.doctor.warning_tag')} {message}")
 
     def fail(self, message: str) -> None:
         self.critical += 1
@@ -387,40 +370,40 @@ class _Report:
 def _check_config(settings: Settings, report: _Report) -> None:
     origin = urlsplit(settings.public_origin)
     if origin.scheme not in ("http", "https") or not origin.hostname:
-        report.fail(f"AOS_PUBLIC_ORIGIN no és un origen vàlid: «{settings.public_origin}».")
+        report.fail(t("cli.doctor.bad_origin", origin=settings.public_origin))
         return
-    report.ok(f"Origen públic: {settings.public_origin}")
+    report.ok(t("cli.doctor.origin", origin=settings.public_origin))
     if settings.secure_cookies and origin.scheme == "http" and origin.hostname not in LOCAL_HOSTS:
-        report.warn(
-            "L'origen és http:// però les cookies són segures: el navegador no desarà la "
-            "sessió. Fes servir https o, només en local, AOS_SECURE_COOKIES=false."
-        )
+        report.warn(t("cli.doctor.http_secure_cookies"))
     if not settings.secure_cookies:
-        report.warn("AOS_SECURE_COOKIES=false: correcte només per a desenvolupament local.")
+        report.warn(t("cli.doctor.insecure_cookies"))
 
 
 def _check_permissions(path: str, mode: int, expected: int, report: _Report) -> None:
     if mode & 0o077:
         report.warn(
-            f"Permisos massa oberts a {path} ({mode:04o}); recomanat {expected:04o}: "
-            f"chmod {expected:o} {path}"
+            t(
+                "cli.doctor.permissions",
+                path=path,
+                mode=f"{mode:04o}",
+                expected=f"{expected:04o}",
+                command=f"chmod {expected:o} {path}",
+            )
         )
 
 
 def _check_data_dir(settings: Settings, report: _Report) -> None:
     data_dir = settings.data_dir
     if not data_dir.exists():
-        report.warn(
-            f"El directori de dades {data_dir} no existeix: es crearà amb «agentic-os init»."
-        )
+        report.warn(t("cli.doctor.no_data_dir", path=data_dir))
         return
     if not data_dir.is_dir():
-        report.fail(f"{data_dir} no és un directori.")
+        report.fail(t("cli.doctor.not_a_directory", path=data_dir))
         return
     if not os.access(data_dir, os.W_OK | os.X_OK):
-        report.fail(f"No es pot escriure al directori de dades {data_dir}.")
+        report.fail(t("cli.doctor.data_dir_read_only", path=data_dir))
         return
-    report.ok(f"Directori de dades: {data_dir.resolve()}")
+    report.ok(t("cli.doctor.data_dir", path=data_dir.resolve()))
     _check_permissions(str(data_dir), stat.S_IMODE(data_dir.stat().st_mode), 0o700, report)
     db = settings.db_path
     if db.exists():
@@ -439,7 +422,7 @@ async def _check_database(settings: Settings, report: _Report) -> _Stored:
     """Check the owner; returns the stored settings (the defaults without a database)."""
     defaults = _Stored(RuntimeSettings(), manual_rate(RuntimeSettings().fx.eur_per_usd))
     if not settings.db_path.exists():
-        report.fail("Encara no hi ha base de dades ni propietari: executa «agentic-os init».")
+        report.fail(t("cli.doctor.no_database"))
         return defaults
     try:
         async with await SqliteStore.open(settings.db_path) as store:
@@ -449,32 +432,31 @@ async def _check_database(settings: Settings, report: _Report) -> _Stored:
         report.fail(str(exc))
         return defaults
     except Exception as exc:
-        report.fail(f"No s'ha pogut obrir la base de dades: {exc}")
+        report.fail(t("cli.doctor.database_failed", error=exc))
         return defaults
     if owner is None:
-        report.fail("No hi ha cap propietari configurat: executa «agentic-os init».")
+        report.fail(t("cli.doctor.no_owner"))
     else:
-        report.ok("Propietari configurat (contrasenya i TOTP).")
+        report.ok(t("cli.doctor.owner"))
     return stored
 
 
 def _decimal(value: float) -> str:
-    """Catalan decimal notation with 2 to 4 decimals (``0,86``, ``0,8547``)."""
-    whole, _, decimals = f"{value:.4f}".rstrip("0").partition(".")
-    return f"{whole},{decimals.ljust(2, '0')}"
+    """``value`` with 2 to 4 decimals, as the web writes numbers in the language in force
+    (``0,86`` and ``0,8547`` in Catalan)."""
+    decimals = f"{value:.4f}".rstrip("0").partition(".")[2]
+    return number(value, max(2, len(decimals)))
 
 
 def _report_fx(stored: _Stored, report: _Report) -> None:
-    rate = f"1 $ = {_decimal(stored.fx.eur_per_usd)} €"
+    rate = t("cli.doctor.fx_rate", rate=_decimal(stored.fx.eur_per_usd))
     if stored.fx.source == "ecb" and stored.fx.as_of is not None:
-        report.ok(f"Tipus de canvi del BCE del {stored.fx.as_of.strftime('%d/%m/%Y')}: {rate}.")
+        day = stored.fx.as_of.strftime("%d/%m/%Y")
+        report.ok(t("cli.doctor.fx_ecb", date=day, rate=rate))
     elif stored.runtime.fx.mode == "manual":
-        report.ok(f"Tipus de canvi manual: {rate}.")
+        report.ok(t("cli.doctor.fx_manual", rate=rate))
     else:
-        report.skip(
-            f"Tipus de canvi manual de reserva: {rate} (encara no hi ha cap tipus recent del "
-            "BCE; el servidor el baixa en arrencar)."
-        )
+        report.skip(t("cli.doctor.fx_fallback", rate=rate))
 
 
 def _check_web(settings: Settings, report: _Report) -> None:
@@ -482,12 +464,9 @@ def _check_web(settings: Settings, report: _Report) -> None:
 
     dist = find_web_dist(settings)
     if dist is None:
-        report.warn(
-            "No s'ha trobat la interfície web compilada: executa «npm ci && npm run build» a "
-            "web/ o defineix AOS_WEB_DIST."
-        )
+        report.warn(t("cli.doctor.no_web"))
     else:
-        report.ok(f"Interfície web: {dist}")
+        report.ok(t("cli.doctor.web", path=dist))
 
 
 async def cli_version(path: str, env: Mapping[str, str]) -> str | None:
@@ -528,30 +507,37 @@ async def _check_cli(
     env: Callable[[], Mapping[str, str]],
 ) -> None:
     if mode != "cli":
-        report.skip(f"CLI de {label}: no cal (mode {mode}).")
+        report.skip(t("cli.doctor.cli_not_needed", label=label, mode=mode))
         return
     resolved = shutil.which(path)
     if resolved is None:
-        report.fail(
-            f"No es troba la CLI de {label} («{path}»): instal·la-la o defineix {variable}."
-        )
+        report.fail(t("cli.doctor.cli_missing", label=label, path=path, variable=variable))
         return
     version = await cli_version(resolved, env())
     if version is None:
-        report.fail(f"La CLI de {label} ({resolved}) no respon a --version.")
+        report.fail(t("cli.doctor.cli_silent", label=label, path=resolved))
     else:
-        report.ok(f"CLI de {label}: {resolved} ({version})")
+        report.ok(t("cli.doctor.cli", label=label, path=resolved, version=version))
 
 
 def _describe_limits(status: ProviderStatus, report: _Report) -> None:
     for limit in status.limits:
         used = "?" if limit.used_percent is None else f"{limit.used_percent:.0f}%"
-        resets = (
-            f", es renova el {limit.resets_at.strftime('%Y-%m-%d %H:%M')} UTC"
-            if limit.resets_at
-            else ""
-        )
-        report.detail(f"Límit de {limit.window}: {used} usat{resets} ({limit.status}).")
+        if limit.resets_at:
+            renews = limit.resets_at.strftime("%Y-%m-%d %H:%M")
+            report.detail(
+                t(
+                    "cli.doctor.limit_renews",
+                    window=limit.window,
+                    used=used,
+                    date=renews,
+                    status=limit.status,
+                )
+            )
+        else:
+            report.detail(
+                t("cli.doctor.limit", window=limit.window, used=used, status=limit.status)
+            )
 
 
 async def _provider_status(provider: Provider, timeout: float) -> ProviderStatus:
@@ -569,10 +555,16 @@ def _describe_models(
     from agentic_os.server.catalog import effective_models
 
     default, fast = effective_models(agent, provider, provider_model, runtime)
-    chosen = " (triat al tauler)" if runtime.models.get(agent) else ""
-    chosen_fast = " (triat al tauler)" if runtime.fast_models.get(agent) else ""
+    chosen = f" {t('cli.doctor.chosen')}" if runtime.models.get(agent) else ""
+    chosen_fast = f" {t('cli.doctor.chosen')}" if runtime.fast_models.get(agent) else ""
     report.detail(
-        f"Model per defecte: {default or '?'}{chosen}; per als resums: {fast}{chosen_fast}."
+        t(
+            "cli.doctor.models",
+            default=default or "?",
+            chosen=chosen,
+            fast=fast,
+            chosen_fast=chosen_fast,
+        )
     )
 
 
@@ -587,12 +579,20 @@ def _report_provider(
     label = AGENT_LABELS[agent]
     if isinstance(result, BaseException):
         if isinstance(result, TimeoutError):
-            report.fail(f"{label} (mode {provider.mode}): el proveïdor no respon.")
+            report.fail(t("cli.doctor.provider_timeout", label=label, mode=provider.mode))
         else:
-            report.fail(f"{label} (mode {provider.mode}): error en consultar l'estat: {result}")
+            report.fail(
+                t("cli.doctor.provider_failed", label=label, mode=provider.mode, error=result)
+            )
         _describe_models(agent, provider, "", settings, runtime, report)
         return
-    line = f"{label} (mode {result.mode}, model {result.model or '?'}): {result.detail}"
+    line = t(
+        "cli.doctor.provider",
+        label=label,
+        mode=result.mode,
+        model=result.model or "?",
+        detail=str(result.detail),
+    )
     if result.available:
         report.ok(line)
     else:
@@ -617,10 +617,7 @@ def _own_providers(
     try:
         state_dir = Path(tempfile.mkdtemp(prefix="aos-doctor-codex-"))
     except OSError as exc:
-        report.fail(
-            f"{AGENT_LABELS['chatgpt']} (mode cli): no s'ha pogut crear un directori temporal "
-            f"per a l'estat de Codex ({exc})."
-        )
+        report.fail(t("cli.doctor.codex_state_dir", label=AGENT_LABELS["chatgpt"], error=exc))
         return {"claude": build_provider("claude", settings.claude_mode, settings)}, None
     try:
         return build_providers(settings, codex_state_dir=state_dir), state_dir
@@ -640,7 +637,7 @@ async def run_doctor(
     ``providers`` replaces the ones built from ``settings`` (and is not closed). The
     ones doctor builds never touch the running server's Codex state directory."""
     report = _Report(out)
-    out(f"ClaudeGPT OS {__version__}: diagnosi")
+    out(t("cli.doctor.title", version=__version__))
     _check_config(settings, report)
     _check_data_dir(settings, report)
     stored = await _check_database(settings, report)
@@ -690,12 +687,12 @@ async def run_doctor(
 
     out("")
     if report.critical:
-        problems = "problema crític" if report.critical == 1 else "problemes crítics"
-        out(f"Hi ha {report.critical} {problems}.")
+        form = "one" if report.critical == 1 else "other"
+        out(t(f"cli.doctor.critical_{form}", count=number(report.critical)))
         return 1
     if report.warnings:
-        warnings = "avís" if report.warnings == 1 else "avisos"
-        out(f"Tot correcte ({report.warnings} {warnings}).")
+        form = "one" if report.warnings == 1 else "other"
+        out(t(f"cli.doctor.all_good_warnings_{form}", count=number(report.warnings)))
     else:
-        out("Tot correcte.")
+        out(t("cli.doctor.all_good"))
     return 0

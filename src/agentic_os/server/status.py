@@ -3,6 +3,10 @@
 Statuses are gathered concurrently and waited for at most a short timeout. A slow
 check is not cancelled: it keeps running in the background (providers cache their
 own status) and the last known status, or a placeholder, is answered meanwhile.
+
+Every client reads the same statuses, so a ``detail`` is a :func:`~agentic_os.i18n.lazy`
+text (the providers' and the placeholders' here), made in the language of each client by
+:func:`status_to_wire`.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from collections.abc import Mapping
 from typing import Final
 
 from agentic_os.domain import AGENTS, AgentName
+from agentic_os.i18n import Lazy, lazy
 from agentic_os.providers.base import Provider, ProviderStatus
 from agentic_os.server.tasks import cancel_and_wait
 from agentic_os.storage import format_ts
@@ -47,7 +52,7 @@ def status_to_wire(status: ProviderStatus) -> Wire:
     }
 
 
-def _placeholder(agent: AgentName, provider: Provider, detail: str) -> ProviderStatus:
+def _placeholder(agent: AgentName, provider: Provider, detail: Lazy) -> ProviderStatus:
     return ProviderStatus(agent=agent, mode=provider.mode, available=False, model="", detail=detail)
 
 
@@ -85,7 +90,7 @@ class ProviderMonitor:
             else:
                 result.append(
                     self._last.get(agent)
-                    or _placeholder(agent, self._providers[agent], "S'està comprovant l'estat…")
+                    or _placeholder(agent, self._providers[agent], lazy("server.status.checking"))
                 )
         return result
 
@@ -112,9 +117,9 @@ class ProviderMonitor:
             status = await asyncio.wait_for(provider.status(), self._hard_timeout)
         except TimeoutError:
             logger.warning("Status check of %s timed out", agent)
-            status = _placeholder(agent, provider, "El proveïdor no respon.")
+            status = _placeholder(agent, provider, lazy("server.status.timeout"))
         except Exception:
             logger.warning("Status check of %s failed", agent, exc_info=True)
-            status = _placeholder(agent, provider, "No s'ha pogut consultar l'estat del proveïdor.")
+            status = _placeholder(agent, provider, lazy("server.status.failed"))
         self._last[agent] = status
         return status
