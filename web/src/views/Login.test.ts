@@ -206,7 +206,7 @@ describe('the login screen in English and Spanish', () => {
     expect(shown(root, '.error')).toBe('Escribe la contraseña.');
   });
 
-  it('says the password or the code is wrong, in Spanish', async () => {
+  it('says the password or the code is wrong, in Spanish and in English', async () => {
     const fetch = server.fetch;
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
       input === '/api/auth/login'
@@ -226,6 +226,8 @@ describe('the login screen in English and Spanish', () => {
       expect(shown(root, '.error')).toBe('La contraseña o el código no son correctos.');
     });
     expect(e.app.auth).toBe('login');
+    pick(root, 'en'); // the wording the deployment guide quotes
+    expect(shown(root, '.error')).toBe('The password or code is incorrect.');
   });
 
   it('the lock screen, in Spanish', async () => {
