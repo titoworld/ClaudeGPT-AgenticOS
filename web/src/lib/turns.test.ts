@@ -723,7 +723,7 @@ describe('keptAnswers: revisions that keep the previous answer', () => {
   });
 });
 
-describe('the attachments of a question (docs/PROTOCOL.md «Adjunts»)', () => {
+describe('the attachments of a question (docs/PROTOCOL.md "Attachments")', () => {
   const attachment = (id: number, partial: Partial<Attachment> = {}): Attachment => ({
     id,
     name: `fitxer-${id}.png`,

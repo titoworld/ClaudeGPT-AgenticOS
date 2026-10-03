@@ -1,4 +1,4 @@
-// Files attached to a question (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md).
+// Files attached to a question (docs/PROTOCOL.md "Attachments", docs/adr/0009-attachments.md).
 //
 // - What the server would accept, checked in the browser with the server's own rules
 //   and messages (src/agentic_os/attachments.py), in the language of the interface

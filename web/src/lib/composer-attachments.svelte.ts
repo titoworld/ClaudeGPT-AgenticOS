@@ -1,4 +1,4 @@
-// The attachments of the composer (docs/PROTOCOL.md «Adjunts»). Each file attached is
+// The attachments of the composer (docs/PROTOCOL.md "Attachments"). Each file attached is
 // checked as the server would check it, prepared and uploaded, then its thumbnail
 // (lib/attachment-work.ts, loaded with the first file), before it is ready; its card
 // shows each state, and an error for one refused (in the language of the interface).

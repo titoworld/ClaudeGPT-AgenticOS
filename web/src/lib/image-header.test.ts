@@ -1,5 +1,5 @@
 // The header of an image as it is stored, read in the browser before its upload
-// (docs/PROTOCOL.md «Adjunts»): the size the server reads (src/agentic_os/attachments.py)
+// (docs/PROTOCOL.md "Attachments"): the size the server reads (src/agentic_os/attachments.py)
 // and a JPEG's EXIF orientation, as the browser reads it. The browser shows a photo as its
 // orientation says, but the models get the pixels as stored: lib/media.ts turns an image
 // stored otherwise than it is shown upright before uploading it.

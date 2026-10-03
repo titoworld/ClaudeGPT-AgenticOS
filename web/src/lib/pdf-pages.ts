@@ -1,4 +1,4 @@
-// The pages of an attached PDF as the UI names them (docs/PROTOCOL.md «Adjunts»,
+// The pages of an attached PDF as the UI names them (docs/PROTOCOL.md "Attachments",
 // docs/adr/0009-attachments.md): the warnings of the server's analysis on its card, Claude's
 // check of its text for ChatGPT in the turn, and the badge on ChatGPT's messages that
 // says how it read it. ChatGPT with the subscription (Codex) cannot open a PDF: it reads

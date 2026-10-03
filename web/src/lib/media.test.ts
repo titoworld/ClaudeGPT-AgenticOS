@@ -1,4 +1,4 @@
-// The images and PDFs the browser prepares before an upload (docs/PROTOCOL.md «Adjunts»):
+// The images and PDFs the browser prepares before an upload (docs/PROTOCOL.md "Attachments"):
 // images larger than the models use are downscaled (WebP, quality 0.9; GIF as they are),
 // photos stored turned (EXIF orientation) are turned upright, and every image or PDF gets
 // a small thumbnail within the server's limits. jsdom has no canvas: the decoder and the

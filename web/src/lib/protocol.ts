@@ -4,7 +4,7 @@
 export type Agent = 'claude' | 'chatgpt';
 export const AGENTS: readonly Agent[] = ['claude', 'chatgpt'];
 /**
- * refine («Perfecciona», docs/adr/0010-refine-mode.md): both answer, the editor
+ * refine (Refine, docs/adr/0010-refine-mode.md): both answer, the editor
  * merges the answers into one document, and round after round both review it and the
  * editor writes its next version, until the owner stops it or a limit does.
  */
@@ -122,7 +122,7 @@ export interface DebateOptions {
   synthesizer: Agent;
 }
 
-/** Options of a refine turn («Perfecciona», ADR 0010); the server validates the ranges. */
+/** Options of a refine turn (Refine, ADR 0010); the server validates the ranges. */
 export interface RefineOptions {
   /** Rounds that write a version, the merge of round 1 included: 2-50. */
   max_rounds: number;
@@ -247,7 +247,7 @@ export type AttachmentKind = 'image' | 'pdf' | 'text';
 
 /**
  * The warnings of the server's analysis of an attached PDF's pages (docs/PROTOCOL.md
- * «Adjunts»), by kind: page numbers, from 1. Warnings, not verdicts.
+ * "Attachments"), by kind: page numbers, from 1. Warnings, not verdicts.
  */
 export interface PdfNotes {
   /** Pages without text: scans, or text drawn as an image. */
@@ -258,7 +258,7 @@ export interface PdfNotes {
   hidden: number[];
 }
 
-/** A file attached to a question (docs/PROTOCOL.md «Adjunts»). */
+/** A file attached to a question (docs/PROTOCOL.md "Attachments"). */
 export interface Attachment {
   id: number;
   /** Display name, cleaned by the server (no path, no control or invisible characters). */
@@ -307,7 +307,7 @@ export interface PdfReading {
   hidden_pages: number[];
   /** Pages nobody checked: ChatGPT read their extracted text as it is. */
   unchecked_pages: number[];
-  /** Why pages remain unchecked (Catalan); null when none does. */
+  /** Why pages remain unchecked, in the language of the turn; null when none does. */
   reason: string | null;
 }
 
@@ -511,7 +511,7 @@ export type ClientMessage =
       /** Ids of uploaded attachments, in order: at most MAX_ATTACHMENTS, each once. */
       attachments?: number[];
     }
-  /** «Atura en acabar la ronda»: a refine turn ends after the round in course (turn.stopping answers). */
+  /** "Stop after this round": a refine turn ends after the round in course (turn.stopping answers). */
   | { type: 'turn.stop'; request_id: string }
   | { type: 'turn.cancel'; request_id: string }
   | { type: 'turn.subscribe'; request_id: string; after_seq: number }
@@ -551,7 +551,7 @@ export type TurnEvent =
       reused: boolean;
       /** What this turn's calls for the PDF billed, with the cost (null while checking, or reused). */
       usage: Usage | null;
-      /** Why pages remain unchecked (Catalan); null when none does. */
+      /** Why pages remain unchecked, in the language of the turn; null when none does. */
       reason: string | null;
     })
   | (TurnEventBase & {

@@ -1,4 +1,4 @@
-// What the browser checks before it uploads an attachment (docs/PROTOCOL.md «Adjunts»):
+// What the browser checks before it uploads an attachment (docs/PROTOCOL.md "Attachments"):
 // the type from the content as the server sniffs it, its messages (in Catalan, and in
 // English and Spanish at the end), the limits, the downscale of large images and the
 // token estimate shown on each card.

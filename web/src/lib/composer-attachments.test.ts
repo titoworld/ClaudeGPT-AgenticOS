@@ -1,4 +1,4 @@
-// The attachments of the composer (docs/PROTOCOL.md «Adjunts»): each file is checked as
+// The attachments of the composer (docs/PROTOCOL.md "Attachments"): each file is checked as
 // the server would check it, prepared (large images downscaled, a thumbnail made) and
 // uploaded, with its state on its card: uploading, ready or an error (in Catalan, and at
 // the end in Spanish and English). A file the server would refuse is never uploaded; one

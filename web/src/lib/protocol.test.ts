@@ -1,4 +1,4 @@
-// The wire of Claude's check of the PDFs for ChatGPT (docs/PROTOCOL.md «Adjunts», P7b):
+// The wire of Claude's check of the PDFs for ChatGPT (docs/PROTOCOL.md "Attachments", P7b):
 // the types of protocol.ts carry what the server sends (orchestrator/events.py
 // PdfCheckChanged and PdfReading, pdf_facts.PdfNotes.to_wire) and what the protocol
 // documents. The type assertions are checked with the rest of the types (npm run check);
@@ -210,7 +210,7 @@ describe('the wire of the refine mode («Perfecciona», ADR 0010)', () => {
 
   it("each message's meta.refine, as its stream.completed brings it", async () => {
     expectTypeOf<Extract<TurnEvent, { type: 'stream.completed' }>['refine']>().toEqualTypeOf<RefineMeta | undefined>();
-    // As the engine stores them (docs/PROTOCOL.md «Metadades de missatge»).
+    // As the engine stores them (docs/PROTOCOL.md "Message metadata").
     const review = { role: 'review', score: 70, unchanged: false, changes: [{ kind: 'defect', text: 'x' }] } satisfies RefineMeta;
     const version = {
       role: 'version',

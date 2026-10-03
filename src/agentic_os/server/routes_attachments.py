@@ -1,4 +1,4 @@
-"""``/api/attachments`` (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md): upload,
+"""``/api/attachments`` (docs/PROTOCOL.md "Attachments", docs/adr/0009-attachments.md): upload,
 metadata, content, thumbnail and deletion of the files attached to questions.
 
 - Every route needs the session (401), and the ones that change something an allowed

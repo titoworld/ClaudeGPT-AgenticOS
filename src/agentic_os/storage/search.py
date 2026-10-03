@@ -1,4 +1,4 @@
-"""Searching conversations by title (docs/PROTOCOL.md, «Llista i cerca de converses»).
+"""Searching conversations by title (docs/PROTOCOL.md, "Listing and searching conversations").
 
 A title matches when it contains the searched text, without telling case or accents
 apart: both sides are folded the same way (:func:`fold`), the titles by the SQL

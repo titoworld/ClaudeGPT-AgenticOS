@@ -1,4 +1,4 @@
-// Images and PDFs prepared in the browser before their upload (docs/PROTOCOL.md «Adjunts»):
+// Images and PDFs prepared in the browser before their upload (docs/PROTOCOL.md "Attachments"):
 //
 // - An image larger than the models use (DOWNSCALE_EDGE) is downscaled in a canvas and
 //   encoded as WebP (quality 0.9): the same for the models, far less to upload. A GIF

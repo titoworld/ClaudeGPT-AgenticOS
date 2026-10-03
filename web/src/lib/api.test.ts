@@ -168,7 +168,7 @@ describe('the background marker', () => {
   });
 });
 
-describe('attachments (docs/PROTOCOL.md «Adjunts»)', () => {
+describe('attachments (docs/PROTOCOL.md "Attachments")', () => {
   const ATTACHMENT: Attachment = {
     id: 12,
     name: 'informe final.pdf',

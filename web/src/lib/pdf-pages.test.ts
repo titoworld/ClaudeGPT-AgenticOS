@@ -1,4 +1,4 @@
-// What the UI says of an attached PDF's pages (docs/PROTOCOL.md «Adjunts», docs/adr/0009-attachments.md):
+// What the UI says of an attached PDF's pages (docs/PROTOCOL.md "Attachments", docs/adr/0009-attachments.md):
 // compact page lists, the warnings of the server's analysis on its card, Claude's check
 // of its text for ChatGPT in the turn, and the badge on ChatGPT's messages that says how
 // it read it. In Catalan, and at the end in English and Spanish.
