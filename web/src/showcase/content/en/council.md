@@ -22,8 +22,8 @@ With 40 GB and a 10-minute window, the safest option is **`pg_upgrade` with hard
 
 | Option | Downtime | Rollback | Risk |
 | --- | --- | --- | --- |
-| `pg_upgrade --link` | 3–5 min | Only from a backup | Low |
-| Logical replication | < 1 min | Yes: 14 stays live | Medium |
+| `pg_upgrade --link` | 3–5 min | Backup only | Low |
+| Logical replication | < 1 min | Yes, 14 stays up | Medium |
 | `pg_dump` + `pg_restore` | 30–60 min | Yes | Low |
 
 **Steps with logical replication**

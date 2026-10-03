@@ -3,12 +3,12 @@
 // to look at the interface without a backend or spending tokens.
 // `?lang=` picks the language of the interface and of the examples: en (default), es or ca.
 // `?shot=` picks the view:
-//   inici        a new conversation (the four modes)
-//   consell      a council debate that reached consensus (default)
-//   adjunts      a duel over a PDF, with Claude's check for ChatGPT on the subscription
-//   perfecciona  a Refine turn in its fourth round
-//   tauler       the usage dashboard
-//   configuracio the settings, over the council
+//   start        a new conversation (the four modes)
+//   council      a council debate that reached consensus (default)
+//   attachments  a duel over a PDF, with Claude's check for ChatGPT on the subscription
+//   refine       a Refine turn in its fourth round
+//   dashboard    the usage dashboard
+//   settings     the settings, over the council
 // `?narrow` opens the sidebar as on a phone (use a narrow window). The live turns replay
 // their events at once; nothing streams after the page has loaded.
 
@@ -36,16 +36,16 @@ import { live, ShowcaseSocket, showcaseApi } from './server';
 const FILES = import.meta.glob<string>(['./content/*/*.pdf', './content/*/*.webp'], { query: '?url', import: 'default', eager: true });
 
 const ROUTES: Record<string, string> = {
-  inici: '#/',
-  consell: `#/c/${DEBATE_ID}`,
-  adjunts: `#/c/${PDF_ID}`,
-  perfecciona: `#/c/${REFINE_ID}`,
-  tauler: '#/tauler',
-  configuracio: `#/c/${DEBATE_ID}`,
+  start: '#/',
+  council: `#/c/${DEBATE_ID}`,
+  attachments: `#/c/${PDF_ID}`,
+  refine: `#/c/${REFINE_ID}`,
+  dashboard: '#/tauler',
+  settings: `#/c/${DEBATE_ID}`,
 };
 
 const params = new URLSearchParams(location.search);
-const shot = params.get('shot') ?? 'consell';
+const shot = params.get('shot') ?? 'council';
 const route = ROUTES[shot];
 if (!route) throw new Error(`Unknown shot «${shot}»: ${Object.keys(ROUTES).join(', ')}`);
 
@@ -127,5 +127,5 @@ function when(ready: () => boolean, then: () => void): void {
   }, 50);
 }
 
-if (shot === 'configuracio') when(() => app.settingsStatus === 'ready', () => (app.settingsOpen = true));
+if (shot === 'settings') when(() => app.settingsStatus === 'ready', () => (app.settingsOpen = true));
 if (params.has('narrow')) when(() => app.auth === 'ready', () => (app.sidebarOpen = true));

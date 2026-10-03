@@ -157,7 +157,7 @@
 
   .limit {
     display: grid;
-    grid-template-columns: 1.6rem 1fr 2.4rem 3.1rem;
+    grid-template-columns: 2.2rem 1fr 2.4rem 3.1rem;
     align-items: center;
     gap: 0.4rem;
     font-size: 0.7rem;
@@ -207,10 +207,11 @@
     cursor: help;
   }
 
-  /* Amounts under the bar, aligned with it (or next to "mes" when there is no bar). */
+  /* Amounts under the bar, aligned with it (or next to "month" when there is no bar). The
+     first column fits the longest window label of the three languages ("month"). */
   .caption {
     display: grid;
-    grid-template-columns: 1.6rem minmax(0, 1fr);
+    grid-template-columns: 2.2rem minmax(0, 1fr);
     gap: 0.4rem;
     font-size: 0.7rem;
     color: var(--text-muted);

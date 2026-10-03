@@ -122,7 +122,7 @@ With `AOS_CLAUDE_MODE=cli` it uses the `claude` CLI you have installed and logge
 | Types (strict) | `uv run mypy` |
 | Frontend: check, tests, build | `cd web && npm run check && npm test && npm run build` |
 | Frontend with hot reload | `cd web && npm run dev`, with the backend on `uv run agentic-os serve --dev` and `AOS_EXTRA_ORIGINS='["http://localhost:5173"]'` |
-| Showcase with example conversations, without a backend | `cd web && npm run dev` and open `http://localhost:5173/src/showcase/index.html?shot=consell` |
+| Showcase with example conversations, without a backend | `cd web && npm run dev` and open `http://localhost:5173/src/showcase/index.html?shot=council` |
 
 The frontend tests (vitest) cover the logic and also the components, which are mounted in jsdom with `web/src/lib/test-render.ts`.
 
@@ -130,7 +130,7 @@ The backend tests also run on macOS (those of the deployment scripts only run on
 
 The interface's texts live in `web/src/lib/i18n/areas/` and the server's in `src/agentic_os/locales/`, in English, Spanish and Catalan ([ADR 0011](docs/adr/0011-internationalization.md)). The tests check the Catalan texts by default, and the i18n tests check the other two languages.
 
-The showcase (`web/src/showcase/`) mounts the whole app against a fake server with example conversations: a Council, a Duel over a PDF and a Refine turn in progress. `?shot=` picks the view: `inici` (a new conversation), `consell` (the Council), `adjunts` (the attachments), `perfecciona` (Refine), `tauler` (the dashboard) or `configuracio` (the settings); `?lang=` picks the language (`en`, `es` or `ca`). Use it to review the interface without a backend and to retake this README's screenshots.
+The showcase (`web/src/showcase/`) mounts the whole app against a fake server with example conversations: a Council, a Duel over a PDF and a Refine turn in progress. `?shot=` picks the view: `start` (a new conversation), `council` (the Council), `attachments` (the attachments), `refine` (Refine), `dashboard` (the dashboard) or `settings` (the settings); `?lang=` picks the language (`en`, `es` or `ca`). Use it to review the interface without a backend and to retake this README's screenshots.
 
 GitHub Actions CI runs the Python checks (3.12 and 3.13), the frontend checks and the Docker image build on every pull request.
 
