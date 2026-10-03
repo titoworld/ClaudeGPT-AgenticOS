@@ -1,25 +1,25 @@
-# 0001. Python con uv como base del proyecto
+# 0001. Python with uv as the project's base
 
-- Estado: Aceptado
-- Fecha: 2026-09-27
+- Status: Accepted
+- Date: 2026-09-27
 
-## Contexto
+## Context
 
-El proyecto necesita un lenguaje principal antes de definir la arquitectura, para disponer desde el principio de tests, lint y CI. Se desarrollará sobre todo con Claude Code en la web, así que cada sesión tiene que poder instalar dependencias y validar cambios sin intervención manual.
+The project needs a main language before the architecture is defined, so that it has tests, lint and CI from the start. It will be developed mostly with Claude Code on the web, so every session has to be able to install dependencies and validate changes without manual intervention.
 
-## Decisión
+## Decision
 
-- Python >= 3.12 (3.13 para desarrollo, fijado en `.python-version`), con layout `src/` y paquete `agentic_os`.
-- uv para entorno, dependencias y lockfile (`uv.lock`).
-- pytest para tests, ruff para lint y formato, mypy en modo estricto para tipos.
-- GitHub Actions ejecuta las cuatro comprobaciones con Python 3.12 y 3.13.
+- Python >= 3.12 (3.13 for development, pinned in `.python-version`), with a `src/` layout and the `agentic_os` package.
+- uv for the environment, the dependencies and the lockfile (`uv.lock`).
+- pytest for tests, ruff for lint and formatting, mypy in strict mode for types.
+- GitHub Actions runs the four checks with Python 3.12 and 3.13.
 
-## Alternativas consideradas
+## Alternatives considered
 
-- **TypeScript:** buen encaje si la interfaz principal fuera web, pero el ecosistema de agentes e IA es más amplio en Python.
-- **pip + venv / Poetry:** uv es más rápido, gestiona también la versión de Python y produce un lockfile reproducible.
+- **TypeScript:** a good fit if the main interface were web, but the ecosystem of agents and AI is broader in Python.
+- **pip + venv / Poetry:** uv is faster, also manages the Python version and produces a reproducible lockfile.
 
-## Consecuencias
+## Consequences
 
-- Los SDK oficiales de Anthropic y OpenAI para Python estarán disponibles cuando se implemente la capa de proveedores.
-- El tipado estricto exige anotar todo el código, a cambio de detectar errores antes, algo especialmente útil cuando buena parte del código lo escribe un agente.
+- The official Anthropic and OpenAI SDKs for Python will be available when the provider layer is implemented.
+- Strict typing requires annotating all the code, in exchange for catching errors earlier, which is especially useful when an agent writes a good part of the code.

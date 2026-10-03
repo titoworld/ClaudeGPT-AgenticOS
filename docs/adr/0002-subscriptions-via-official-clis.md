@@ -1,52 +1,52 @@
-# 0002. Subscripcions via les CLI oficials, amb claus d'API com a alternativa
+# 0002. Subscriptions through the official CLIs, with API keys as an alternative
 
-- Estat: Acceptat
-- Data: 2026-09-27
+- Status: Accepted
+- Date: 2026-09-27
 
 ## Context
 
-El propietari vol fer servir les seves subscripcions (Claude Pro/Max i ChatGPT Plus/Pro) en lloc de pagar per token amb claus d'API. Els SDK d'API (`anthropic`, `openai`) només accepten claus o credencials de consola, mai la subscripció. Les úniques vies oficials que fan servir la subscripció són les CLI de cada proveïdor: Claude Code (`claude`) i Codex (`codex`).
+The owner wants to use their subscriptions (Claude Pro/Max and ChatGPT Plus/Pro) instead of paying per token with API keys. The API SDKs (`anthropic`, `openai`) only accept keys or console credentials, never the subscription. The only official ways to use the subscription are each provider's CLI: Claude Code (`claude`) and Codex (`codex`).
 
-La recerca (setembre 2026, versions 2.1.283 i 0.157.1) va verificar:
+The research (September 2026, versions 2.1.283 and 0.157.1) verified that:
 
-- `claude -p` amb `--input-format/--output-format stream-json` dona *streaming* real de text, ús de tokens per torn i finestres de límit de la subscripció (`rate_limit_event`). Amb `--tools ""`, `--system-prompt` propi i sense configuració de projecte, la petició és petita i no pot executar res.
-- `codex exec --json` no dona *streaming* de text; `codex app-server` (JSON-RPC per stdio, experimental) sí, amb ús de tokens i límits de la subscripció, i un sol procés pot atendre diversos fils en paral·lel.
-- Termes: el Help Center d'Anthropic (16/06/2026) inclou l'ús de `claude -p` en projectes propis com a ús del pla; està prohibit extreure el token OAuth per cridar l'API directament o oferir el login a tercers. OpenAI recomana claus d'API per a l'automatització; l'ús de la subscripció via Codex no està prohibit explícitament però tampoc beneït.
+- `claude -p` with `--input-format/--output-format stream-json` gives real text *streaming*, token usage per turn and the subscription's limit windows (`rate_limit_event`). With `--tools ""`, a custom `--system-prompt` and no project configuration, the request is small and cannot execute anything.
+- `codex exec --json` does not stream text; `codex app-server` (JSON-RPC over stdio, experimental) does, with token usage and the subscription's limits, and a single process can serve several threads in parallel.
+- Terms: Anthropic's Help Center (16 June 2026) counts using `claude -p` in your own projects as use of your plan; extracting the OAuth token to call the API directly, or offering the login to third parties, is forbidden. OpenAI recommends API keys for automation; using the subscription through Codex is not explicitly forbidden, but not blessed either.
 
-## Decisió
+## Decision
 
-- Cada agent té tres modes: `cli` (per defecte, subscripció via CLI oficial sense modificar), `api` (clau d'API amb *prompt caching*) i `fake` (demostració i proves).
-- Claude en mode `cli`: un procés `claude -p` per crida, amb un *pool* de processos preescalfats per amagar el temps d'arrencada; el prompt s'envia per stdin amb `client_composed: true`; entorn i directori de treball aïllats.
-- ChatGPT en mode `cli`: un sol procés `codex app-server` persistent amb un client JSON-RPC propi; fils efímers en mode només lectura, sense eines i amb les instruccions base substituïdes pel nostre prompt.
-- No es fa servir l'SDK oficial de Codex per Python ni el Claude Agent SDK: arrosseguen binaris de 138 MB i 229 MB i no aporten res que el client propi no cobreixi.
-- Mai s'extreuen ni es reutilitzen tokens OAuth fora de les CLI.
+- Each agent has three modes: `cli` (the default: the subscription, through the unmodified official CLI), `api` (an API key, with *prompt caching*) and `fake` (demo and tests).
+- Claude in `cli` mode: one `claude -p` process per call, with a *pool* of pre-warmed processes to hide the startup time; the prompt goes over stdin with `client_composed: true`; an isolated environment and working directory.
+- ChatGPT in `cli` mode: a single persistent `codex app-server` process with our own JSON-RPC client; ephemeral threads in read-only mode, without tools and with the base instructions replaced by our prompt.
+- Neither the official Codex SDK for Python nor the Claude Agent SDK is used: they drag in binaries of 138 MB and 229 MB and add nothing that our own client does not cover.
+- OAuth tokens are never extracted or reused outside the CLIs.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **Només claus d'API:** simple i sense risc de termes, però no és el que vol el propietari. Queda com a mode `api`.
-- **`codex exec --json`:** sense *streaming* de text i ~0,5 s d'arrencada per crida.
-- **Proxies de tercers que reutilitzen la sessió:** contraris als termes.
+- **API keys only:** simple and with no risk regarding the terms, but not what the owner wants. It remains as the `api` mode.
+- **`codex exec --json`:** no text *streaming*, and ~0.5 s of startup per call.
+- **Third-party proxies that reuse the session:** against the terms.
 
-## Conseqüències
+## Consequences
 
-- Les versions de les CLI queden fixades a la imatge Docker; `app-server` és experimental i una actualització pot trencar el protocol.
-- Si Anthropic o OpenAI canvien els termes o la facturació, n'hi ha prou de canviar `AOS_*_MODE=api`.
-- Una `ANTHROPIC_API_KEY` a l'entorn de la CLI passaria per davant de la subscripció: l'entorn dels processos és una llista tancada.
+- The CLI versions are pinned in the Docker image; `app-server` is experimental, and an update can break the protocol.
+- If Anthropic or OpenAI change their terms or billing, switching to `AOS_*_MODE=api` is enough.
+- An `ANTHROPIC_API_KEY` in the CLI's environment would take precedence over the subscription: the processes' environment is a closed list.
 
-## Nota (2026-09-27): les eines de Codex
+## Note (2026-09-27): Codex's tools
 
-La decisió no canvia; aquesta nota corregeix una afirmació de la secció «Decisió». «Sense eines» només és exacte per a Claude: amb `--tools ""` la petició no declara cap eina. Una revisió de seguretat amb Codex 0.157.1 va comprovar que el catàleg de models que porta incorporat activa, per als models `gpt-6-*`, el mode de codi i els subagents, i que la configuració no ho desactiva. ChatGPT continua rebent:
+The decision does not change; this note corrects a statement in the "Decision" section. "Without tools" is only exact for Claude: with `--tools ""` the request declares no tool. A security review with Codex 0.157.1 found that the model catalog it ships with turns on code mode and subagents for the `gpt-6-*` models, and that the configuration does not turn them off. ChatGPT still gets:
 
-- una eina de codi (`exec`) que s'executa en un procés fill de l'`app-server` (`codex-code-mode`), en un entorn aïllat V8 sense accés als fitxers ni a la xarxa;
-- les eines de subagents (`spawn_agent` i relacionades), que obren fils nous dins del mateix `app-server`.
+- a code tool (`exec`) that runs in a child process of the `app-server` (`codex-code-mode`), in an isolated V8 environment without access to files or to the network;
+- the subagent tools (`spawn_agent` and related ones), which open new threads inside the same `app-server`.
 
-Una injecció de prompt (un text enganxat o la resposta de Claude dins d'un debat) pot fer que ChatGPT les faci servir: gastar CPU amb bucles o obrir subagents que continuen consumint el pla quan la crida ja ha acabat. Mitigacions aplicades:
+A prompt injection (a pasted text, or Claude's answer within a debate) can make ChatGPT use them: burning CPU with loops, or opening subagents that keep consuming the plan after the call has ended. Mitigations applied:
 
-- `agents.max_threads=1`: com a màxim un subagent alhora (0 no s'accepta). No limita quants n'obre una crida, perquè en interrompre'n un en queda lliure la plaça;
-- l'aplicació interromp de seguida qualsevol torn d'un fil que no pertanyi a una crida en curs;
-- una crida en què ChatGPT fa servir subagents (n'obre o els dona feina) més de 3 vegades s'atura amb un error;
-- quan ja no hi ha cap crida en curs, l'aplicació reinicia el procés d'`app-server` que ha obert subagents: els seus fils, encara que s'hagin aturat, no alliberen la memòria;
-- límit de CPU del contenidor de l'aplicació (`cpus`, `APP_CPUS` a `.env`);
-- l'estat SQLite i els registres de Codex, que guarden el text de cada crida, viuen en un tmpfs privat (`/run/codex-state`, `AOS_CODEX_STATE_DIR`), fora de `CODEX_HOME`, dels volums i de les còpies de seguretat. L'aplicació n'esborra els registres abans d'engegar cada procés: no sobreviuen al procés i un tmpfs ple no li impedeix tornar a arrencar.
+- `agents.max_threads=1`: at most one subagent at a time (0 is not accepted). It does not limit how many a call opens, because interrupting one frees its slot;
+- the app immediately interrupts any turn of a thread that does not belong to a call in progress;
+- a call in which ChatGPT uses subagents (opens them or gives them work) more than 3 times is stopped with an error;
+- once no call is in progress, the app restarts an `app-server` process that has opened subagents: their threads, even once stopped, do not free their memory;
+- a CPU limit on the app's container (`cpus`, `APP_CPUS` in `.env`);
+- Codex's SQLite state and logs, which keep the text of each call, live in a private tmpfs (`/run/codex-state`, `AOS_CODEX_STATE_DIR`), outside `CODEX_HOME`, the volumes and the backups. The app deletes the logs before starting each process: they do not outlive the process, and a full tmpfs does not stop it from starting again.
 
-Treure-les del tot vol dir fixar un catàleg de models propi sense aquestes eines (`model_catalog_json`): congelaria la llista de models (els nous només funcionarien pel seu identificador) i caldria refer-lo a cada versió de Codex. Queda pendent de provar-ho amb el servei real de ChatGPT; si es fa, o si una versió nova de Codex les permet desactivar, caldrà revisar aquesta nota.
+Removing them entirely means pinning a model catalog of our own without these tools (`model_catalog_json`): it would freeze the list of models (new ones would only work by their id) and would have to be redone for every Codex version. This is still to be tested against the real ChatGPT service; if it is done, or if a new version of Codex allows turning them off, this note will need revisiting.

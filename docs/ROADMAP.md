@@ -1,34 +1,35 @@
-# Full de ruta
+# Roadmap
 
-## Fase 0 · Inicialització ✅
+## Phase 0 · Setup ✅
 
-- [x] Repositori a GitHub amb `main` com a branca per defecte
-- [x] Base de Python (uv, pytest, ruff, mypy estricte), CI i hook d'inici de sessió per a Claude Code a la web
+- [x] GitHub repository with `main` as the default branch
+- [x] Python base (uv, pytest, ruff, strict mypy), CI and a session start hook for Claude Code on the web
 
-## Fase 1 · Visió i arquitectura ✅
+## Phase 1 · Vision and architecture ✅
 
-- [x] Recerca: CLI oficials amb subscripció, SDK, stack web i desplegament ([ADR 0002](adr/0002-subscriptions-via-official-clis.md))
-- [x] Arquitectura, contractes interns i protocol client-servidor ([ARCHITECTURE.md](ARCHITECTURE.md), [PROTOCOL.md](PROTOCOL.md))
+- [x] Research: official CLIs with a subscription, SDKs, web stack and deployment ([ADR 0002](adr/0002-subscriptions-via-official-clis.md))
+- [x] Architecture, internal contracts and client-server protocol ([ARCHITECTURE.md](ARCHITECTURE.md), [PROTOCOL.md](PROTOCOL.md))
 
-## Fase 2 · Consell de Claude i ChatGPT (MVP) ✅
+## Phase 2 · A council of Claude and ChatGPT (MVP) ✅
 
-- [x] Proveïdors: Claude Code (subscripció) i API d'Anthropic; Codex app-server (subscripció) i API d'OpenAI; mode de demostració
-- [x] Motor de torns: solo, duel i consell, amb parada per consens, compactació i memòria cau ([ADR 0003](adr/0003-council-and-token-savings.md))
-- [x] Inici de sessió amb contrasenya i TOTP, sessions, límits d'intents
-- [x] Servidor amb WebSocket resistent a talls
-- [x] Interfície amb escena 3D, vista del consell, paleta d'ordres i tauler ([ADR 0004](adr/0004-web-and-deployment.md))
-- [x] Desplegament amb Docker Compose + Caddy i guia pas a pas
-- [x] Selecció de model per agent (llista en directe + identificador lliure)
-- [x] Tokens i cost en euros, pressupost mensual i percentatge d'ús de les subscripcions
+- [x] Providers: Claude Code (subscription) and the Anthropic API; Codex app-server (subscription) and the OpenAI API; a demo mode
+- [x] Turn engine: solo, duel and council, with stop on consensus, compaction and cache ([ADR 0003](adr/0003-council-and-token-savings.md))
+- [x] Login with a password and TOTP, sessions, login attempt limits
+- [x] A server with a WebSocket that survives connection drops
+- [x] An interface with a 3D scene, the council view, a command palette and a dashboard ([ADR 0004](adr/0004-web-and-deployment.md))
+- [x] Deployment with Docker Compose + Caddy, and a step-by-step guide
+- [x] Model choice per agent (live list + any model id)
+- [x] Tokens and cost in euros, a monthly budget and the percentage used of the subscriptions
 
-## Fase 3 · Idees per a més endavant
+## Phase 3 · Ideas for later
 
-Per decidir amb el propietari segons l'ús real:
+To decide with the owner, based on real use:
 
-- [x] Adjunts a les preguntes: imatges, PDF i fitxers de text, amb miniatures, a tots els modes ([ADR 0009](adr/0009-attachments.md))
-- [x] PDF per a ChatGPT amb la subscripció: el text extret, contrastat per Claude, i avisos de les pàgines sense text, il·legibles o amb text amagat (P7b, [ADR 0009](adr/0009-attachments.md))
-- [x] Mode «Perfecciona»: les dues IA milloren un sol document ronda rere ronda, sense sobredimensionar-lo, fins que l'atures (P8, [ADR 0010](adr/0010-refine-mode.md))
-- [ ] Exportar converses (Markdown/PDF)
-- [ ] Avisos quan una finestra de subscripció o el pressupost s'acosta al límit (correu o Telegram)
-- [ ] Plantilles de consell per a tasques habituals (revisar codi, redactar, investigar)
-- [ ] Còpies de seguretat automàtiques programades
+- [x] Attachments to questions: images, PDFs and text files, with thumbnails, in every mode ([ADR 0009](adr/0009-attachments.md))
+- [x] PDFs for ChatGPT with the subscription: the extracted text, checked by Claude, and warnings about pages without text, unreadable or with hidden text (P7b, [ADR 0009](adr/0009-attachments.md))
+- [x] The Refine mode: both AIs improve a single document round after round, without oversizing it, until you stop them (P8, [ADR 0010](adr/0010-refine-mode.md))
+- [x] The interface in English, Spanish and Catalan, and the repository in English ([ADR 0011](adr/0011-internationalization.md))
+- [ ] Export conversations (Markdown/PDF)
+- [ ] Alerts when a subscription window or the budget gets close to its limit (email or Telegram)
+- [ ] Council templates for common tasks (reviewing code, writing, research)
+- [ ] Scheduled automatic backups

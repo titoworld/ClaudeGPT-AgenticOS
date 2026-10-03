@@ -1,26 +1,26 @@
-# 0004. Interfície web i desplegament
+# 0004. Web interface and deployment
 
-- Estat: Acceptat
-- Data: 2026-09-27
+- Status: Accepted
+- Date: 2026-09-27
 
 ## Context
 
-L'eina és per a un sol propietari, exposada a Internet des d'un VPS, i ha de ser molt visual, ràpida i segura.
+The tool is for a single owner, exposed to the Internet from a VPS, and it has to be very visual, fast and secure.
 
-## Decisió
+## Decision
 
-- **Backend:** FastAPI + uvicorn (uvloop, httptools), SQLite en mode WAL. Una connexió WebSocket persistent per pestanya; els torns continuen al servidor si es talla la connexió i el client en recupera els esdeveniments per número de seqüència.
-- **Frontend:** Svelte 5 (runes) + Vite + TypeScript. Escena 3D amb three.js (`WebGLRenderer` + `EffectComposer` + bloom), carregada de manera diferida; `WebGPURenderer` es va descartar perquè a r186 falla sense tornar a WebGL en alguns navegadors. Gràfics SVG propis (3,7 KB) en lloc de llibreries de 50 KB. Markdown amb marked + DOMPurify.
-- **Seguretat:** contrasenya argon2id + TOTP amb protecció de reutilització, sessions al servidor amb hash, cookie `__Host-` SameSite=Strict, comprovació d'`Origin`, CSP estricta sense scripts en línia, bloqueig exponencial persistent.
-- **Desplegament:** Docker Compose amb Caddy (TLS automàtic, HTTP/3) com a únic servei exposat; l'aplicació corre sense root, sense *capabilities* i amb el sistema de fitxers de només lectura; les CLI oficials s'inclouen com a binaris natius fixats.
+- **Backend:** FastAPI + uvicorn (uvloop, httptools), SQLite in WAL mode. One persistent WebSocket connection per tab; turns keep running on the server if the connection drops, and the client recovers their events by sequence number.
+- **Frontend:** Svelte 5 (runes) + Vite + TypeScript. A 3D scene with three.js (`WebGLRenderer` + `EffectComposer` + bloom), loaded lazily; `WebGPURenderer` was ruled out because in r186 it fails without falling back to WebGL in some browsers. Custom SVG charts (3.7 KB) instead of 50 KB libraries. Markdown with marked + DOMPurify.
+- **Security:** argon2id password + TOTP with reuse protection, server-side sessions stored as a hash, a `__Host-` SameSite=Strict cookie, an `Origin` check, a strict CSP without inline scripts, and a persistent exponential lockout.
+- **Deployment:** Docker Compose with Caddy (automatic TLS, HTTP/3) as the only exposed service; the app runs without root, without *capabilities* and with a read-only file system; the official CLIs are included as pinned native binaries.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **React / Vue:** més pesats per a aquesta mida; Svelte compila a poc JavaScript.
-- **Nginx + Certbot:** més peces a mantenir que Caddy.
-- **Accés només per VPN (Tailscale/WireGuard):** més segur però menys còmode; queda documentat com a reforç opcional juntament amb la llista d'IP permeses.
+- **React / Vue:** heavier for a project of this size; Svelte compiles to little JavaScript.
+- **Nginx + Certbot:** more pieces to maintain than Caddy.
+- **VPN-only access (Tailscale/WireGuard):** more secure but less convenient; it is documented as an optional hardening step, together with an IP allowlist.
 
-## Conseqüències
+## Consequences
 
-- La imatge pesa uns 800 MB pels binaris de les CLI.
-- Sense Node en temps d'execució: només a l'etapa de construcció.
+- The image weighs about 800 MB because of the CLI binaries.
+- No Node at run time: only in the build stage.

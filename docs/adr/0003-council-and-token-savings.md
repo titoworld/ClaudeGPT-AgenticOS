@@ -1,29 +1,29 @@
-# 0003. Mode Consell i estratègia d'estalvi de tokens
+# 0003. The Council mode and the token-saving strategy
 
-- Estat: Acceptat
-- Data: 2026-09-27
+- Status: Accepted
+- Date: 2026-09-27
 
 ## Context
 
-L'objectiu és obtenir millors respostes fent que Claude i ChatGPT es revisin mútuament, sense multiplicar el consum. Els sistemes multiagent típics reenvien tota la transcripció a cada agent i fan rondes fixes, cosa que dispara els tokens.
+The goal is to get better answers by having Claude and ChatGPT review each other, without multiplying consumption. Typical multi-agent systems resend the whole transcript to every agent and run fixed rounds, which makes the token count soar.
 
-## Decisió
+## Decision
 
-- Tres modes de torn: **Solo**, **Duel** i **Consell** (respostes en paral·lel → fins a N rondes de revisió → síntesi).
-- Les revisions són autocontingudes: pregunta + resposta pròpia + resposta de l'altre. No reben l'historial de la conversa.
-- Format de revisió estricte (`<critique>`, `<answer>`, `<agreement>`), amb `UNCHANGED` quan no cal reescriure i parada anticipada quan tots dos superen el llindar d'acord.
-- L'historial de la conversa només conté la pregunta i la resposta final de cada torn; quan supera un llindar es compacta amb el model ràpid.
-- Memòria cau de torns sencers per a preguntes idèntiques en el mateix context.
-- Prompts de sistema estables (sense dates ni identificadors) perquè la memòria cau dels proveïdors funcioni.
-- Cada estalvi es mesura i es mostra al tauler: memòria cau, compactació, parada per consens i respostes sense canvis.
+- Three turn modes: **Solo**, **Duel** and **Council** (answers in parallel → up to N review rounds → synthesis).
+- Reviews are self-contained: the question + the agent's own answer + the other's answer. They do not get the conversation's history.
+- A strict review format (`<critique>`, `<answer>`, `<agreement>`), with `UNCHANGED` when there is no need to rewrite, and an early stop when both reach the agreement threshold.
+- The conversation's history only holds the question and the final answer of each turn; when it goes over a threshold, it is compacted with the fast model.
+- A cache of whole turns for identical questions in the same context.
+- Stable system prompts (without dates or identifiers) so that the providers' caches work.
+- Every saving is measured and shown on the dashboard: cache, compaction, stop on consensus and unchanged answers.
 
-## Alternatives considerades
+## Alternatives considered
 
-- **Rondes fixes amb tota la transcripció:** més simple, però molt més car.
-- **Votació amb més de dos agents:** fora d'abast; dos models amb síntesi ja capturen la major part del benefici.
-- **Memòria vectorial (RAG):** innecessària per a un sol usuari i converses d'aquesta mida; es pot afegir més endavant.
+- **Fixed rounds with the whole transcript:** simpler, but much more expensive.
+- **Voting with more than two agents:** out of scope; two models with a synthesis already capture most of the benefit.
+- **Vector memory (RAG):** unnecessary for a single user and conversations of this size; it can be added later.
 
-## Conseqüències
+## Consequences
 
-- Els estalvis són estimacions (tokens ≈ caràcters / 4) excepte els que reporten els proveïdors (`cache_read_tokens`).
-- La qualitat depèn que els models respectin el format de revisió; l'analitzador és tolerant i, si falten etiquetes, tracta el text com a resposta.
+- The savings are estimates (tokens ≈ characters / 4), except the ones the providers report (`cache_read_tokens`).
+- The quality depends on the models following the review format; the parser is lenient and, if tags are missing, treats the text as the answer.
