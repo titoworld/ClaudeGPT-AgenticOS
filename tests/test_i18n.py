@@ -17,6 +17,7 @@ from starlette.websockets import WebSocket
 from agentic_os import i18n
 from agentic_os.cli import main
 from agentic_os.locales import AREAS, MESSAGES
+from agentic_os.providers.base import ProviderError
 from agentic_os.server.middleware import LanguageMiddleware
 
 
@@ -71,6 +72,12 @@ def test_numbers_are_written_as_the_web_writes_them() -> None:
         "es": ["1234,5", "12.345", "-0,25"],
         "ca": ["1.234,5", "12.345", "-0,25"],
     }
+    # Halves round away from zero, as the web's Intl.NumberFormat does.
+    with i18n.use("en"):
+        assert [i18n.number(2.5), i18n.number(0.125, 2), i18n.number(-2.5)] == ["3", "0.13", "-3"]
+        assert [i18n.number(1234567.891, 2), i18n.number(0.0, 1)] == ["1,234,567.89", "0.0"]
+        # 12345.675 is 12345.67499… as a float, but Intl rounds the shortest decimal.
+        assert i18n.number(12345.675, 2) == "12,345.68"
 
 
 def test_every_text_has_its_area_and_the_same_placeholders_in_every_language() -> None:
@@ -149,3 +156,13 @@ def test_the_command_line_speaks_the_language_of_the_system(
     assert seen == ["es", "en", "ca"]
     # Nothing of it stays chosen once the command is over.
     assert i18n.chosen() is None
+
+
+def test_a_provider_error_says_its_message_in_the_turns_language_and_logs_it_in_english() -> None:
+    error = ProviderError(i18n.lazy("providers.openai.timeout"), kind="timeout")
+    assert error.message == i18n.t("providers.openai.timeout")  # Catalan: tests/conftest.py
+    with i18n.use("en"):
+        english = i18n.t("providers.openai.timeout")
+    assert error.log_text == english != error.message
+    plain = ProviderError("the Models API listed no model", kind="internal")
+    assert plain.log_text == plain.message

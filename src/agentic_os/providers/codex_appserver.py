@@ -648,9 +648,9 @@ def turn_error(error: Any) -> ProviderError:
             retryable=True,
         )
     if name == "unauthorized" or status in (401, 403):
-        return ProviderError(t("providers.codex.session_invalid", hint=LOGIN_HINT), kind="auth")
+        return ProviderError(lazy("providers.codex.session_invalid", hint=LOGIN_HINT), kind="auth")
     if name == "contextWindowExceeded":
-        return ProviderError(t("providers.codex.conversation_too_long"), kind="invalid")
+        return ProviderError(lazy("providers.codex.conversation_too_long"), kind="invalid")
     if name in ("cyberPolicy", "misalignmentPolicyViolation"):
         return ProviderError(
             _with_detail(t("providers.codex.usage_policy"), detail), kind="invalid"
@@ -669,7 +669,7 @@ def turn_error(error: Any) -> ProviderError:
 def _rpc_error(exc: CodexRpcError) -> ProviderError:
     lowered = exc.message.lower()
     if "authentication" in lowered or "not logged in" in lowered or "login" in lowered:
-        return ProviderError(t("providers.codex.no_session", hint=LOGIN_HINT), kind="auth")
+        return ProviderError(lazy("providers.codex.no_session", hint=LOGIN_HINT), kind="auth")
     if exc.code == -32602:
         return ProviderError(
             _with_detail(t("providers.codex.rejected"), exc.message), kind="invalid"
@@ -1048,10 +1048,10 @@ class CodexAppServerProvider:
                         raise asyncio.CancelledError("Codex interrupted the turn")
                     raise turn_error(turn.get("error"))
         except TimeoutError:
-            raise ProviderError(t("providers.codex.timeout"), kind="timeout") from None
+            raise ProviderError(lazy("providers.codex.timeout"), kind="timeout") from None
         except ProcessGone:
             raise ProviderError(
-                t("providers.codex.process_stopped"), kind="unavailable", retryable=True
+                lazy("providers.codex.process_stopped"), kind="unavailable", retryable=True
             ) from None
         except CodexRpcError as exc:
             raise _rpc_error(exc) from None
@@ -1633,7 +1633,7 @@ class CodexAppServerProvider:
                     break
                 cursor = next_cursor
         except Exception as exc:  # never raise: the owner can still type any model id
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the Codex models (%s); using the default", reason)
         models: list[ModelInfo] = []
         catalog_default: str | None = None

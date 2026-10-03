@@ -2593,7 +2593,7 @@ class Engine:
                 error = exc
             except Exception:
                 logger.exception("Provider %s failed unexpectedly", agent)
-                error = ProviderError(t("engine.error.provider_unexpected"), kind="internal")
+                error = ProviderError(lazy("engine.error.provider_unexpected"), kind="internal")
             model, usage = failed_call_usage(
                 error, request.model or self._models.get(agent, ""), turn.prices
             )
@@ -2615,7 +2615,7 @@ class Engine:
                 error=error,
             )
             if error.retryable and not progress.emitted and attempt == 1:
-                logger.info("Retrying %s after a retryable error: %s", agent, error.message)
+                logger.info("Retrying %s after a retryable error: %s", agent, error.log_text)
                 await asyncio.sleep(self._retry_delay)
                 continue
             billed = usage if is_billed(usage) else None
@@ -2812,7 +2812,7 @@ class Engine:
                 await stream.aclose()
         if result is None:
             raise ProviderError(
-                t("engine.error.reply_interrupted"), kind="internal", retryable=True
+                lazy("engine.error.reply_interrupted"), kind="internal", retryable=True
             )
         if not result.text and chunks:
             result = replace(result, text="".join(chunks))
@@ -2860,7 +2860,7 @@ class Engine:
                 usage=usage,
                 latency_ms=0,
                 ttft_ms=None,
-                error=ProviderError(t("engine.error.declined", model=model), kind="invalid"),
+                error=ProviderError(lazy("engine.error.declined", model=model), kind="invalid"),
             )
         return declined
 

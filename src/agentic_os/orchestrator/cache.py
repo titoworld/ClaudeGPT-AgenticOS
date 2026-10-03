@@ -8,6 +8,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
+from agentic_os import i18n
 from agentic_os.domain import AgentName, TurnMode, TurnOptions, Usage
 from agentic_os.orchestrator.memory import TurnContext
 from agentic_os.orchestrator.store import JsonValue, NewMessage
@@ -16,7 +17,7 @@ from agentic_os.pricing import ModelPrice, estimate_cost_usd
 from agentic_os.providers.base import Attachment, AttachmentMode
 from agentic_os.providers.prompt_format import has_text
 
-CACHE_KEY_VERSION = 7
+CACHE_KEY_VERSION = 8
 """Bump when prompts, the replay format or the key itself change, to invalidate old
 entries (2: the question keeps its inner whitespace; 3: earlier entries may hold replies
 that were cut off, duplicated by a Codex retry or mangled by the revision parser, which
@@ -28,7 +29,9 @@ and the system prompt says how to treat them; 6: a file's text is neutralized an
 enclosed, and a PDF without text goes whole to the revisions; 7: ChatGPT with the
 subscription reads a PDF's text as Claude checked it, the prompts warn of hidden text and
 say which pages ChatGPT read through Claude, and the key has the check's version and what
-the server's reader made of each PDF)."""
+the server's reader made of each PDF; 8: every text for the models is English, and the key
+has the language of the turn, whose texts for people a hit replays: the demo's answers and
+why a PDF's pages were left unchecked, ADR 0011)."""
 
 
 def _digest(payload: object) -> str:
@@ -92,7 +95,9 @@ def turn_cache_key(
     PDFs reads what it found). The solo target, the debate options and
     ``pdf_in_revisions`` (how the revisions get the PDFs that have text: one without any
     goes whole) only count where they change what the models get, so irrelevant
-    differences do not cause misses.
+    differences do not cause misses. The language in force (:func:`i18n.current`, the
+    turn's) counts too: a hit replays the texts the stored turn wrote for people in its
+    own language (the demo's answers, why a PDF's pages were left unchecked).
     """
     debate = options.debate
     revises_pdf = (
@@ -124,6 +129,7 @@ def turn_cache_key(
             "pdf_in_revisions": pdf_in_revisions if revises_pdf else None,
             "context": context_fingerprint,
             "providers": {agent: identities[agent] for agent in sorted(identities)},
+            "lang": i18n.current(),
         }
     )
 

@@ -169,7 +169,7 @@ def _ascii_name(name: str) -> str:
     """A plain ASCII version of a display name, for the ``filename`` parameter."""
     ascii_only = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     safe = "".join(c if c.isprintable() and c not in '"\\' else "_" for c in ascii_only)
-    return safe.strip() or "fitxer"
+    return safe.strip() or "file"
 
 
 def file_headers(name: str, *, inline: bool) -> dict[str, str]:

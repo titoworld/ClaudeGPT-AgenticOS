@@ -10,7 +10,7 @@ See [ADR 0011](docs/adr/0011-internationalization.md).
 - Documentation (`README.md`, `docs/`) in English.
 - The interface's texts live in the catalogs of `web/src/lib/i18n/areas/`, in English, Spanish and Catalan: English is the source, and TypeScript checks that the three languages have the same keys and parameters. Never hardcode a text in a component, and never keep one in a module-level constant (it would not follow a change of language). Bold and code inside a text are written `**…**` and `` `…` `` and drawn by `RichText`, never with `{@html}`.
 - The server's texts live in `src/agentic_os/locales/` and are made with `agentic_os.i18n.t()`, in the language of the request, the connection or the command line. Caches shared by every client keep `lazy()` texts, never translated ones. Logic compares codes (such as `reason_code`), never translated texts.
-- The prompts for the models stay in English and ask them to answer in the language of the user's message. Logs are in English.
+- Every text for the models stays in English, whatever the language of the turn: the prompts (which ask them to answer in the language of the user's message), the notes and the markers around the attachments. Logs are in English too (`ProviderError.log_text`).
 - The tests check the Catalan texts by default (`web/src/lib/i18n/test-setup.ts`, `tests/conftest.py`); the i18n tests check the other languages.
 - Code, identifiers and comments in English.
 - Commit messages in English, with [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).

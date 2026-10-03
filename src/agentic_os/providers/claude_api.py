@@ -267,7 +267,7 @@ def billed_usage(
 
 
 def _interrupted() -> ProviderError:
-    return ProviderError(t("providers.claude.interrupted"), kind="unavailable", retryable=True)
+    return ProviderError(lazy("providers.claude.interrupted"), kind="unavailable", retryable=True)
 
 
 def _with_default(models: list[ModelInfo], default: str) -> tuple[ModelInfo, ...]:
@@ -294,33 +294,35 @@ def map_api_error(exc: anthropic.APIError) -> ProviderError:
     """Typed SDK errors -> ProviderError (after the SDK's own retries)."""
     if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
         return ProviderError(
-            t("providers.anthropic.unreachable"), kind="unavailable", retryable=True
+            lazy("providers.anthropic.unreachable"), kind="unavailable", retryable=True
         )
     if not isinstance(exc, anthropic.APIStatusError):
-        return ProviderError(t("providers.anthropic.unexpected"), kind="internal")
+        return ProviderError(lazy("providers.anthropic.unexpected"), kind="internal")
     status = exc.status_code
     if status < 400:
         # An SSE ``error`` event after the stream opened: the SDK never retries these.
         if exc.type == "rate_limit_error":
             return ProviderError(
-                t("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True
+                lazy("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True
             )
         return _interrupted()
     if status in (401, 403):
-        return ProviderError(t("providers.anthropic.key_rejected"), kind="auth")
+        return ProviderError(lazy("providers.anthropic.key_rejected"), kind="auth")
     if status == 402:
-        return ProviderError(t("providers.anthropic.billing"), kind="auth")
+        return ProviderError(lazy("providers.anthropic.billing"), kind="auth")
     if status == 429:
-        return ProviderError(t("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True)
+        return ProviderError(
+            lazy("providers.anthropic.rate_limit"), kind="rate_limit", retryable=True
+        )
     if status >= 500:
         return ProviderError(
-            t("providers.anthropic.unavailable"), kind="unavailable", retryable=True
+            lazy("providers.anthropic.unavailable"), kind="unavailable", retryable=True
         )
     if status in (400, 404, 413, 422):
         return ProviderError(
-            t("providers.anthropic.rejected", detail=_error_detail(exc)), kind="invalid"
+            lazy("providers.anthropic.rejected", detail=_error_detail(exc)), kind="invalid"
         )
-    return ProviderError(t("providers.anthropic.error", status=status), kind="internal")
+    return ProviderError(lazy("providers.anthropic.error", status=status), kind="internal")
 
 
 class ClaudeApiProvider:
@@ -365,7 +367,7 @@ class ClaudeApiProvider:
         if self._client is None:
             key = self._settings.anthropic_api_key
             if key is None or not key.get_secret_value():
-                raise ProviderError(t("providers.anthropic.missing_key"), kind="auth")
+                raise ProviderError(lazy("providers.anthropic.missing_key"), kind="auth")
             self._client = anthropic.AsyncAnthropic(
                 api_key=key.get_secret_value(),
                 timeout=anthropic.Timeout(self._settings.provider_timeout_seconds, connect=10.0),
@@ -470,7 +472,7 @@ class ClaudeApiProvider:
         truncated = stop_reason not in COMPLETE_STOP_REASONS
         if truncated and not text.strip():
             raise ProviderError(
-                t("providers.claude.output_budget_spent", budget=number(max_tokens))
+                lazy("providers.claude.output_budget_spent", budget=number(max_tokens))
                 if stop_reason == "max_tokens"
                 else t("providers.claude.stopped_before_text", reason=stop_reason),
                 kind="invalid",
@@ -498,7 +500,7 @@ class ClaudeApiProvider:
 
     def _timeout(self) -> ProviderError:
         limit = seconds(self._settings.provider_timeout_seconds)
-        return ProviderError(t("providers.claude.timeout", seconds=limit), kind="timeout")
+        return ProviderError(lazy("providers.claude.timeout", seconds=limit), kind="timeout")
 
     @staticmethod
     async def _with_attachments(
@@ -510,7 +512,7 @@ class ClaudeApiProvider:
         blocks[-1]["cache_control"] = {"type": "ephemeral"}
         text = last["content"]
         if not isinstance(text, str):  # pragma: no cover - to_chat_messages gives text
-            raise ProviderError(t("providers.claude.unexpected_message"), kind="internal")
+            raise ProviderError(lazy("providers.claude.unexpected_message"), kind="internal")
         content = [*blocks, {"type": "text", "text": text}]
         return {"role": "user", "content": cast(list[BetaContentBlockParam], content)}
 
@@ -571,7 +573,7 @@ class ClaudeApiProvider:
                 # Only logged (below): in English, as the logs are.
                 raise ProviderError("the Models API listed no model", kind="internal")
         except Exception as exc:
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the Anthropic models (%s); using the fallback", reason)
             listed = [
                 ModelInfo(

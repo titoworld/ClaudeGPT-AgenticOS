@@ -139,6 +139,8 @@ docker compose exec -it app agentic-os init
 
 If you ever lose your phone or forget the password, run this command again on the server: it replaces the owner and ends every open session.
 
+The command line speaks the language of the container's locale, which is English. To have it in Spanish or Catalan, pass the language to the command: `docker compose exec -it -e LANG=es_ES.UTF-8 app agentic-os init` (or `ca_ES.UTF-8`). The web app has its own language picker.
+
 ## 6. Connect Claude (Pro/Max subscription)
 
 **Recommended option: a one-year token**

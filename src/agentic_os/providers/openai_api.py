@@ -229,26 +229,28 @@ def response_error(code: str | None, message: object) -> ProviderError:
     """ProviderError for an error reported inside the stream (``response.failed``, an
     ``error`` event or an SSE error payload)."""
     if code == "rate_limit_exceeded":
-        return ProviderError(t("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
+        return ProviderError(lazy("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
     if code == "insufficient_quota":
-        return ProviderError(t("providers.openai.no_credit"), kind="rate_limit")
+        return ProviderError(lazy("providers.openai.no_credit"), kind="rate_limit")
     if code is None or code in _SERVER_CODES:
         return _interrupted()
     return ProviderError(
-        t("providers.openai.rejected_code", code=code, detail=_detail(message)), kind="invalid"
+        lazy("providers.openai.rejected_code", code=code, detail=_detail(message)), kind="invalid"
     )
 
 
 def _interrupted() -> ProviderError:
-    return ProviderError(t("providers.chatgpt.interrupted"), kind="unavailable", retryable=True)
+    return ProviderError(lazy("providers.chatgpt.interrupted"), kind="unavailable", retryable=True)
 
 
 def map_api_error(exc: openai.APIError) -> ProviderError:
     """Typed SDK errors -> ProviderError (after the SDK's own retries)."""
     if isinstance(exc, openai.APITimeoutError):
-        return ProviderError(t("providers.openai.timeout"), kind="timeout", retryable=True)
+        return ProviderError(lazy("providers.openai.timeout"), kind="timeout", retryable=True)
     if isinstance(exc, openai.APIConnectionError):
-        return ProviderError(t("providers.openai.unreachable"), kind="unavailable", retryable=True)
+        return ProviderError(
+            lazy("providers.openai.unreachable"), kind="unavailable", retryable=True
+        )
     if not isinstance(exc, openai.APIStatusError):
         # An SSE error payload after the stream opened: never retried by the SDK.
         return response_error(exc.code, exc.message)
@@ -256,18 +258,20 @@ def map_api_error(exc: openai.APIError) -> ProviderError:
     body = exc.body if isinstance(exc.body, dict) else {}
     message = body.get("message") or exc.message
     if status in (401, 403):
-        return ProviderError(t("providers.openai.key_rejected"), kind="auth")
+        return ProviderError(lazy("providers.openai.key_rejected"), kind="auth")
     if status == 429:
         if exc.code == "insufficient_quota":
-            return ProviderError(t("providers.openai.no_credit"), kind="rate_limit")
-        return ProviderError(t("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
+            return ProviderError(lazy("providers.openai.no_credit"), kind="rate_limit")
+        return ProviderError(lazy("providers.openai.rate_limit"), kind="rate_limit", retryable=True)
     if status >= 500 or status in (408, 409):
-        return ProviderError(t("providers.openai.unavailable"), kind="unavailable", retryable=True)
+        return ProviderError(
+            lazy("providers.openai.unavailable"), kind="unavailable", retryable=True
+        )
     if status in (400, 404, 413, 422):
         return ProviderError(
-            t("providers.openai.rejected", detail=_detail(message)), kind="invalid"
+            lazy("providers.openai.rejected", detail=_detail(message)), kind="invalid"
         )
-    return ProviderError(t("providers.openai.error", status=status), kind="internal")
+    return ProviderError(lazy("providers.openai.error", status=status), kind="internal")
 
 
 class OpenAIApiProvider:
@@ -310,7 +314,7 @@ class OpenAIApiProvider:
         if self._client is None:
             key = self._settings.openai_api_key
             if key is None or not key.get_secret_value():
-                raise ProviderError(t("providers.openai.missing_key"), kind="auth")
+                raise ProviderError(lazy("providers.openai.missing_key"), kind="auth")
             self._client = openai.AsyncOpenAI(
                 api_key=key.get_secret_value(), timeout=TIMEOUT, max_retries=MAX_RETRIES
             )
@@ -430,7 +434,7 @@ class OpenAIApiProvider:
         except TimeoutError:
             limit = seconds(self._settings.provider_timeout_seconds)
             raise ProviderError(
-                t("providers.chatgpt.timeout", seconds=limit), kind="timeout"
+                lazy("providers.chatgpt.timeout", seconds=limit), kind="timeout"
             ) from None
 
     async def prewarm(self, request: GenerationRequest) -> None:
@@ -478,7 +482,7 @@ class OpenAIApiProvider:
                 # Only logged (below): in English, as the logs are.
                 raise ProviderError("no chat model in the listing", kind="internal")
         except Exception as exc:
-            reason = exc.message if isinstance(exc, ProviderError) else type(exc).__name__
+            reason = exc.log_text if isinstance(exc, ProviderError) else type(exc).__name__
             logger.warning("Could not list the OpenAI models (%s); using the fallback", reason)
             ids, live = list(MODEL_DESCRIPTIONS), False
         default = self.default_model

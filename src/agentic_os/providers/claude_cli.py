@@ -194,7 +194,7 @@ def refusal_error(
     with the api provider). ``usage`` is what the refusing attempt billed and
     ``declined`` the billed attempts other models declined before it (api fallbacks)."""
     return RefusalError(
-        t("providers.claude.refused_category", category=category)
+        lazy("providers.claude.refused_category", category=category)
         if category
         else t("providers.claude.refused"),
         usage=usage,
@@ -499,7 +499,7 @@ class ClaudeCliProvider:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderEvent]:
         if self._closed:
-            raise ProviderError(t("providers.claude.closing"), kind="unavailable")
+            raise ProviderError(lazy("providers.claude.closing"), kind="unavailable")
         started = time.monotonic()
         deadline = asyncio.get_running_loop().time() + self._settings.provider_timeout_seconds
         key = self._key(request)
@@ -564,7 +564,7 @@ class ClaudeCliProvider:
             return
         result = turn.result
         if result is None:  # pragma: no cover - the loop only ends with a result
-            raise ProviderError(t("providers.claude.no_result"), kind="internal")
+            raise ProviderError(lazy("providers.claude.no_result"), kind="internal")
         if result.get("is_error"):
             raise self._result_error(result, turn)
         text = "".join(turn.chunks)
@@ -598,7 +598,7 @@ class ClaudeCliProvider:
                     return
             worker = await self._spawn(key)
         except ProviderError as exc:
-            logger.debug("Claude CLI prewarm skipped: %s", exc.message)
+            logger.debug("Claude CLI prewarm skipped: %s", exc.log_text)
             return
         except Exception:
             logger.warning("Claude CLI prewarm failed", exc_info=True)
@@ -683,7 +683,7 @@ class ClaudeCliProvider:
             effort_args = ("--effort", EFFORT_BY_PURPOSE[request.purpose])
         system = request.system.replace("\x00", "")
         if len(system.encode("utf-8")) > MAX_SYSTEM_PROMPT_BYTES:
-            raise ProviderError(t("providers.claude.system_prompt_too_long"), kind="invalid")
+            raise ProviderError(lazy("providers.claude.system_prompt_too_long"), kind="invalid")
         return _Key(model, effort_args, system, max(1, request.max_output_tokens))
 
     def _command(self, key: _Key) -> list[str]:
@@ -765,10 +765,12 @@ class ClaudeCliProvider:
                 limit=STREAM_LIMIT,
             )
         except FileNotFoundError:
-            raise ProviderError(t("providers.claude.cli_not_found"), kind="unavailable") from None
+            raise ProviderError(
+                lazy("providers.claude.cli_not_found"), kind="unavailable"
+            ) from None
         except PermissionError:
             raise ProviderError(
-                t("providers.claude.cli_not_executable"), kind="unavailable"
+                lazy("providers.claude.cli_not_executable"), kind="unavailable"
             ) from None
         worker = _CliProcess(proc, key)
         self._processes.add(worker)
@@ -791,11 +793,11 @@ class ClaudeCliProvider:
         except TimeoutError:
             limit = seconds(self._settings.provider_timeout_seconds)
             raise ProviderError(
-                t("providers.claude.timeout", seconds=limit), kind="timeout"
+                lazy("providers.claude.timeout", seconds=limit), kind="timeout"
             ) from None
         except ValueError:
             # StreamReader.readline: one event exceeded STREAM_LIMIT.
-            raise ProviderError(t("providers.claude.event_too_large"), kind="internal") from None
+            raise ProviderError(lazy("providers.claude.event_too_large"), kind="internal") from None
 
     def _take_warm(self, key: _Key) -> _CliProcess | None:
         for worker in self._warm:
@@ -916,7 +918,7 @@ class ClaudeCliProvider:
         if status == 429 or turn.rate_limited or error == "rate_limit":
             resets = turn.rate_resets_at
             return ProviderError(
-                t("providers.claude.usage_limit")
+                lazy("providers.claude.usage_limit")
                 if resets is None
                 else t(
                     "providers.claude.usage_limit_resets",
@@ -934,7 +936,7 @@ class ClaudeCliProvider:
                 f"{t('providers.claude.unavailable')}{suffix}", kind="unavailable", retryable=True
             )
         if result.get("terminal_reason") == "prompt_too_long":
-            return ProviderError(t("providers.claude.conversation_too_long"), kind="invalid")
+            return ProviderError(lazy("providers.claude.conversation_too_long"), kind="invalid")
         return ProviderError(f"{t('providers.claude.cli_error')}{suffix}", kind="internal")
 
     @staticmethod

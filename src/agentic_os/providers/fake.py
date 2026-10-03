@@ -250,7 +250,7 @@ class FakeProvider:
         if request.purpose in self._fail:
             await asyncio.sleep(self._chunk_delay)
             raise ProviderError(
-                t("providers.fake.failed", agent=AGENT_LABELS[self._agent]), kind="unavailable"
+                lazy("providers.fake.failed", agent=AGENT_LABELS[self._agent]), kind="unavailable"
             )
         text = self._compose(request)
         truncated = False
@@ -278,7 +278,7 @@ class FakeProvider:
             await asyncio.sleep(self._chunk_delay)
             streamed = "".join(chunks)
             raise RefusalError(
-                t("providers.fake.refused", agent=AGENT_LABELS[self._agent]),
+                lazy("providers.fake.refused", agent=AGENT_LABELS[self._agent]),
                 usage=Usage(input_tokens=prompt_tokens, output_tokens=_estimate(streamed)),
                 model=model,
                 refusal=t("demo.refusal"),

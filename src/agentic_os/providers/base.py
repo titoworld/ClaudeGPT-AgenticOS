@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from agentic_os.domain import AgentName, ProviderMode, Purpose, Usage
-from agentic_os.i18n import Lazy, number, t
+from agentic_os.i18n import Lazy, lazy, number, use
 from agentic_os.pdf_facts import PdfCheck, PdfNotes, PdfPage, pdf_notes
 
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
@@ -107,10 +107,12 @@ class Attachment:
             data = self.path.read_bytes()
         except OSError:
             raise ProviderError(
-                t("providers.attachment_unreadable", name=self.name), kind="internal"
+                lazy("providers.attachment_unreadable", name=self.name), kind="internal"
             ) from None
         if hashlib.sha256(data).hexdigest() != self.sha256:
-            raise ProviderError(t("providers.attachment_changed", name=self.name), kind="internal")
+            raise ProviderError(
+                lazy("providers.attachment_changed", name=self.name), kind="internal"
+            )
         return data
 
 
@@ -224,6 +226,15 @@ class ProviderError(Exception):
         self.model = model
         self.declined: tuple[DeclinedAttempt, ...] = tuple(declined)
 
+    @property
+    def log_text(self) -> str:
+        """The message for the logs, which are in English: a :func:`~agentic_os.i18n.lazy`
+        message is made in English; any other one is logged as it was made."""
+        if isinstance(self.text, Lazy):
+            with use("en"):
+                return str(self.text)
+        return self.message
+
 
 def seconds(value: float) -> str:
     """A number of seconds as the texts write it: as ``{:g}`` would (``600``, ``0.5``, at
@@ -263,7 +274,7 @@ class RefusalError(ProviderError):
 
     def __init__(
         self,
-        message: str,
+        message: str | Lazy,
         *,
         usage: Usage,
         model: str,

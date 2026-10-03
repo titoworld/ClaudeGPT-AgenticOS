@@ -213,26 +213,25 @@ def test_only_the_refine_prompts_escape_the_refine_tags() -> None:
 def test_the_cached_modes_escape_the_tags_their_cache_key_version_had() -> None:
     """What the solo, duel and debate prompts escape is part of those prompts, which the
     turn cache serves: a change here must bump ``cache.CACHE_KEY_VERSION`` (and this
-    test). Version 7's prompts escaped exactly these tags."""
-    escaped_by_cache_version = {
-        7: frozenset(
-            {
-                "conversation_summary",
-                "conversation_history",
-                "message",
-                "current_message",
-                "user_message",
-                "question",
-                "your_previous_answer",
-                "claude_answer",
-                "chatgpt_answer",
-                "critique",
-                "answer",
-                "agreement",
-                "attachments",
-            }
-        )
-    }
+    test). Versions 7 and 8 escaped exactly these tags."""
+    tags = frozenset(
+        {
+            "conversation_summary",
+            "conversation_history",
+            "message",
+            "current_message",
+            "user_message",
+            "question",
+            "your_previous_answer",
+            "claude_answer",
+            "chatgpt_answer",
+            "critique",
+            "answer",
+            "agreement",
+            "attachments",
+        }
+    )
+    escaped_by_cache_version = {7: tags, 8: tags}
     assert escaped_by_cache_version[CACHE_KEY_VERSION] == COMMON_TAGS
 
 

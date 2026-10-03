@@ -19,7 +19,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from agentic_os.domain import AgentName, Usage
-from agentic_os.i18n import t
+from agentic_os.i18n import lazy, t
 from agentic_os.orchestrator.accounting import declined_attempts, failed_call_usage, is_billed
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
 from agentic_os.orchestrator.store import History, JsonValue, Store, StoredMessage, UsageRecord
@@ -159,7 +159,7 @@ async def _collect(provider: Provider, request: GenerationRequest) -> Generation
         if isinstance(stream, AsyncGenerator):
             await stream.aclose()
     if result is None:
-        raise ProviderError(t("engine.error.no_result"), kind="internal")
+        raise ProviderError(lazy("engine.error.no_result"), kind="internal")
     return result
 
 

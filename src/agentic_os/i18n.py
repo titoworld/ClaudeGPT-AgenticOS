@@ -22,6 +22,7 @@ import re
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from string import Formatter
 from typing import Final, Literal, TypedDict, get_args
 
@@ -161,10 +162,16 @@ _SEPARATORS: Final[Mapping[Lang, tuple[str, str]]] = {
 def number(value: float, decimals: int = 0) -> str:
     """``value`` as the web app writes numbers in the language in force (its
     ``Intl.NumberFormat``): ``1,234.5`` in English, ``1.234,5`` in Catalan, and in Spanish
-    without a separator below ten thousand (``1234,5``, ``12.345``)."""
+    without a separator below ten thousand (``1234,5``, ``12.345``). Halves round away
+    from zero, as ``Intl`` does (``2.5`` is ``3``, ``0.125`` with two decimals ``0.13``),
+    not to the even neighbour, as Python's formatting would."""
     lang = current()
     thousands, point = _SEPARATORS[lang]
-    text = f"{value:,.{decimals}f}"
+    # ICU (Intl) rounds the shortest decimal that reads back as the float, as repr gives it.
+    exact = Decimal(repr(value))
+    if exact.is_finite():
+        exact = exact.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    text = f"{exact:,.{decimals}f}"
     whole, _, fraction = text.partition(".")
     digits = whole.lstrip("-").replace(",", "")
     if lang == "es" and len(digits) <= 4:

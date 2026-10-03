@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from agentic_os.domain import Usage
-from agentic_os.i18n import t
+from agentic_os.i18n import lazy, t
 from agentic_os.orchestrator.accounting import is_billed
 from agentic_os.orchestrator.store import Store
 from agentic_os.pdf_facts import (
@@ -265,7 +265,7 @@ async def _collect(provider: Provider, request: GenerationRequest) -> Generation
         if isinstance(stream, AsyncGenerator):
             await stream.aclose()
     if result is None:
-        raise ProviderError(t("engine.error.reply_interrupted"), kind="internal")
+        raise ProviderError(lazy("engine.error.reply_interrupted"), kind="internal")
     if not result.text and chunks:
         result = replace(result, text="".join(chunks))
     return result
@@ -279,7 +279,7 @@ async def _record_declined(record: CheckRecord, source: object) -> Usage:
     for attempt in attempts if isinstance(attempts, tuple | list) else ():
         if not isinstance(attempt, DeclinedAttempt) or not is_billed(attempt.usage):
             continue
-        error = ProviderError(t("engine.error.declined", model=attempt.model), kind="invalid")
+        error = ProviderError(lazy("engine.error.declined", model=attempt.model), kind="invalid")
         spent += await record(attempt.model, attempt.usage, 0, None, error)
     return spent
 
@@ -372,10 +372,10 @@ async def check_pdf(
         except Exception as exc:
             if isinstance(exc, ProviderError):
                 error = exc
-                logger.warning("Claude's check of a PDF failed: %s: %s", exc.kind, exc.message)
+                logger.warning("Claude's check of a PDF failed: %s: %s", exc.kind, exc.log_text)
             else:
                 logger.exception("Claude's check of a PDF failed unexpectedly")
-                error = ProviderError(t("engine.error.provider_unexpected"), kind="internal")
+                error = ProviderError(lazy("engine.error.provider_unexpected"), kind="internal")
             spent += await _record_declined(record, exc)
             billed = error.usage if error.usage is not None and is_billed(error.usage) else None
             spent += await record(
