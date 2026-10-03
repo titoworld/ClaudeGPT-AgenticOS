@@ -106,6 +106,14 @@ RefineStopReason = Literal["owner", "converged", "unchanged", "max_rounds", "bud
 scored it above the threshold without a defect in consecutive rounds, neither found
 anything left to change, the rounds or the budget ran out, or both agents failed."""
 
+RefineReasonCode = Literal[
+    "over_budget", "incomplete", "identical", "nothing_to_change", "failed_round"
+]
+"""Why a round of a refine turn wrote no new version, as a code (``reason_code``, next to
+the ``reason`` written for people): its version went over the word limit, the editor wrote
+no complete version, the version was the same as the previous one, neither agent found
+anything to change, or the models failed and the round wrote no version."""
+
 REFINE_MAX_CHANGES: Final = 5
 """Changes a review may propose and an edit may apply in one round."""
 REFINE_CHANGELOG_TAIL: Final = 30

@@ -19,6 +19,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from agentic_os.domain import AgentName, Usage
+from agentic_os.i18n import t
 from agentic_os.orchestrator.accounting import declined_attempts, failed_call_usage, is_billed
 from agentic_os.orchestrator.prompts import SUMMARY_PROMPT, system_prompt
 from agentic_os.orchestrator.store import History, JsonValue, Store, StoredMessage, UsageRecord
@@ -38,11 +39,17 @@ logger = logging.getLogger(__name__)
 SUMMARY_MAX_OUTPUT_TOKENS = 2000
 """Default billed output budget of a summary call (``EngineConfig`` passes its own)."""
 SUMMARY_PREFERENCE: tuple[AgentName, ...] = ("claude", "chatgpt")
-EMPTY_SUMMARY_ERROR = "invalid: El resum és buit."
-"""Usage-record error of a summary call that returned no text (billed all the same)."""
-TRUNCATED_SUMMARY_ERROR = "invalid: El resum ha quedat tallat."
-"""Usage-record error of a summary that was cut off: it would replace the older messages
-for good, so it is never used (billed all the same)."""
+
+
+def empty_summary_error() -> str:
+    """Usage-record error of a summary call that returned no text (billed all the same)."""
+    return f"invalid: {t('engine.summary.empty')}"
+
+
+def truncated_summary_error() -> str:
+    """Usage-record error of a summary that was cut off: it would replace the older messages
+    for good, so it is never used (billed all the same)."""
+    return f"invalid: {t('engine.summary.cut_off')}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +158,7 @@ async def _collect(provider: Provider, request: GenerationRequest) -> Generation
         if isinstance(stream, AsyncGenerator):
             await stream.aclose()
     if result is None:
-        raise ProviderError("El proveïdor no ha retornat cap resultat.", kind="internal")
+        raise ProviderError(t("engine.error.no_result"), kind="internal")
     return result
 
 
@@ -182,7 +189,7 @@ async def _record_declined(
                 latency_ms=0,
                 ttft_ms=None,
                 ok=False,
-                error=f"invalid: {model} ha declinat la petició i l'ha passada a un altre model.",
+                error=f"invalid: {t('engine.error.declined', model=model)}",
             )
         )
     return spent
@@ -284,10 +291,10 @@ async def compact(
         summary = result.text.strip()
         failure: str | None = None
         if not summary:
-            failure = EMPTY_SUMMARY_ERROR
+            failure = empty_summary_error()
             logger.warning("Compaction summary by %s came back empty", agent)
         elif result.truncated:
-            failure = TRUNCATED_SUMMARY_ERROR
+            failure = truncated_summary_error()
             logger.warning("Compaction summary by %s was cut off (%s)", agent, result.finish_reason)
         await store.record_usage(
             UsageRecord(

@@ -10,7 +10,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from agentic_os.domain import AGENTS, AgentName, MessageKind, RefineStopReason, TurnMode, Usage
+from agentic_os.domain import (
+    AGENTS,
+    AgentName,
+    MessageKind,
+    RefineReasonCode,
+    RefineStopReason,
+    TurnMode,
+    Usage,
+)
 
 Section = Literal["text", "critique", "answer"]
 """text: plain answer/synthesis stream. critique/answer: parts of a debate revision."""
@@ -131,7 +139,8 @@ class PdfReading:
     unchecked_pages: tuple[int, ...] = ()
     """Pages nobody checked: ChatGPT read the extracted text as it is."""
     reason: str | None = None
-    """Why pages remain unchecked (Catalan); None when every page was checked."""
+    """Why pages remain unchecked, for people, in the turn's language; None when every page
+    was checked."""
 
     def to_wire(self) -> Wire:
         return {
@@ -162,7 +171,7 @@ class PdfCheckChanged:
     usage: Usage | None = None
     """What this turn's calls for the PDF billed (None while checking, or reused)."""
     reason: str | None = None
-    """Why pages remain unchecked (Catalan), as :attr:`PdfReading.reason`."""
+    """Why pages remain unchecked, as :attr:`PdfReading.reason`."""
 
     def to_wire(self) -> Wire:
         return {
@@ -329,7 +338,11 @@ class RefineRound:
     total: Usage
     """What the turn has billed so far."""
     reason: str | None = None
-    """Why the round wrote no new version (Catalan); None when it did."""
+    """Why the round wrote no new version, for people, in the turn's language; None when
+    it did."""
+    reason_code: RefineReasonCode | None = None
+    """The same reason as a code, for the client's logic; None when the round wrote a
+    version."""
     changes: Sequence[RefineChange] = ()
     """The changes of the new version (its changelog); none when not accepted."""
     proposals: Mapping[AgentName, int | None] = field(default_factory=dict)
@@ -347,6 +360,7 @@ class RefineRound:
             "version": self.version,
             "accepted": self.accepted,
             "reason": self.reason,
+            "reason_code": self.reason_code,
             "words": self.words,
             "budget_words": self.budget_words,
             "changes": [change.to_wire() for change in self.changes],

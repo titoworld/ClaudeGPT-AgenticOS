@@ -124,14 +124,14 @@ def analysed_pages(
     texts: tuple[str | None, ...], **facts: Mapping[str, int | bool]
 ) -> tuple[str | None, tuple[PdfPage, ...]]:
     """The stored text of a PDF with these page texts (each page's block introduced by
-    «--- Pàgina N ---», as the reader writes it; None when no page has text) and each
+    «--- Page N ---», as the reader writes it; None when no page has text) and each
     page's facts: its span in that text and counts of letters, with ``facts`` overriding
     the counts of a page by its number ("3": {"invisible": 40})."""
     blocks: list[str] = []
     spans: list[tuple[int | None, int | None]] = []
     offset = 0
     for number, body in enumerate(texts, start=1):
-        header = f"--- Pàgina {number} ---\n"
+        header = f"--- Page {number} ---\n"
         content = body or ""
         start = offset + len(header)
         spans.append((start, start + len(content)) if content else (None, None))

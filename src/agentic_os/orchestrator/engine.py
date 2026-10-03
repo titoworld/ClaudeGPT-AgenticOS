@@ -56,7 +56,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, Protocol
 
-from agentic_os.attachments import snapshot
+from agentic_os.attachments import size_text, snapshot
 from agentic_os.domain import (
     AGENTS,
     REFINE_BUDGET_FACTOR,
@@ -67,11 +67,13 @@ from agentic_os.domain import (
     ProviderMode,
     Purpose,
     RefineOptions,
+    RefineReasonCode,
     RefineStopReason,
     Usage,
     other_agent,
     words,
 )
+from agentic_os.i18n import lazy, number, t
 from agentic_os.orchestrator.accounting import (
     TurnAccounting,
     declined_attempts,
@@ -117,8 +119,6 @@ from agentic_os.orchestrator.memory import (
 )
 from agentic_os.orchestrator.pdf_check import (
     CHECK_CONCURRENCY,
-    CHECK_FAILED,
-    CHECK_TIMED_OUT,
     CHECK_TIMEOUT_SECONDS,
     CheckOutcome,
     check_pdf,
@@ -172,7 +172,6 @@ logger = logging.getLogger(__name__)
 
 MAX_DEBATE_ROUNDS = 4
 TITLE_MAX_CHARS = 60
-DEFAULT_TITLE = "Conversa nova"
 STATUS_TIMEOUT_SECONDS = 2.0
 """How long a turn waits for a provider's status (the model in the turn cache key)."""
 STATUS_CHECK_TIMEOUT_SECONDS = 30.0
@@ -189,20 +188,35 @@ _PHASE_OF: dict[MessageKind, Literal["answer", "revision", "synthesis"]] = {
 
 Emit = Callable[[ServerEvent], None]
 OnOutcome = Callable[[TurnOutcome], None]
-INTERNAL_ERROR = ErrorInfo("internal", "S'ha produït un error intern i el torn s'ha aturat.")
+
+
+def _internal_error() -> ErrorInfo:
+    """The error of a turn that crashed."""
+    return ErrorInfo("internal", t("engine.error.internal_turn"))
+
 
 REFINE_ROUNDS_RANGE: Final = (2, 50)
 REFINE_WORDS_RANGE: Final = (100, 20_000)
 REFINE_THRESHOLD_RANGE: Final = (50, 100)
 """The ranges of a refine turn's options (``RefineOptions``), which the server checks too."""
-REFINE_OVER_BUDGET = "La nova versió passava del límit de paraules."
-REFINE_INCOMPLETE = "L'editor no ha escrit cap versió completa."
-REFINE_IDENTICAL = "La nova versió és igual a l'anterior."
-REFINE_NOTHING_TO_CHANGE = "Cap dels dos hi ha trobat res a canviar."
-REFINE_FAILED_ROUND = "Els models han fallat i la ronda no ha escrit cap versió."
-"""Why a round of a refine turn wrote no new version (``refine.round``'s ``reason``, and
-the ``reason`` of a version that was not accepted)."""
-REFINE_NO_CHANGES = "La revisió no té la llista de canvis que se li demanava."
+
+
+def refine_reason(code: RefineReasonCode) -> str:
+    """Why a round of a refine turn wrote no new version, for people, in the language in
+    force: ``refine.round``'s ``reason`` and the ``reason`` of a version that was not
+    accepted, next to their ``reason_code``. The engine decides on the code, and makes the
+    text when it writes the event or the message."""
+    return t(f"engine.refine.reason.{code}")
+
+
+REFINE_OVER_BUDGET: Final = lazy("engine.refine.reason.over_budget")
+REFINE_INCOMPLETE: Final = lazy("engine.refine.reason.incomplete")
+REFINE_IDENTICAL: Final = lazy("engine.refine.reason.identical")
+REFINE_NOTHING_TO_CHANGE: Final = lazy("engine.refine.reason.nothing_to_change")
+REFINE_FAILED_ROUND: Final = lazy("engine.refine.reason.failed_round")
+"""The texts of :func:`refine_reason`, made in the language in force when they are shown
+(``str()``), for whoever quotes them."""
+REFINE_NO_CHANGES: Final = lazy("engine.refine.no_changes")
 """The error of a review whose reply has no changes section, or whose section neither
 lists a change in the format asked for nor says UNCHANGED: it failed."""
 REFINE_UNCHANGED = "UNCHANGED"
@@ -217,7 +231,7 @@ def make_title(question: str) -> str:
     """Conversation title: first non-empty line of the question, at most 60 characters."""
     line = next((ln.strip() for ln in question.splitlines() if ln.strip()), "")
     if not line:
-        return DEFAULT_TITLE
+        return t("engine.default_title")
     if len(line) <= TITLE_MAX_CHARS:
         return line
     return line[: TITLE_MAX_CHARS - 1].rstrip() + "…"
@@ -373,7 +387,7 @@ class _ReviewReader:
         pieces = self._stream.close()
         review = self.review = self._stream.final()
         if not review.ok:
-            return pieces, _Read("", error=REFINE_NO_CHANGES)
+            return pieces, _Read("", error=str(REFINE_NO_CHANGES))
         content = review.text
         if not content:  # an empty list proposes nothing: shown as it is stored
             content = REFINE_UNCHANGED
@@ -418,8 +432,8 @@ class _VersionReader:
         self.words = 0
         self.budget_words = 0
         self.changes: tuple[RefineChange, ...] = ()
-        self.reason: str | None = None
-        """Why the version was not accepted (a Catalan ``REFINE_*`` reason)."""
+        self.reason: RefineReasonCode | None = None
+        """Why the version was not accepted, as a code (:func:`refine_reason`)."""
         self.accepted = False
 
     def start(self) -> EditStream:
@@ -441,11 +455,11 @@ class _VersionReader:
         )
         current = self._current
         if not edit.complete:
-            self.reason = REFINE_INCOMPLETE
+            self.reason = "incomplete"
         elif not self._keep_over and self.words > self.budget_words:
-            self.reason = REFINE_OVER_BUDGET
+            self.reason = "over_budget"
         elif current is not None and edit.text == current.text:
-            self.reason = REFINE_IDENTICAL
+            self.reason = "identical"
         self.accepted = self.reason is None
         meta: dict[str, JsonValue] = {
             "role": "version",
@@ -453,7 +467,8 @@ class _VersionReader:
             "words": self.words,
             "budget_words": self.budget_words,
             "accepted": self.accepted,
-            "reason": self.reason,
+            "reason": None if self.reason is None else refine_reason(self.reason),
+            "reason_code": self.reason,
             "changelog": _changes_json(edit.changes),
         }
         return pieces, _Read(edit.text, meta)
@@ -610,12 +625,12 @@ def _set_truncated(meta: dict[str, JsonValue], finish_reason: str | None) -> Non
 def _empty_reply_message(result: GenerationResult) -> str:
     """Error message of a billed reply that left nothing to store."""
     if not result.truncated:
-        return "El model ha retornat una resposta buida."
+        return t("engine.error.empty_reply")
     if result.finish_reason == "max_tokens":
-        return "El model ha esgotat el límit de sortida abans d'escriure cap resposta."
+        return t("engine.error.empty_reply_max_tokens")
     if result.finish_reason == "content_filter":
-        return "El filtre de contingut ha aturat la resposta abans que el model escrivís res."
-    return "La resposta del model s'ha interromput abans d'escriure res."
+        return t("engine.error.empty_reply_content_filter")
+    return t("engine.error.empty_reply_interrupted")
 
 
 def _cost_basis(mode: ProviderMode, usage: Usage) -> str | None:
@@ -801,8 +816,9 @@ class Engine:
             if error is not None:
                 logger.error("Turn %s crashed", request.request_id, exc_info=error)
             if not finished:
-                outcome = await self._settle(turn, "failed", error=INTERNAL_ERROR)
-                yield TurnFailed(request.request_id, INTERNAL_ERROR, outcome.usage)
+                crashed = _internal_error()
+                outcome = await self._settle(turn, "failed", error=crashed)
+                yield TurnFailed(request.request_id, crashed, outcome.usage)
         finally:
             await _end_turn(task, turn)
 
@@ -838,7 +854,7 @@ class Engine:
                     turn.request_id,
                     exc_info=True,
                 )
-                await self._settle(turn, "failed", error=INTERNAL_ERROR)
+                await self._settle(turn, "failed", error=_internal_error())
             raise
         finally:
             await _cancel_and_wait(turn.background)
@@ -861,7 +877,8 @@ class Engine:
         elif await self._store.conversation_exists(request.conversation_id):
             turn.conversation_id = request.conversation_id
         else:
-            await self._fail(turn, ErrorInfo("not_found", "La conversa no existeix."))
+            not_found = t("engine.error.conversation_not_found")
+            await self._fail(turn, ErrorInfo("not_found", not_found))
             return
 
         turn.context = await self._prepare_context(turn, threshold)
@@ -970,44 +987,41 @@ class Engine:
     def _validate(self, request: TurnRequest) -> ErrorInfo | None:
         text = request.text
         if not text.strip():
-            return ErrorInfo("invalid", "La pregunta és buida.")
+            return ErrorInfo("invalid", t("engine.request.question_empty"))
         if len(text) > self._config.max_question_chars:
-            return ErrorInfo(
-                "invalid",
-                f"La pregunta és massa llarga (màxim {self._config.max_question_chars} caràcters).",
-            )
+            most = number(self._config.max_question_chars)
+            return ErrorInfo("invalid", t("engine.request.question_too_long", max=most))
         if request.mode not in ("solo", "duel", "debate", "refine"):
-            return ErrorInfo("invalid", "Mode de torn desconegut.")
+            return ErrorInfo("invalid", t("engine.request.mode"))
         if request.mode == "solo" and request.target not in AGENTS:
-            return ErrorInfo("invalid", "Agent desconegut.")
+            return ErrorInfo("invalid", t("engine.request.agent"))
         debate = request.options.debate
         if request.mode == "debate":
             if not 0 <= debate.rounds <= MAX_DEBATE_ROUNDS:
                 return ErrorInfo(
-                    "invalid", f"Les rondes de debat han de ser entre 0 i {MAX_DEBATE_ROUNDS}."
+                    "invalid", t("engine.request.debate_rounds", max=MAX_DEBATE_ROUNDS)
                 )
             if not 0 <= debate.consensus_threshold <= 100:
-                return ErrorInfo("invalid", "El llindar de consens ha de ser entre 0 i 100.")
+                return ErrorInfo("invalid", t("engine.request.consensus_threshold"))
             if debate.synthesizer not in AGENTS:
-                return ErrorInfo("invalid", "Agent sintetitzador desconegut.")
+                return ErrorInfo("invalid", t("engine.request.synthesizer"))
         if request.mode == "refine" and (invalid := self._validate_refine(request)):
             return invalid
         for model in (*request.models.values(), *request.fast_models.values()):
             if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
-                return ErrorInfo("invalid", "Identificador de model invàlid.")
+                return ErrorInfo("invalid", t("engine.request.model_id"))
         attachments = request.attachments
         if len(attachments) > self._config.max_attachments:
-            return ErrorInfo(
-                "invalid",
-                f"Un missatge pot portar com a màxim {self._config.max_attachments} adjunts.",
-            )
+            most = number(self._config.max_attachments)
+            return ErrorInfo("invalid", t("engine.request.too_many_attachments", max=most))
         if len(set(attachments)) != len(attachments):
-            return ErrorInfo("invalid", "Un mateix adjunt no pot anar dues vegades al missatge.")
+            return ErrorInfo("invalid", t("engine.request.repeated_attachment"))
         if request.pdf_in_revisions not in ("full", "text"):
-            return ErrorInfo("invalid", "Opció desconeguda per als PDF de les revisions.")
+            return ErrorInfo("invalid", t("engine.request.pdf_in_revisions"))
         for agent in self._agents(request):
             if agent not in self._providers:
-                return ErrorInfo("unavailable", f"{AGENT_LABELS[agent]} no està configurat.")
+                missing = t("engine.request.not_configured", agent=AGENT_LABELS[agent])
+                return ErrorInfo("unavailable", missing)
         return None
 
     @staticmethod
@@ -1017,30 +1031,26 @@ class Engine:
         options = request.options.refine
         low, high = REFINE_ROUNDS_RANGE
         if not low <= options.max_rounds <= high:
-            return ErrorInfo(
-                "invalid", f"Les rondes de «Perfecciona» han de ser entre {low} i {high}."
-            )
+            return ErrorInfo("invalid", t("engine.request.refine_rounds", low=low, high=high))
         low, high = REFINE_WORDS_RANGE
         if options.max_words is not None and not low <= options.max_words <= high:
-            most = f"{high:,}".replace(",", ".")
-            return ErrorInfo("invalid", f"El límit de paraules ha de ser entre {low} i {most}.")
+            limits = {"low": number(low), "high": number(high)}
+            return ErrorInfo("invalid", t("engine.request.refine_words", **limits))
         low, high = REFINE_THRESHOLD_RANGE
         if not low <= options.convergence_threshold <= high:
-            return ErrorInfo(
-                "invalid", f"El llindar de convergència ha de ser entre {low} i {high}."
-            )
+            return ErrorInfo("invalid", t("engine.request.refine_threshold", low=low, high=high))
         if options.editor not in AGENTS:
-            return ErrorInfo("invalid", "Agent editor desconegut.")
+            return ErrorInfo("invalid", t("engine.request.refine_editor"))
         budget = request.refine_budget_usd
         if budget is not None and not (math.isfinite(budget) and budget > 0):
-            return ErrorInfo("invalid", "El pressupost de «Perfecciona» ha de ser positiu.")
+            return ErrorInfo("invalid", t("engine.request.refine_budget"))
         return None
 
     @staticmethod
     def _missing_attachment(error: AttachmentNotFoundError) -> ErrorInfo:
         return ErrorInfo(
             "invalid",
-            f"L'adjunt {error.attachment_id} no existeix.",
+            t("engine.error.attachment_not_found", id=error.attachment_id),
             attachment_id=error.attachment_id,
         )
 
@@ -1067,10 +1077,8 @@ class Engine:
             raise RuntimeError(f"the store returned {len(loaded)} attachments for {len(ids)} ids")
         limit = self._config.max_attachment_bytes
         if sum(attachment.size for attachment in loaded) > limit:
-            return ErrorInfo(
-                "invalid",
-                f"Els adjunts d'un missatge no poden sumar més de {limit / 1_000_000:g} MB.",
-            )
+            too_large = t("engine.error.attachments_too_large", size=size_text(limit))
+            return ErrorInfo("invalid", too_large)
         turn.attachments = tuple(replace(attachment, mode="full") for attachment in loaded)
         return None
 
@@ -1350,7 +1358,8 @@ class Engine:
         if outcome.ok:
             return True
         kind = outcome.error.kind if outcome.error else "unavailable"
-        await self._fail(turn, ErrorInfo(kind, f"{AGENT_LABELS[agent]} no ha pogut respondre."))
+        failed = t("engine.error.agent_failed", agent=AGENT_LABELS[agent])
+        await self._fail(turn, ErrorInfo(kind, failed))
         return False
 
     async def _duel(self, turn: _Turn) -> bool:
@@ -1497,7 +1506,7 @@ class Engine:
     async def _fail_all(self, turn: _Turn, outcomes: Mapping[AgentName, _Outcome]) -> None:
         kinds = {outcome.error.kind for outcome in outcomes.values() if outcome.error}
         kind = kinds.pop() if len(kinds) == 1 else "unavailable"
-        await self._fail(turn, ErrorInfo(kind, "Cap dels dos agents ha pogut respondre."))
+        await self._fail(turn, ErrorInfo(kind, t("engine.error.both_failed")))
 
     async def _store_degraded_synthesis(
         self,
@@ -1686,7 +1695,7 @@ class Engine:
                 reader=reader,
             )
             self._announce_stop(turn, state)
-            if outcome.ok and reader.reason == REFINE_OVER_BUDGET:
+            if outcome.ok and reader.reason == "over_budget":
                 # Version 1 while it is shortened, should the turn be cancelled meanwhile;
                 # once the shortening ends, it decides what version 1 is (round 1 has
                 # written nothing else to the changelog).
@@ -1757,6 +1766,7 @@ class Engine:
             "budget_words": state.budget_words,
             "accepted": True,
             "reason": None,
+            "reason_code": None,
             "changelog": [],
             "copied_from": answer.message_id,
         }
@@ -1852,10 +1862,10 @@ class Engine:
             if outcomes[agent].ok and (review := reader.review) is not None
         }
         if not reviews:
-            self._refine_round_ended(turn, state, start, accepted=False, reason=REFINE_FAILED_ROUND)
+            self._refine_round_ended(turn, state, start, accepted=False, reason="failed_round")
             return "failed"
         accepted = False
-        reason: str | None = REFINE_NOTHING_TO_CHANGE
+        reason: RefineReasonCode | None = "nothing_to_change"
         changes: tuple[RefineChange, ...] = ()
         if all(review.unchanged for review in reviews.values()):
             state.unchanged_rounds += 1
@@ -1866,7 +1876,7 @@ class Engine:
             edited = await self._edit(turn, state, reviews)
             if edited is None:
                 self._refine_round_ended(
-                    turn, state, start, accepted=False, reason=REFINE_FAILED_ROUND, reviews=reviews
+                    turn, state, start, accepted=False, reason="failed_round", reviews=reviews
                 )
                 return "failed"
             accepted, reason, changes = edited
@@ -1897,7 +1907,7 @@ class Engine:
 
     async def _edit(
         self, turn: _Turn, state: _Refine, reviews: Mapping[AgentName, ReviewParse]
-    ) -> tuple[bool, str | None, tuple[RefineChange, ...]] | None:
+    ) -> tuple[bool, RefineReasonCode | None, tuple[RefineChange, ...]] | None:
         """The edit of a round: the editors (:meth:`_editors`) in turn, until one replies,
         write the next version from the changes the reviews proposed. Whether it was
         accepted, why not, and its changes; None when every editor failed.
@@ -1933,7 +1943,7 @@ class Engine:
             if not outcome.ok:
                 state.edit_failed.add(agent)
                 continue
-            if reader.reason == REFINE_OVER_BUDGET:
+            if reader.reason == "over_budget":
                 draft, reader = reader, self._version_reader(state)
                 shorten = refine_shorten_prompt(
                     turn.question,
@@ -1955,7 +1965,7 @@ class Engine:
                 self._announce_stop(turn, state)
                 if not outcome.ok:
                     state.edit_failed.add(agent)
-                    return False, REFINE_OVER_BUDGET, ()
+                    return False, "over_budget", ()
             if not reader.accepted:
                 return False, reader.reason, ()
             self._accept(state, reader, outcome)
@@ -1981,16 +1991,18 @@ class Engine:
         start: Usage,
         *,
         accepted: bool,
-        reason: str | None = None,
+        reason: RefineReasonCode | None = None,
         changes: Sequence[RefineChange] = (),
         reviews: Mapping[AgentName, ReviewParse] | None = None,
         converged: bool = False,
     ) -> None:
         """``refine.round``: how the round in course ended, with what its calls billed
-        (the turn's total since ``start``) and the turn's total so far."""
+        (the turn's total since ``start``) and the turn's total so far; when it wrote no
+        version, why (``reason``, a code made into the turn's language here)."""
         version = state.current
         assert version is not None
         reviewed = reviews or {}
+        code = None if accepted else reason
         turn.emit(
             RefineRound(
                 turn.request_id,
@@ -2001,7 +2013,8 @@ class Engine:
                 budget_words=state.budget_words,
                 usage=_usage_since(start, turn.accounting.usage),
                 total=turn.accounting.usage,
-                reason=None if accepted else reason,
+                reason=None if code is None else refine_reason(code),
+                reason_code=code,
                 changes=tuple(changes) if accepted else (),
                 proposals={agent: len(review.changes) for agent, review in reviewed.items()},
                 scores={agent: review.score for agent, review in reviewed.items()},
@@ -2316,7 +2329,8 @@ class Engine:
             logger.warning("Claude's check of the PDFs of turn %s took too long", turn.request_id)
         for index, attachment_id, attachment in pdfs:
             if index not in outcomes:
-                outcome = CheckOutcome(None, False, spent[index], CHECK_TIMED_OUT, final=False)
+                late = t("engine.pdf_check.timed_out")
+                outcome = CheckOutcome(None, False, spent[index], late, final=False)
                 outcomes[index] = outcome
                 turn.emit(self._check_changed(turn, attachment_id, attachment, outcome))
         turn.attachments = tuple(
@@ -2384,7 +2398,7 @@ class Engine:
             )
         except Exception:
             logger.exception("Claude's check of a PDF of turn %s failed", turn.request_id)
-            reason = CHECK_FAILED.format(message="S'ha produït un error intern.")
+            reason = t("engine.pdf_check.failed", message=t("engine.error.internal"))
             return CheckOutcome(None, False, spent[index], reason, final=False)
 
     @staticmethod
@@ -2579,7 +2593,7 @@ class Engine:
                 error = exc
             except Exception:
                 logger.exception("Provider %s failed unexpectedly", agent)
-                error = ProviderError("Error inesperat del proveïdor.", kind="internal")
+                error = ProviderError(t("engine.error.provider_unexpected"), kind="internal")
             model, usage = failed_call_usage(
                 error, request.model or self._models.get(agent, ""), turn.prices
             )
@@ -2798,7 +2812,7 @@ class Engine:
                 await stream.aclose()
         if result is None:
             raise ProviderError(
-                "La resposta del model s'ha interromput.", kind="internal", retryable=True
+                t("engine.error.reply_interrupted"), kind="internal", retryable=True
             )
         if not result.text and chunks:
             result = replace(result, text="".join(chunks))
@@ -2846,10 +2860,7 @@ class Engine:
                 usage=usage,
                 latency_ms=0,
                 ttft_ms=None,
-                error=ProviderError(
-                    f"{model} ha declinat la petició i l'ha passada a un altre model.",
-                    kind="invalid",
-                ),
+                error=ProviderError(t("engine.error.declined", model=model), kind="invalid"),
             )
         return declined
 

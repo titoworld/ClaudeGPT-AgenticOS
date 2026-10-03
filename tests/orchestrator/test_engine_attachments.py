@@ -26,6 +26,7 @@ from agentic_os.orchestrator.events import (
 from agentic_os.orchestrator.memory import attachments_reference
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.prompts import (
+    TEXT_FILES_NOTE,
     answer_prompt,
     debate_answer_prompt,
     revision_prompt,
@@ -41,6 +42,7 @@ from agentic_os.providers.base import (
     GenerationResult,
 )
 from agentic_os.providers.fake import FakeProvider
+from agentic_os.providers.prompt_format import attachment_text, file_code
 from orchestrator.attachment_fixtures import AttachmentFiles
 
 QUESTION = "Què diu l'informe?"
@@ -506,6 +508,18 @@ LIST = (
     f"{TEXT_NOTE}"
     "</attachments>\n\n"
 )
+
+
+def test_the_note_on_text_files_names_the_lines_that_enclose_them(
+    files: AttachmentFiles,
+) -> None:
+    """The note is the engine's (prompts.py) and the lines are the providers'
+    (prompt_format.py): whatever their words, they must be the same lines."""
+    notes = files.text()
+    code = file_code(notes)
+    opening, *_, closing = attachment_text(notes).rstrip("\n").split("\n")
+    assert opening.endswith(f"· {code}]") and '"· CODE]"' in TEXT_FILES_NOTE
+    assert f'"{closing.replace(code, "CODE")}"' in TEXT_FILES_NOTE
 
 
 def test_the_prompts_list_the_attachments_before_the_question(files: AttachmentFiles) -> None:

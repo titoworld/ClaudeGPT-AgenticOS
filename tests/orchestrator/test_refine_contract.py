@@ -82,6 +82,7 @@ def test_a_round_on_the_wire() -> None:
         "version": 4,
         "accepted": True,
         "reason": None,
+        "reason_code": None,
         "words": 812,
         "budget_words": 960,
         "changes": [

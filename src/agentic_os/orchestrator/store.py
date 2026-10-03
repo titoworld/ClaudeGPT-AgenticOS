@@ -20,6 +20,7 @@ from agentic_os.domain import (
     TurnMode,
     Usage,
 )
+from agentic_os.i18n import t
 from agentic_os.orchestrator.events import TurnOutcome
 from agentic_os.pdf_facts import PdfCheck
 from agentic_os.providers.base import Attachment
@@ -28,10 +29,11 @@ JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "Jso
 
 
 class AttachmentNotFoundError(LookupError):
-    """:meth:`Store.get_attachments` was asked for an attachment that does not exist."""
+    """:meth:`Store.get_attachments` was asked for an attachment that does not exist (its
+    message is for people, in the language in force when it is raised)."""
 
     def __init__(self, attachment_id: int) -> None:
-        super().__init__(f"L'adjunt {attachment_id} no existeix.")
+        super().__init__(t("engine.error.attachment_not_found", id=attachment_id))
         self.attachment_id = attachment_id
 
 

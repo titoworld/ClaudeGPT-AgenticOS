@@ -18,7 +18,7 @@ from agentic_os.orchestrator.events import (
     TurnFailed,
     TurnStarted,
 )
-from agentic_os.orchestrator.memory import TRUNCATED_SUMMARY_ERROR
+from agentic_os.orchestrator.memory import truncated_summary_error
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.prompts import INCOMPLETE_NOTE, OWN_INCOMPLETE_NOTE
 from agentic_os.orchestrator.store import StoredMessage
@@ -153,7 +153,7 @@ async def test_a_cut_off_summary_is_never_used(store: InMemoryStore) -> None:
     assert isinstance(done, TurnCompleted)
     claude, chatgpt = (u for u in store.usage if u.purpose == "summary")
     # Billed, but a partial summary would replace the older messages for good.
-    assert (claude.agent, claude.ok, claude.error) == ("claude", False, TRUNCATED_SUMMARY_ERROR)
+    assert (claude.agent, claude.ok, claude.error) == ("claude", False, truncated_summary_error())
     assert claude.usage.output_tokens > 0
     assert (chatgpt.agent, chatgpt.ok) == ("chatgpt", True)
     history = await store.get_history(conversation_id)

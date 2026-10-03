@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import AliasChoices
@@ -30,6 +31,7 @@ from agentic_os.domain import (
     REFINE_MAX_CHANGES,
     REFINE_MIN_BUDGET_WORDS,
     RefineOptions,
+    RefineReasonCode,
 )
 from agentic_os.orchestrator import engine, pdf_check
 from agentic_os.orchestrator.types import EngineConfig
@@ -364,21 +366,15 @@ def event_row(protocol: str, event: str) -> str:
 
 
 def test_the_refine_reasons_the_protocol_quotes_are_the_engines() -> None:
-    """Why a round of a refine turn wrote no version (``refine.round``'s ``reason``) and
-    why a review failed, as the engine says them: the web rebuilds the rounds of a
-    reloaded turn from some of these strings."""
+    """Why a round of a refine turn wrote no version (``refine.round``'s ``reason_code``
+    and its ``reason``, in English) and why a review failed, as the engine says them."""
     protocol = read(PROTOCOL)
-    reasons = (
-        engine.REFINE_OVER_BUDGET,
-        engine.REFINE_INCOMPLETE,
-        engine.REFINE_IDENTICAL,
-        engine.REFINE_NOTHING_TO_CHANGE,
-        engine.REFINE_FAILED_ROUND,
-    )
     row = event_row(protocol, "refine.round")
-    for reason in reasons:
-        assert f"`{reason}`" in row, reason
-    assert f"`{engine.REFINE_NO_CHANGES}`" in event_row(protocol, "stream.failed")
+    with i18n.use("en"):
+        for code in get_args(RefineReasonCode):
+            assert f"`{code}`" in row, code
+            assert f"`{engine.refine_reason(code)}`" in row, code
+        assert f"`{engine.REFINE_NO_CHANGES}`" in event_row(protocol, "stream.failed")
 
 
 def test_the_refine_answers_the_protocol_quotes_are_the_servers() -> None:

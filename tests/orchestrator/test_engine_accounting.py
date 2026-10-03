@@ -19,7 +19,7 @@ from agentic_os.orchestrator.events import (
     TurnFailed,
     TurnStarted,
 )
-from agentic_os.orchestrator.memory import EMPTY_SUMMARY_ERROR
+from agentic_os.orchestrator.memory import empty_summary_error
 from agentic_os.orchestrator.memory_store import InMemoryStore
 from agentic_os.orchestrator.store import JsonValue, StoredMessage
 from agentic_os.orchestrator.types import EngineConfig, TurnRequest
@@ -250,7 +250,7 @@ async def test_an_empty_summary_keeps_its_billed_usage(store: InMemoryStore) -> 
     )
     done = completed(events)
     claude, chatgpt = (u for u in store.usage if u.purpose == "summary")
-    assert (claude.agent, claude.ok, claude.error) == ("claude", False, EMPTY_SUMMARY_ERROR)
+    assert (claude.agent, claude.ok, claude.error) == ("claude", False, empty_summary_error())
     assert claude.model == "fake-claude-mini"
     assert claude.usage.processed_tokens > 0 and claude.usage.cost_usd
     assert (chatgpt.agent, chatgpt.ok) == ("chatgpt", True)
