@@ -56,6 +56,8 @@ export const SETTINGS: RuntimeSettings = {
 interface ServerTexts {
   claude: string;
   chatgpt: string;
+  /** Before what an alias says of its family, as the server writes it. */
+  newest: string;
   /** Before the model an alias stands for («Now: claude-opus-5-5»). */
   now: string;
   models: Record<'opus' | 'sonnet' | 'haiku' | 'fable' | 'gpt-6-astra' | 'gpt-6-sol' | 'gpt-6-luna', string>;
@@ -65,20 +67,22 @@ const SERVER_TEXTS: Record<Locale, ServerTexts> = {
   en: {
     claude: 'Subscription active (max)',
     chatgpt: 'ChatGPT subscription active (Plus)',
+    newest: 'Always the newest version.',
     now: 'Now',
     models: {
       opus: 'Deep reasoning and long tasks.',
-      sonnet: 'Balance between quality and speed.',
-      haiku: 'The fastest and most affordable; good for summaries.',
+      sonnet: 'A balance of quality and speed.',
+      haiku: 'The fastest and cheapest; good for summaries.',
       fable: 'The most capable; may not be included in every plan.',
       'gpt-6-astra': 'The most capable, for the most demanding work.',
       'gpt-6-sol': 'Balanced, for everyday work.',
-      'gpt-6-luna': 'Fast and affordable, for simple tasks.',
+      'gpt-6-luna': 'Fast and cheap, for simple tasks.',
     },
   },
   es: {
     claude: 'Suscripción activa (max)',
     chatgpt: 'Suscripción de ChatGPT activa (Plus)',
+    newest: 'Siempre la versión más reciente.',
     now: 'Ahora',
     models: {
       opus: 'Razonamiento profundo y tareas largas.',
@@ -86,13 +90,14 @@ const SERVER_TEXTS: Record<Locale, ServerTexts> = {
       haiku: 'El más rápido y económico; bueno para los resúmenes.',
       fable: 'El más capaz; puede no estar incluido en todos los planes.',
       'gpt-6-astra': 'El más capaz, para el trabajo más exigente.',
-      'gpt-6-sol': 'Equilibrado, para el trabajo del día a día.',
+      'gpt-6-sol': 'Equilibrado, para el trabajo de cada día.',
       'gpt-6-luna': 'Rápido y económico, para tareas sencillas.',
     },
   },
   ca: {
     claude: 'Subscripció activa (max)',
     chatgpt: 'Subscripció ChatGPT activa (Plus)',
+    newest: 'Sempre la versió més nova.',
     now: 'Ara',
     models: {
       opus: 'Raonament profund i tasques llargues.',
@@ -138,7 +143,8 @@ const model = (id: string, label: string, description: string, isDefault = false
 
 /** The models of each agent, described in `lang`. */
 export function catalog(lang: Locale): ModelCatalog {
-  const { models: d, now } = SERVER_TEXTS[lang];
+  const { models: d, newest, now } = SERVER_TEXTS[lang];
+  const alias = (family: string, current: string) => `${newest} ${family} ${now}: ${current}`;
   return {
     claude: {
       mode: 'cli',
@@ -147,10 +153,10 @@ export function catalog(lang: Locale): ModelCatalog {
       live: true,
       models: [
         model(MODEL.claude, MODEL.claude, d.opus, true),
-        model('opus', 'Claude Opus', `${d.opus} ${now}: ${MODEL.claude}`),
-        model('sonnet', 'Claude Sonnet', `${d.sonnet} ${now}: claude-sonnet-5`),
-        model('haiku', 'Claude Haiku', `${d.haiku} ${now}: claude-haiku-4-5`),
-        model('fable', 'Claude Fable', `${d.fable} ${now}: claude-fable-5-1`),
+        model('opus', 'Claude Opus', alias(d.opus, MODEL.claude)),
+        model('sonnet', 'Claude Sonnet', alias(d.sonnet, 'claude-sonnet-5')),
+        model('haiku', 'Claude Haiku', alias(d.haiku, 'claude-haiku-4-5')),
+        model('fable', 'Claude Fable', alias(d.fable, 'claude-fable-5-1')),
       ],
     },
     chatgpt: {
