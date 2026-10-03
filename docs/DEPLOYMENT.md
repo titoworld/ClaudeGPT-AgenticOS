@@ -1,65 +1,65 @@
-# Desplegament en un VPS
+# Deploying on a VPS
 
-Aquesta guia et porta, pas a pas, des d'un servidor buit fins a tenir ClaudeGPT OS funcionant a `https://el-teu-domini`, amb certificat, contrasenya i codi TOTP. Calcula uns 45 minuts la primera vegada.
+This guide takes you step by step from an empty server to ClaudeGPT OS running at `https://your-domain`, with a certificate, a password and a TOTP code. Allow about 45 minutes the first time.
 
-No cal ser expert: copia les ordres tal com són i canvia només el que està marcat (el domini, el correu...).
+You don't need to be an expert: copy the commands exactly as they are and change only what is marked (the domain, the email...).
 
-## Què tindràs al final
+## What you will have
 
 ```
-Internet ──► Caddy (80/443: HTTPS automàtic, HTTP/3)
-                │  xarxa interna de Docker (no surt a Internet)
+Internet ──► Caddy (80/443: automatic HTTPS, HTTP/3)
+                │  Docker internal network (not reachable from the Internet)
                 ▼
-             Aplicació (FastAPI + interfície web)
-                ├── CLI de Claude Code  ─► la teva subscripció de Claude
-                └── CLI de Codex        ─► la teva subscripció de ChatGPT
+             App (FastAPI + web interface)
+                ├── Claude Code CLI  ─► your Claude subscription
+                └── Codex CLI        ─► your ChatGPT subscription
 ```
 
-- Només Caddy és accessible des de fora. L'aplicació no té cap port obert.
-- Tot corre en contenidors Docker sense root (l'aplicació amb l'usuari 10001 i Caddy amb el 10002), amb el sistema de fitxers de només lectura. L'única excepció és `caddy-init`, que a cada arrencada dona els volums de Caddy al seu usuari: corre uns segons com a root, sense xarxa, i s'atura.
-- Les dades viuen en quatre volums de Docker (vegeu [Còpies de seguretat](#còpies-de-seguretat)).
+- Only Caddy can be reached from outside. The app has no open port.
+- Everything runs in Docker containers without root (the app as user 10001 and Caddy as user 10002), with a read-only file system. The only exception is `caddy-init`, which at every start hands Caddy's volumes over to Caddy's user: it runs as root for a few seconds, without a network, and stops.
+- The data lives in four Docker volumes (see [Backups](#backups)).
 
-## Què necessites
+## What you need
 
-- **Un VPS** amb 2 vCPU i 2–4 GB de RAM, 25 GB de disc, **Debian 12/13 o Ubuntu 24.04** (amd64 o arm64). Amb 2 GB de RAM l'script de preparació hi afegeix 2 GB de memòria d'intercanvi (*swap*).
-- **Un domini o subdomini** on puguis crear registres DNS, per exemple `ia.example.com`.
-- **Una clau SSH** al teu ordinador (si no en tens: `ssh-keygen -t ed25519`).
-- **Les subscripcions** que vulguis fer servir: Claude Pro/Max i ChatGPT Plus/Pro. També pots fer servir claus d'API o combinar-ho.
-- **Una aplicació d'autenticació** al mòbil: Aegis, Google Authenticator, 1Password, Bitwarden...
+- **A VPS** with 2 vCPUs and 2–4 GB of RAM, 25 GB of disk, **Debian 12/13 or Ubuntu 24.04** (amd64 or arm64). With 2 GB of RAM, the preparation script adds 2 GB of swap.
+- **A domain or subdomain** where you can create DNS records, for example `ia.example.com`.
+- **An SSH key** on your computer (if you don't have one: `ssh-keygen -t ed25519`).
+- **The subscriptions** you want to use: Claude Pro/Max and ChatGPT Plus/Pro. You can also use API keys, or mix the two.
+- **An authenticator app** on your phone: Aegis, Google Authenticator, 1Password, Bitwarden...
 
 ## 1. DNS
 
-Al panell del teu proveïdor de domini, crea:
+In your domain provider's control panel, create:
 
-| Tipus | Nom | Valor |
+| Type | Name | Value |
 | --- | --- | --- |
-| `A` | `ia` (o el subdomini que vulguis) | IPv4 del VPS |
-| `AAAA` | `ia` | IPv6 del VPS (només si en té) |
+| `A` | `ia` (or the subdomain you want) | The VPS's IPv4 address |
+| `AAAA` | `ia` | The VPS's IPv6 address (only if it has one) |
 
-Comprova-ho des del teu ordinador (pot trigar uns minuts):
+Check it from your computer (it can take a few minutes):
 
 ```bash
 nslookup ia.example.com
 ```
 
-Ha de respondre amb la IP del VPS **abans** d'arrencar l'aplicació: si no, el certificat no es pot obtenir i, després de diversos intents fallits, Let's Encrypt et fa esperar.
+It must answer with the VPS's IP **before** you start the app: otherwise the certificate cannot be obtained and, after several failed attempts, Let's Encrypt makes you wait.
 
-> Si fas servir Cloudflare, deixa el registre en mode «DNS only» (núvol gris). Amb el proxy de Cloudflare activat, Caddy no veu la IP real dels visitants.
+> If you use Cloudflare, leave the record as "DNS only" (grey cloud). With Cloudflare's proxy on, Caddy does not see the visitors' real IP.
 
-Si el teu proveïdor de VPS té un tallafoc propi al panell (Hetzner, OVH, AWS...), obre-hi també **22/tcp, 80/tcp, 443/tcp i 443/udp**.
+If your VPS provider has its own firewall in its control panel (Hetzner, OVH, AWS...), open **22/tcp, 80/tcp, 443/tcp and 443/udp** there too.
 
-## 2. Preparar el servidor
+## 2. Prepare the server
 
-Entra al VPS i fes-te root:
+Log in to the VPS and become root:
 
 ```bash
-ssh usuari@IP-DEL-VPS
+ssh user@VPS-IP
 sudo -i
 ```
 
-A partir d'aquí, **totes les ordres s'executen com a root**.
+From here on, **every command runs as root**.
 
-Instal·la git i descarrega el projecte a `/opt/claudegpt`:
+Install git and download the project to `/opt/claudegpt`:
 
 ```bash
 apt-get update && apt-get install -y git
@@ -67,29 +67,29 @@ git clone https://github.com/titoworld/ClaudeGPT-AgenticOS.git /opt/claudegpt
 cd /opt/claudegpt
 ```
 
-> Si el repositori és privat, GitHub et demanarà credencials: fes servir un *token* d'accés amb permís només de lectura, o una *deploy key*.
+> If the repository is private, GitHub will ask you for credentials: use an access *token* with read-only permission, or a *deploy key*.
 
-Executa l'script de preparació:
+Run the preparation script:
 
 ```bash
 bash deploy/harden.sh
 ```
 
-Què fa (el pots tornar a executar sense por, sempre deixa el mateix resultat):
+What it does (you can safely run it again: it always leaves the same result):
 
-1. Actualitza el sistema i activa les **actualitzacions de seguretat automàtiques** (si una actualització ho requereix, el servidor es reinicia a les 04:30 i l'aplicació torna a arrencar sola).
-2. Activa el **tallafoc** (ufw): només SSH (amb límit d'intents), 80/tcp, 443/tcp i 443/udp.
-3. **SSH només amb clau**: desactiva les contrasenyes. Abans comprova que el teu usuari té una clau autoritzada i et demana confirmació.
-4. Crea memòria d'intercanvi si el servidor té poca RAM.
-5. Instal·la **Docker** des del repositori oficial de Docker.
+1. Updates the system and turns on **automatic security updates** (if an update needs it, the server reboots at 04:30 and the app starts again by itself).
+2. Turns on the **firewall** (ufw): only SSH (rate limited), 80/tcp, 443/tcp and 443/udp.
+3. **SSH with keys only**: turns off passwords. Before that, it checks that your user has an authorized key and asks you to confirm.
+4. Creates swap if the server has little RAM.
+5. Installs **Docker** from Docker's official repository.
 
-Opcions: `WITH_FAIL2BAN=1 bash deploy/harden.sh` afegeix fail2ban (bloqueja una hora les IP que fallen l'SSH 5 vegades).
+Option: `WITH_FAIL2BAN=1 bash deploy/harden.sh` adds fail2ban (it bans for an hour the IPs that fail to log in over SSH 5 times).
 
-> **No et quedis fora.** Quan l'script et pregunti per l'SSH, tingues **una altra sessió SSH oberta**. En acabar, obre un terminal nou i comprova que encara pots entrar amb `ssh usuari@IP-DEL-VPS`. Si no pots, la sessió que tens oberta et permet desfer-ho: `rm /etc/ssh/sshd_config.d/01-claudegpt.conf && systemctl restart ssh`.
+> **Don't lock yourself out.** When the script asks you about SSH, keep **another SSH session open**. When it finishes, open a new terminal and check that you can still log in with `ssh user@VPS-IP`. If you can't, the session you have open lets you undo it: `rm /etc/ssh/sshd_config.d/01-claudegpt.conf && systemctl restart ssh`.
 >
-> Si l'SSH respon «Too many authentication failures», el teu agent d'SSH ofereix massa claus abans de la bona: indica-li quina ha de fer servir, `ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 usuari@IP-DEL-VPS`.
+> If SSH answers "Too many authentication failures", your SSH agent offers too many keys before the right one: tell it which one to use, `ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 user@VPS-IP`.
 
-## 3. Configurar
+## 3. Configure
 
 ```bash
 cd /opt/claudegpt
@@ -98,87 +98,87 @@ chmod 600 .env
 nano .env
 ```
 
-Omple com a mínim:
+Fill in at least:
 
-- `DOMAIN`: el teu domini, sense `https://` (per exemple `ia.example.com`).
-- `ACME_EMAIL`: el teu correu, per al compte ACME dels certificats. Let's Encrypt ja no envia avisos de caducitat (des del juny del 2025): Caddy renova sol els certificats i, si una renovació falla, només ho veuràs a `docker compose logs caddy`. Si vols un avís, fes servir un servei extern que vigili el certificat.
+- `DOMAIN`: your domain, without `https://` (for example `ia.example.com`).
+- `ACME_EMAIL`: your email, for the certificates' ACME account. Let's Encrypt no longer sends expiry warnings (since June 2025): Caddy renews the certificates by itself and, if a renewal fails, you will only see it in `docker compose logs caddy`. If you want a warning, use an external service that monitors the certificate.
 
-La resta ja té valors correctes. Desa amb `Ctrl+O`, `Enter` i surt amb `Ctrl+X`.
+The rest already has correct values. Save with `Ctrl+O` and `Enter`, and exit with `Ctrl+X`.
 
-## 4. Arrencar
+## 4. Start
 
 ```bash
 docker compose up -d --build
 ```
 
-La primera vegada triga uns 5–10 minuts: descarrega unes imatges base, compila la interfície i inclou les CLI oficials (Claude Code 2.1.283 i Codex 0.157.1). La imatge final ocupa uns 900 MB.
+The first time takes about 5–10 minutes: it downloads some base images, builds the interface and includes the official CLIs (Claude Code 2.1.283 and Codex 0.157.1). The final image takes up about 900 MB.
 
-Comprova que tot està en marxa:
+Check that everything is running:
 
 ```bash
 docker compose ps
 ```
 
-Els dos serveis (`app` i `caddy`) han d'estar `running` i `healthy`. (`caddy-init` no hi surt: ja ha acabat la seva feina.) Per veure com Caddy obté el certificat:
+Both services (`app` and `caddy`) must be `running` and `healthy`. (`caddy-init` is not listed: it has already done its job.) To watch Caddy obtain the certificate:
 
 ```bash
 docker compose logs -f caddy
 ```
 
-Quan vegis `certificate obtained successfully`, surt amb `Ctrl+C`.
+When you see `certificate obtained successfully`, exit with `Ctrl+C`.
 
-## 5. Crear el propietari (contrasenya i TOTP)
+## 5. Create the owner (password and TOTP)
 
 ```bash
 docker compose exec -it app agentic-os init
 ```
 
-1. Tria una contrasenya d'almenys 12 caràcters (millor una frase: «tres-gats-blaus-sota-la-pluja»).
-2. Escaneja el codi QR amb l'aplicació d'autenticació. Si el terminal és massa petit o no l'escaneja, fes-lo més gran o escriu a l'aplicació la clau que es mostra sota el QR.
-3. Escriu el codi de 6 xifres que et mostra l'aplicació per confirmar-ho.
+1. Choose a password of at least 12 characters (a phrase is better: "three-blue-cats-in-the-rain").
+2. Scan the QR code with the authenticator app. If the terminal is too small or the app does not scan it, make the terminal bigger, or type into the app the key shown under the QR code.
+3. Type the 6-digit code that the app shows you, to confirm.
 
-Si mai perds el mòbil o oblides la contrasenya, torna a executar aquesta ordre des del servidor: substitueix el propietari i tanca totes les sessions obertes.
+If you ever lose your phone or forget the password, run this command again on the server: it replaces the owner and ends every open session.
 
-## 6. Connectar Claude (subscripció Pro/Max)
+## 6. Connect Claude (Pro/Max subscription)
 
-**Opció recomanada: token d'un any**
+**Recommended option: a one-year token**
 
 ```bash
 docker compose exec -it app claude setup-token
 ```
 
-1. Copia l'enllaç que mostra i obre'l al navegador del teu ordinador.
-2. Inicia la sessió amb el teu compte de Claude i autoritza l'accés.
-3. Enganxa al terminal el codi que et dona la web.
-4. L'ordre mostra un token que comença per `sk-ant-oat01-`. Obre `.env` (`nano .env`), treu el `#` de la línia `CLAUDE_CODE_OAUTH_TOKEN=` i enganxa-hi el token.
-5. Aplica el canvi: `docker compose up -d`
+1. Copy the link it shows and open it in your computer's browser.
+2. Log in with your Claude account and authorize access.
+3. Paste into the terminal the code that the website gives you.
+4. The command shows a token that starts with `sk-ant-oat01-`. Open `.env` (`nano .env`), remove the `#` from the line `CLAUDE_CODE_OAUTH_TOKEN=` and paste the token there.
+5. Apply the change: `docker compose up -d`
 
-El token dura un any i només serveix per fer peticions al model. Apunta't al calendari quan caduca.
+The token lasts a year and can only be used to make requests to the model. Put its expiry date in your calendar.
 
-**Alternativa: inici de sessió desat al servidor**
+**Alternative: a login saved on the server**
 
 ```bash
 docker compose exec -it app claude auth login
 ```
 
-Segueix els mateixos passos (enllaç, autoritzar, enganxar el codi). La sessió es desa al volum `app_home` i es renova sola; no cal tocar `.env`.
+Follow the same steps (link, authorize, paste the code). The session is saved in the `app_home` volume and renews itself; there is no need to touch `.env`.
 
-## 7. Connectar ChatGPT (subscripció Plus/Pro)
+## 7. Connect ChatGPT (Plus/Pro subscription)
 
 ```bash
 docker compose exec -it app codex login --device-auth
 ```
 
-1. Obre l'enllaç que mostra (des del mòbil o l'ordinador) i inicia la sessió amb el teu compte de ChatGPT.
-2. Escriu el codi que apareix al terminal.
-3. Comprova-ho: `docker compose exec app codex login status`
-4. Reinicia l'aplicació perquè el procés de Codex agafi la sessió nova: `docker compose restart app`
+1. Open the link it shows (from your phone or your computer) and log in with your ChatGPT account.
+2. Type the code that appears in the terminal.
+3. Check it: `docker compose exec app codex login status`
+4. Restart the app so that the Codex process picks up the new session: `docker compose restart app`
 
-Si et diu que l'inici de sessió amb codi de dispositiu no està permès, busca l'opció a la configuració de seguretat del teu compte de ChatGPT (en comptes d'empresa o d'equip, l'ha d'activar l'administrador).
+If it tells you that logging in with a device code is not allowed, look for the option in the security settings of your ChatGPT account (in business or team accounts, the administrator has to turn it on).
 
-## 8. Alternativa: claus d'API
+## 8. Alternative: API keys
 
-Si prefereixes pagar per ús (o combinar-ho: Claude amb subscripció i ChatGPT amb clau, per exemple), edita `.env`:
+If you prefer to pay per use (or to mix: Claude with a subscription and ChatGPT with a key, for example), edit `.env`:
 
 ```bash
 AOS_CLAUDE_MODE=api
@@ -187,30 +187,30 @@ AOS_CHATGPT_MODE=api
 OPENAI_API_KEY=sk-proj-...
 ```
 
-I aplica-ho amb `docker compose up -d`.
+And apply it with `docker compose up -d`.
 
-> **Important:** si Claude és en mode `cli`, deixa `ANTHROPIC_API_KEY` comentada. La CLI de Claude dona prioritat a aquesta clau per sobre de la subscripció i ho facturaria tot per API.
+> **Important:** if Claude is in `cli` mode, leave `ANTHROPIC_API_KEY` commented out. The Claude CLI gives this key priority over the subscription, and would bill everything through the API.
 
-Per provar la interfície sense gastar res hi ha el mode `fake` (`AOS_CLAUDE_MODE=fake`, `AOS_CHATGPT_MODE=fake`).
+To try the interface without spending anything, there is the `fake` mode (`AOS_CLAUDE_MODE=fake`, `AOS_CHATGPT_MODE=fake`).
 
-## 9. Comprovar-ho tot
+## 9. Check everything
 
 ```bash
 docker compose exec app agentic-os doctor
 ```
 
-Revisa la configuració, la base de dades, el propietari, el tipus de canvi, la interfície, les CLI i l'estat de cada proveïdor, amb els límits d'ús de la subscripció de ChatGPT (els de Claude no hi surten: la CLI de Claude només els informa quan respon). Cada comprovació comença per `[ OK ]`, `[ -- ]` (no cal), `[AVÍS]` o `[ERROR]`; al final diu si hi ha algun problema crític.
+It checks the settings, the database, the owner, the exchange rate, the interface, the CLIs and the status of each provider, with the usage limits of the ChatGPT subscription (Claude's are not shown: the Claude CLI only reports them when it answers). Each check starts with `[ OK ]`, `[ -- ]` (not needed), `[WARN]` or `[ERROR]`; at the end it says whether there is any critical problem.
 
-## 10. Primer inici de sessió
+## 10. First login
 
-Obre `https://el-teu-domini` al navegador, escriu la contrasenya i el codi TOTP. Ja està!
+Open `https://your-domain` in the browser, and type the password and the TOTP code. That's it!
 
-- La sessió dura fins a 72 hores sense activitat i 30 dies com a màxim.
-- Per tancar totes les sessions i oblidar els dispositius coneguts (per exemple, si has perdut un dispositiu): `docker compose exec app agentic-os reset-sessions`
+- A session lasts up to 72 hours without activity, and 30 days at most.
+- To end every session and forget the known devices (for example, if you have lost a device): `docker compose exec app agentic-os reset-sessions`
 
-## Actualitzar
+## Updating
 
-Un cop al mes, **encara que `git pull` no porti res de nou**:
+Once a month, **even if `git pull` brings nothing new**:
 
 ```bash
 cd /opt/claudegpt
@@ -222,125 +222,125 @@ docker compose restart caddy
 docker image prune -f
 ```
 
-- `--pull` baixa les imatges base més recents (Debian, Python, Node) amb els pegats de seguretat del mes; `docker compose pull caddy` fa el mateix amb la de Caddy. Sense això, Docker reaprofita les còpies antigues que ja té.
-- `docker compose restart caddy` aplica els canvis de `deploy/Caddyfile` que porti `git pull`: Docker no els veu sol i Caddy continuaria amb la configuració antiga.
-- Fes-ho quan no hi hagi cap resposta en curs: l'aplicació es reinicia (uns segons) i els torns que s'estiguin generant es tallen. La interfície es reconnecta sola.
-- Les versions de les CLI i de Caddy estan fixades al projecte i s'actualitzen amb `git pull`. L'aplicació parla amb cada CLI d'una manera molt concreta, sobretot amb Codex, i una versió nova pot trencar-ho.
-- Si vols provar una altra versió abans que s'actualitzi el projecte, defineix `CLAUDE_CLI_VERSION` o `CODEX_CLI_VERSION` a `.env` i torna a executar `docker compose up -d --build`. Comprova-ho amb `agentic-os doctor`. Per tornar enrere, esborra la línia i reconstrueix.
+- `--pull` downloads the latest base images (Debian, Python, Node), with the month's security patches; `docker compose pull caddy` does the same for Caddy's image. Without it, Docker reuses the old copies it already has.
+- `docker compose restart caddy` applies the changes to `deploy/Caddyfile` that `git pull` brings: Docker does not notice them by itself, and Caddy would carry on with the old configuration.
+- Do it when no answer is in progress: the app restarts (a few seconds) and the turns being generated are cut short. The interface reconnects by itself.
+- The versions of the CLIs and of Caddy are pinned in the project and are updated with `git pull`. The app talks to each CLI in a very particular way, Codex above all, and a new version can break it.
+- If you want to try another version before the project updates it, set `CLAUDE_CLI_VERSION` or `CODEX_CLI_VERSION` in `.env` and run `docker compose up -d --build` again. Check it with `agentic-os doctor`. To go back, delete the line and rebuild.
 
-**El servidor.** Les actualitzacions automàtiques només inclouen les de seguretat de Debian/Ubuntu. Docker (i amb ell `containerd` i `runc`, que aïllen els contenidors) ve del repositori de Docker i no s'actualitza sol, a propòsit: una versió nova de Docker val més instal·lar-la quan hi ets. Aprofita l'actualització mensual:
+**The server.** Automatic updates only include Debian/Ubuntu's security updates. Docker (and with it `containerd` and `runc`, which isolate the containers) comes from Docker's repository and does not update by itself, on purpose: a new version of Docker is best installed while you are watching. Do it with the monthly update:
 
 ```bash
 apt-get update && apt-get upgrade
 docker compose ps
 ```
 
-Els contenidors continuen en marxa o tornen a arrencar sols; `docker compose ps` ho confirma. Si existeix el fitxer `/var/run/reboot-required`, reinicia el servidor (`reboot`) o espera el reinici automàtic de les 04:30.
+The containers keep running, or start again by themselves; `docker compose ps` confirms it. If the file `/var/run/reboot-required` exists, reboot the server (`reboot`) or wait for the automatic reboot at 04:30.
 
-**Un sol cop, en actualitzar una instal·lació anterior a aquests canvis** (setembre del 2026; si no calia, no fa cap mal):
+**Only once, when you update an installation from before these changes** (September 2026; if it was not needed, it does no harm):
 
-- Esborra el registre antic de Codex, que guardava el text sencer de cada crida a ChatGPT (ara aquests fitxers viuen en memòria, a `/run/codex-state`, i s'esborren cada vegada que l'aplicació engega Codex): `docker compose exec app sh -c 'rm -f /home/app/.codex/logs_2.sqlite*'`. Les còpies de seguretat antigues també el contenen: esborra-les o guarda-les xifrades.
-- Si tens còpies a `/opt/claudegpt/backups`, descarrega-les i esborra-les del servidor (`rm -rf /opt/claudegpt/backups`): ara es desen fora del repositori (vegeu [Còpies de seguretat](#còpies-de-seguretat)).
-- Torna a executar `bash deploy/harden.sh`: treu el límit de 3 intents de l'SSH, que podia deixar fora qui té diverses claus a l'agent.
-- Caddy ja no corre com a root: el servei `caddy-init` passa els seus volums al nou usuari tot sol.
-- Les còpies ara es fan amb `bash deploy/backup.sh` i es restauren amb `bash deploy/restore.sh` (vegeu [Còpies de seguretat](#còpies-de-seguretat)): no facis servir els blocs d'ordres antics, que podien esborrar la còpia anterior del mateix dia o deixar l'aplicació aturada. Les còpies fetes amb els blocs antics també es restauren amb `deploy/restore.sh`.
-- Si has fet alguna còpia amb les ordres antigues, comprova-la: si `tar` fallava, en quedava un fitxer incomplet que semblava bo. Al teu ordinador, `age -d -i claudegpt-backup.key claudegpt-AAAA-MM-DD.tar.gz.age | tar tzf - > /dev/null && echo Correcta` (sense xifrar, `tar tzf claudegpt-AAAA-MM-DD.tar.gz > /dev/null && echo Correcta`).
+- Delete Codex's old log, which kept the whole text of every call to ChatGPT (these files now live in memory, in `/run/codex-state`, and are deleted every time the app starts Codex): `docker compose exec app sh -c 'rm -f /home/app/.codex/logs_2.sqlite*'`. Old backups contain it too: delete them or keep them encrypted.
+- If you have backups in `/opt/claudegpt/backups`, download them and delete them from the server (`rm -rf /opt/claudegpt/backups`): they are now saved outside the repository (see [Backups](#backups)).
+- Run `bash deploy/harden.sh` again: it removes the limit of 3 SSH attempts, which could lock out anyone with several keys in their agent.
+- Caddy no longer runs as root: the `caddy-init` service hands its volumes over to the new user by itself.
+- Backups are now made with `bash deploy/backup.sh` and restored with `bash deploy/restore.sh` (see [Backups](#backups)): don't use the old command blocks, which could delete the previous backup of the same day or leave the app stopped. Backups made with the old blocks are restored with `deploy/restore.sh` too.
+- If you made a backup with the old commands, check it: if `tar` failed, it left an incomplete file that looked fine. On your computer, `age -d -i claudegpt-backup.key claudegpt-YYYY-MM-DD.tar.gz.age | tar tzf - > /dev/null && echo OK` (unencrypted, `tar tzf claudegpt-YYYY-MM-DD.tar.gz > /dev/null && echo OK`).
 
-## Còpies de seguretat
+## Backups
 
-| Volum | Què conté | Si el perds... |
+| Volume | What it holds | If you lose it... |
 | --- | --- | --- |
-| `claudegpt_app_data` | Base de dades SQLite: propietari (hash de la contrasenya i secret TOTP), sessions, converses, estadístiques i preferències. També els fitxers adjunts a les converses, a `/data/attachments` | Perds les converses i els seus adjunts, i cal tornar a fer `agentic-os init` |
-| `claudegpt_app_home` | Inicis de sessió de Claude (`~/.claude`) i de Codex (`~/.codex`). Els registres de Codex, que contenen els prompts, no hi són: viuen en memòria | Cal tornar a iniciar sessió a les CLI |
-| `claudegpt_caddy_data` | Certificats i compte de Let's Encrypt | Caddy els torna a demanar sol |
-| `claudegpt_caddy_config` | Configuració interna de Caddy | Res; es regenera |
+| `claudegpt_app_data` | SQLite database: owner (password hash and TOTP secret), sessions, conversations, statistics and preferences. Also the files attached to conversations, in `/data/attachments` | You lose the conversations and their attachments, and you have to run `agentic-os init` again |
+| `claudegpt_app_home` | Claude's (`~/.claude`) and Codex's (`~/.codex`) logins. Codex's logs, which contain the prompts, are not there: they live in memory | You have to log in to the CLIs again |
+| `claudegpt_caddy_data` | Let's Encrypt certificates and account | Caddy requests them again by itself |
+| `claudegpt_caddy_config` | Caddy's internal configuration | Nothing; it is regenerated |
 
-Després d'una restauració, els dos primers tenen un nom nou, com `claudegpt_app_data_r20260928-101500`: `deploy/restore.sh` sempre restaura en volums nous i n'escriu els noms a `.env` (`APP_DATA_VOLUME` i `APP_HOME_VOLUME`).
+After a restore, the first two have a new name, such as `claudegpt_app_data_r20260928-101500`: `deploy/restore.sh` always restores into new volumes and writes their names to `.env` (`APP_DATA_VOLUME` and `APP_HOME_VOLUME`).
 
-A més, **desa el fitxer `.env`**: té el token de Claude i les claus d'API. L'script de còpia el desa al costat de les dades.
+Also, **keep the `.env` file**: it has the Claude token and the API keys. The backup script saves it next to the data.
 
-**Els adjunts.** Les imatges, els PDF i els fitxers de text que adjuntes a les preguntes es desen al volum de dades, a `/data/attachments` (directoris 700 i fitxers 600, com la base de dades), i per això entren a les còpies i es restauren amb elles. Cada fitxer es desa un sol cop, amb el seu hash (`sha256`) com a nom, encara que el pugis més vegades; les miniatures, a `/data/attachments/thumbnails`. Ocupen espai al disc i a cada còpia:
+**Attachments.** The images, PDFs and text files you attach to your questions are saved in the data volume, in `/data/attachments` (directories 700 and files 600, like the database), so they go into the backups and are restored with them. Each file is saved only once, named after its hash (`sha256`), even if you upload it several times; the thumbnails go in `/data/attachments/thumbnails`. They take up space on the disk and in every backup:
 
-- Un adjunt que no arribes a enviar (el treus del compositor o tanques la pestanya) s'esborra sol en un dia com a molt.
-- Esborrar una conversa esborra els adjunts que només feia servir ella.
-- Per veure quant ocupen: `docker compose exec app du -sh /data/attachments`. Si el disc s'omple, pujar un fitxer dona un error que ho diu, i l'aplicació continua funcionant.
+- An attachment you never send (you remove it from the composer or close the tab) is deleted by itself within a day at most.
+- Deleting a conversation deletes the attachments that only it used.
+- To see how much space they take up: `docker compose exec app du -sh /data/attachments`. If the disk fills up, uploading a file gives an error that says so, and the app keeps working.
 
-Els adjunts contenen el que hi hagis pujat (documents, fotos): tracta les còpies amb la mateixa cura que les converses.
+Attachments contain whatever you uploaded (documents, photos): treat the backups with the same care as the conversations.
 
-> Les còpies contenen secrets (el secret TOTP, els tokens de les subscripcions i les claus d'API). Es desen a `/var/backups/claudegpt`, un directori amb permisos 700 (només el teu usuari i root) que és **fora del repositori** (així un `git add` no les pot pujar mai). Xifra-les, descarrega-les i esborra-les del servidor.
+> The backups contain secrets (the TOTP secret, the subscription tokens and the API keys). They are saved in `/var/backups/claudegpt`, a directory with permissions 700 (only your user and root) that is **outside the repository** (so a `git add` can never upload them). Encrypt them, download them and delete them from the server.
 
-**Xifratge (recomanat, un sol cop).** Al teu ordinador, instal·la [age](https://github.com/FiloSottile/age) i crea una clau: `age-keygen -o claudegpt-backup.key`. Mostra la clau pública (`age1...`): és la que faràs servir al servidor. La clau privada (el fitxer) no surt mai del teu ordinador; guarda'n una còpia en un lloc segur, perquè sense ella no podràs restaurar. Al servidor: `apt-get install -y age`.
+**Encryption (recommended, once).** On your computer, install [age](https://github.com/FiloSottile/age) and create a key: `age-keygen -o claudegpt-backup.key`. It shows the public key (`age1...`): that is the one you will use on the server. The private key (the file) never leaves your computer; keep a copy of it in a safe place, because without it you won't be able to restore. On the server: `apt-get install -y age`.
 
-> **Fes-ho dins de `tmux`.** Si la connexió SSH es talla a mitja còpia o a mitja restauració, els scripts ho deixen tot en un estat segur, però s'aturen. Dins de `tmux` continuen fins al final: obre'l amb `tmux new -s copia` abans de començar i, si la connexió es talla, torna-hi amb `tmux attach -t copia`. (Si no el tens: `apt-get install -y tmux`. `screen` també serveix.)
+> **Do it inside `tmux`.** If the SSH connection drops halfway through a backup or a restore, the scripts leave everything in a safe state, but they stop. Inside `tmux` they carry on to the end: open it with `tmux new -s backup` before you start and, if the connection drops, go back to it with `tmux attach -t backup`. (If you don't have it: `apt-get install -y tmux`. `screen` works too.)
 
-**Fer una còpia** al servidor, com a root (`sudo -i`, com al pas 2):
+**Making a backup** on the server, as root (`sudo -i`, as in step 2):
 
 ```bash
 cd /opt/claudegpt
-bash deploy/backup.sh age1...        # la teva clau pública
+bash deploy/backup.sh age1...        # your public key
 ```
 
-- Abans de tocar res, comprova la clau, la imatge i els volums. Després atura l'aplicació uns segons, perquè la base de dades quedi coherent, i la torna a engegar encara que alguna cosa falli, premis Ctrl+C o es talli la connexió.
-- Crea dos fitxers nous amb la data i l'hora al nom: `claudegpt-AAAA-MM-DD_HHMMSS.tar.gz.age` (les dades) i `env-AAAA-MM-DD_HHMMSS.age` (el `.env`); si en fas dues en el mateix segon, la segona porta un sufix (`_HHMMSS-1`). Mai no sobreescriu ni esborra cap còpia anterior: si alguna cosa falla, surt `ERROR` i no queda cap fitxer a mitges.
-- Els fitxers queden a nom de l'usuari amb què has entrat al VPS, perquè els puguis descarregar; el directori continua sent privat.
-- Sense xifrar (només si no pots instal·lar age): `bash deploy/backup.sh --sense-xifrar`. Els fitxers es diuen igual, sense `.age`.
-- Si l'script mor de cop (un `kill -9` o un tall de corrent), no pot fer net: l'aplicació pot quedar aturada (`docker compose start app` la torna a engegar) i a `/var/backups/claudegpt` queden fitxers temporals ocults, amb `.parcial.` al nom, que la còpia següent esborra.
-- Si hi ha una restauració a mitges (vegeu més avall), la còpia s'atura amb `ERROR` sense tocar res: acaba-la primer amb `--reprèn` o `--desfés`.
+- Before touching anything, it checks the key, the image and the volumes. Then it stops the app for a few seconds, so that the database is consistent, and starts it again even if something fails, you press Ctrl+C or the connection drops.
+- It creates two new files with the date and time in their names: `claudegpt-YYYY-MM-DD_HHMMSS.tar.gz.age` (the data) and `env-YYYY-MM-DD_HHMMSS.age` (the `.env`); if you make two in the same second, the second one gets a suffix (`_HHMMSS-1`). It never overwrites or deletes an earlier backup: if something fails, it says `ERROR` and no half-written file is left.
+- The files belong to the user you logged in to the VPS with, so that you can download them; the directory stays private.
+- Unencrypted (only if you can't install age): `bash deploy/backup.sh --unencrypted`. The files have the same names, without `.age`.
+- If the script dies suddenly (a `kill -9` or a power cut), it cannot clean up: the app may be left stopped (`docker compose start app` starts it again), and hidden temporary files with `.partial.` in their names are left in `/var/backups/claudegpt`; the next backup deletes them.
+- If a restore is unfinished (see below), the backup stops with `ERROR` without touching anything: finish the restore first with `--resume` or `--undo`.
 
-**Descarregar-la** des del teu ordinador (no des del VPS), a la carpeta on guardes les còpies. `usuari` és el mateix usuari amb què entres al VPS al pas 2 (`root` si hi entres directament com a root), i `S` és el que ha mostrat l'script a «Còpia feta:», amb el sufix si en porta:
+**Downloading it** from your computer (not from the VPS), into the folder where you keep your backups. `user` is the same user you log in to the VPS with in step 2 (`root` if you log in directly as root), and `S` is what the script printed after `Backup done:`, with the suffix if it has one:
 
 ```bash
-S=AAAA-MM-DD_HHMMSS
-V=usuari@IP-DEL-VPS
+S=YYYY-MM-DD_HHMMSS
+V=user@VPS-IP
 scp "${V}:/var/backups/claudegpt/claudegpt-$S.tar.gz.age" "${V}:/var/backups/claudegpt/env-$S.age" . \
   && age -d -i claudegpt-backup.key "claudegpt-$S.tar.gz.age" | tar tzf - > /dev/null \
   && ssh "$V" "rm /var/backups/claudegpt/claudegpt-$S.tar.gz.age /var/backups/claudegpt/env-$S.age" \
-  && echo "Còpia descarregada i comprovada: ja no és al servidor."
+  && echo "Backup downloaded and checked: it is no longer on the server."
 ```
 
-Només esborra del servidor aquests dos fitxers, i només si s'han descarregat bé i la còpia es pot desxifrar i llegir sencera amb la teva clau. Si tens la clau en una altra carpeta, canvia `claudegpt-backup.key` pel seu camí. Si la còpia és sense xifrar, treu `.age` dels noms i, en lloc de la línia d'`age`, comprova-la amb `tar tzf "claudegpt-$S.tar.gz" > /dev/null`.
+It deletes only these two files from the server, and only if they were downloaded correctly and the backup can be decrypted and read to the end with your key. If your key is in another folder, replace `claudegpt-backup.key` with its path. If the backup is unencrypted, remove `.age` from the names and, instead of the `age` line, check it with `tar tzf "claudegpt-$S.tar.gz" > /dev/null`.
 
-**Restaurar** (al mateix servidor o a un de nou amb els passos 1–4 fets). La còpia es restaura en volums nous: les dades actuals no es toquen, i les pots recuperar fins que confirmes que tot ha anat bé.
+**Restoring** (on the same server, or on a new one with steps 1–4 done). The backup is restored into new volumes: the current data is not touched, and you can get it back until you confirm that everything went well.
 
-1. Al teu ordinador, desxifra la còpia i el `.env`: `age -d -i claudegpt-backup.key -o claudegpt-AAAA-MM-DD_HHMMSS.tar.gz claudegpt-AAAA-MM-DD_HHMMSS.tar.gz.age` i `age -d -i claudegpt-backup.key -o env-AAAA-MM-DD_HHMMSS env-AAAA-MM-DD_HHMMSS.age`. Si `age` dona un error, la còpia està incompleta o no és teva: no la facis servir. Si restaures en un servidor amb un altre domini, canvia `DOMAIN` al fitxer `env-...` desxifrat.
-2. Puja els dos fitxers al teu directori del servidor: `scp claudegpt-AAAA-MM-DD_HHMMSS.tar.gz env-AAAA-MM-DD_HHMMSS usuari@IP-DEL-VPS:`
-3. Al servidor, com a root (`sudo -i`) i dins de `tmux`. Si hi entres directament com a root, els fitxers són a `/root/` en lloc de `/home/usuari/`:
+1. On your computer, decrypt the backup and the `.env`: `age -d -i claudegpt-backup.key -o claudegpt-YYYY-MM-DD_HHMMSS.tar.gz claudegpt-YYYY-MM-DD_HHMMSS.tar.gz.age` and `age -d -i claudegpt-backup.key -o env-YYYY-MM-DD_HHMMSS env-YYYY-MM-DD_HHMMSS.age`. If `age` gives an error, the backup is incomplete or not yours: don't use it. If you restore on a server with another domain, change `DOMAIN` in the decrypted `env-...` file.
+2. Upload both files to your home directory on the server: `scp claudegpt-YYYY-MM-DD_HHMMSS.tar.gz env-YYYY-MM-DD_HHMMSS user@VPS-IP:`
+3. On the server, as root (`sudo -i`) and inside `tmux`. If you log in directly as root, the files are in `/root/` instead of `/home/user/`:
 
 ```bash
 cd /opt/claudegpt
-bash deploy/restore.sh /home/usuari/claudegpt-AAAA-MM-DD_HHMMSS.tar.gz /home/usuari/env-AAAA-MM-DD_HHMMSS
+bash deploy/restore.sh /home/user/claudegpt-YYYY-MM-DD_HHMMSS.tar.gz /home/user/env-YYYY-MM-DD_HHMMSS
 ```
 
-L'script avança per passos i apunta a `/var/lib/claudegpt/restore.state` per on va. Si un pas falla, surt `ERROR` i t'explica en quin estat ho deixa:
+The script works in steps and records where it is in `/var/lib/claudegpt/restore.state`. If a step fails, it says `ERROR` and explains the state it leaves things in:
 
-| Pas | Què fa | Si falla o l'interromps (Ctrl+C, tall de la connexió) |
+| Step | What it does | If it fails or you interrupt it (Ctrl+C, a dropped connection) |
 | --- | --- | --- |
-| R0 | Llegeix tota la còpia i comprova que és de ClaudeGPT OS, que el `.env` serveix, que hi ha la imatge i que hi ha prou espai | No s'ha tocat res. Corregeix la causa i torna-ho a provar |
-| R1 | Crea dos volums nous, hi extreu la còpia i en verifica la base de dades. L'aplicació continua funcionant | S'esborren els volums nous i l'aplicació no s'atura. Corregeix la causa i torna-ho a provar |
-| R2 | Prepara el `.env` nou (`.env.next`), amb els noms dels volums nous | Igual que a R1 |
-| R3 | Comprova que els volums nous encara hi són, atura l'aplicació i canvia el `.env` d'un sol cop; l'anterior queda com a `.env.prev` | Torna enrere sol: el `.env` i els volums d'abans, amb l'aplicació en marxa. Els volums nous es conserven: `--reprèn` ho torna a provar i `--desfés` els descarta |
-| R4 | Engega l'aplicació amb les dades restaurades i espera que respongui | Igual que a R3 |
-| R5 | Fet. Es conserven els volums d'abans, `.env.prev` i els fitxers pujats | Comprova l'aplicació i fes `--finalitza` (o `--desfés`, per tornar a les dades d'abans) |
+| R0 | Reads the whole backup and checks that it is from ClaudeGPT OS, that the `.env` works, that the image is there and that there is enough space | Nothing has been touched. Fix the cause and try again |
+| R1 | Creates two new volumes, extracts the backup into them and checks its database. The app keeps running | The new volumes are deleted and the app does not stop. Fix the cause and try again |
+| R2 | Prepares the new `.env` (`.env.next`), with the names of the new volumes | As in R1 |
+| R3 | Checks that the new volumes are still there, stops the app and switches the `.env` in one go; the previous one is kept as `.env.prev` | It rolls back by itself: the `.env` and the volumes from before, with the app running. The new volumes are kept: `--resume` tries again and `--undo` discards them |
+| R4 | Starts the app with the restored data and waits for it to answer | As in R3 |
+| R5 | Done. The volumes from before, `.env.prev` and the uploaded files are kept | Check the app and run `--finalize` (or `--undo`, to go back to the data from before) |
 
-Quan acabi, entra a la web i comprova que hi ha les converses. Aleshores fes net amb `--finalitza`: primer comprova que l'aplicació funciona amb les dades restaurades i que la base de dades està bé (si no, no esborra res), i després et demana que escriguis «esborra» per confirmar-ho:
+When it finishes, open the web app and check that the conversations are there. Then clean up with `--finalize`: first it checks that the app works with the restored data and that the database is sound (if not, it deletes nothing), and then it asks you to type `delete` to confirm:
 
-| Ordre | Per a què |
+| Command | What for |
 | --- | --- |
-| `bash deploy/restore.sh --estat` | Veure en quin pas és. Si la connexió s'ha tallat, els missatges que l'script ja no t'ha pogut mostrar són a `/var/lib/claudegpt/restore.state.log` |
-| `bash deploy/restore.sh --reprèn` | Continuar una restauració interrompuda, o tornar-la a provar després d'un error a R3 o R4 |
-| `bash deploy/restore.sh --desfés` | Tornar a l'estat d'abans des de qualsevol pas: el `.env` i els volums d'abans, amb l'aplicació en marxa. Si l'aplicació ja ha funcionat amb les dades restaurades (a R5, o si l'script ha mort a R4), els volums restaurats es conserven amb tot el que s'hi hagi escrit des d'aleshores: l'script te'n diu els noms i com esborrar-los |
-| `bash deploy/restore.sh --finalitza` | Quan ja has comprovat la restauració: esborra els volums d'abans, `.env.prev` i els fitxers pujats |
+| `bash deploy/restore.sh --status` | See which step it is at. If the connection dropped, the messages that the script could no longer show you are in `/var/lib/claudegpt/restore.state.log` |
+| `bash deploy/restore.sh --resume` | Continue an interrupted restore, or try it again after an error at R3 or R4 |
+| `bash deploy/restore.sh --undo` | Go back to the state from before, from any step: the `.env` and the volumes from before, with the app running. If the app has already run with the restored data (at R5, or if the script died at R4), the restored volumes are kept, with everything written to them since: the script tells you their names and how to delete them |
+| `bash deploy/restore.sh --finalize` | Once you have checked the restore: deletes the volumes from before, `.env.prev` and the uploaded files |
 
-- Si l'script mor a mitges (un `kill -9` o un tall de corrent), no pot tornar enrere sol: `--estat` et diu on s'ha quedat, i `--reprèn` o `--desfés` ho acaben.
-- Abans de continuar, `--reprèn` comprova que els volums restaurats encara hi són i que la base de dades està bé: mentre cap contenidor no els fa servir (per exemple, després d'un error a R3 o R4), un `docker volume prune` els esborra. Si la restauració ha tornat enrere sola, o l'script ha mort abans de R3, els torna a omplir a partir de la còpia pujada; si ha mort a R3 o R4, no continua i et demana que facis `--desfés` i tornis a començar.
-- Mentre hi hagi una restauració pendent, fins i tot a R5 abans de `--finalitza`, no se'n pot començar una altra.
-- Mentre l'script de restauració s'executa no es pot fer cap còpia, i al revés: el segon que arriba s'atura amb `ERROR` sense tocar res. Tampoc no es pot fer cap còpia mentre una restauració interrompuda, o que no ha pogut tornar enrere, no s'hagi acabat amb `--reprèn` o `--desfés`.
-- La restauració només torna a crear el contenidor de l'aplicació. Si el `.env` de la còpia canvia `DOMAIN`, `ACME_EMAIL` o `ALLOWED_IPS`, aplica-ho també a Caddy amb `docker compose up -d` quan acabi.
-- Sense accents també funcionen: `--repren` i `--desfes`.
+- If the script dies halfway (a `kill -9` or a power cut), it cannot roll back by itself: `--status` tells you where it stopped, and `--resume` or `--undo` finish the job.
+- Before going on, `--resume` checks that the restored volumes are still there and that their database is sound: while no container uses them (for example, after an error at R3 or R4), a `docker volume prune` deletes them. If the restore rolled back by itself, or the script died before R3, it fills them again from the uploaded backup; if it died at R3 or R4, it does not go on, and asks you to run `--undo` and start again.
+- While a restore is pending, even at R5 before `--finalize`, another one cannot start.
+- While the restore script is running, no backup can be made, and vice versa: the second one to arrive stops with `ERROR` without touching anything. Nor can a backup be made while a restore that was interrupted, or that could not roll back, has not been finished with `--resume` or `--undo`.
+- The restore only recreates the app's container. If the backup's `.env` changes `DOMAIN`, `ACME_EMAIL` or `ALLOWED_IPS`, apply it to Caddy too with `docker compose up -d` when it finishes.
+- The options' earlier Catalan names still work: `--estat`, `--reprèn`, `--desfés`, `--finalitza` (also without accents) and, for backups, `--sense-xifrar`.
 
-## Resolució de problemes
+## Troubleshooting
 
-Primer de tot, sempre:
+First of all, always:
 
 ```bash
 docker compose ps
@@ -349,75 +349,75 @@ docker compose logs --tail 100 app
 docker compose logs --tail 100 caddy
 ```
 
-**El navegador diu que el certificat no és vàlid o que la connexió s'ha tancat**
-- Obre sempre la web pel domini, mai per la IP: per seguretat, Caddy tanca qualsevol connexió que no sigui per al teu domini.
-- Comprova el DNS (`nslookup el-teu-domini`) i que els ports 80 i 443 estiguin oberts també al tallafoc del proveïdor.
-- Mira els errors de Caddy: `docker compose logs caddy | grep -i error`. Si hi surt `rateLimited`, Let's Encrypt et fa esperar: corregeix la causa i espera una hora.
-- Si `docker compose up` diu que `caddy-init` ha fallat, o Caddy es queixa de `permission denied` a `/data` o `/config`, mira `docker compose logs caddy-init` i torna a fer `docker compose up -d`.
+**The browser says that the certificate is not valid, or that the connection was closed**
+- Always open the web app through the domain, never through the IP: for security, Caddy closes any connection that is not for your domain.
+- Check the DNS (`nslookup your-domain`), and that ports 80 and 443 are open in the provider's firewall too.
+- Look at Caddy's errors: `docker compose logs caddy | grep -i error`. If `rateLimited` shows up, Let's Encrypt is making you wait: fix the cause and wait an hour.
+- If `docker compose up` says that `caddy-init` failed, or Caddy complains of `permission denied` on `/data` or `/config`, look at `docker compose logs caddy-init` and run `docker compose up -d` again.
 
-**`docker compose up` diu «Range of CPUs is from 0.01 to 1.00»**
-- El servidor té un sol vCPU i l'aplicació en demana 1,5. Afegeix `APP_CPUS=1` a `.env` i torna a fer `docker compose up -d`.
+**`docker compose up` says "Range of CPUs is from 0.01 to 1.00"**
+- The server has a single vCPU and the app asks for 1.5. Add `APP_CPUS=1` to `.env` and run `docker compose up -d` again.
 
 **Error 502 (Bad Gateway)**
-- L'aplicació no respon. Mira `docker compose logs --tail 100 app`.
-- Si diu que «La configuració (variables AOS_*) no és vàlida», les línies de sota diuen quina variable falla i per què. Corregeix-la a `.env` i aplica-ho amb `docker compose up -d`. `agentic-os doctor` fa la mateixa comprovació.
-- Si s'ha quedat sense memòria (`docker compose ps` la mostra reiniciant-se; `dmesg | grep -i oom`), puja `mem_limit` al `docker-compose.yml` o el VPS a 4 GB.
-- Durant una actualització és normal durant uns segons.
+- The app is not answering. Look at `docker compose logs --tail 100 app`.
+- If it says "The configuration (AOS_* variables) is not valid", the lines below it say which variable fails and why. Fix it in `.env` and apply it with `docker compose up -d`. `agentic-os doctor` makes the same check.
+- If it ran out of memory (`docker compose ps` shows it restarting; `dmesg | grep -i oom`), raise `mem_limit` in `docker-compose.yml`, or upgrade the VPS to 4 GB.
+- During an update it is normal for a few seconds.
 
-**La interfície diu que s'està reconnectant i no connecta (WebSocket)**
-- `AOS_PUBLIC_ORIGIN` ha de coincidir exactament amb l'adreça del navegador: `https://`, sense barra final i amb el mateix nom (amb o sense `www`). Si no coincideix, el servidor rebutja la connexió per seguretat. Corregeix-ho a `.env` i aplica-ho amb `docker compose up -d`. (La interfície també esmenta `AOS_EXTRA_ORIGINS`, altres adreces permeses: aquí no cal, perquè Caddy només serveix `DOMAIN`.)
-- Alguns antivirus o proxies d'empresa bloquegen els WebSockets: prova des d'una altra xarxa.
+**The interface says it is reconnecting and never connects (WebSocket)**
+- `AOS_PUBLIC_ORIGIN` must match the browser's address exactly: `https://`, no trailing slash and the same name (with or without `www`). If it does not match, the server refuses the connection for security. Fix it in `.env` and apply it with `docker compose up -d`. (The interface also mentions `AOS_EXTRA_ORIGINS`, other allowed addresses: you don't need it here, because Caddy only serves `DOMAIN`.)
+- Some antivirus programs or company proxies block WebSockets: try from another network.
 
-**No puc iniciar sessió**
-- «La contrasenya o el codi no són correctes» i estàs segur de la contrasenya: l'hora del mòbil o del servidor no és correcta. Al servidor: `timedatectl` (ha de dir `System clock synchronized: yes`). Cada intent fallit compta per al bloqueig.
-- «Massa intents»: el bloqueig creix amb cada error. Un navegador on ja havies entrat (en els últims 12 mesos i sense esborrar-ne les cookies) només es bloqueja pels seus propis errors: encara que algú provi contrasenyes des d'Internet, hi continues podent entrar. Des d'un navegador o dispositiu nou, espera el temps que indica o aixeca tots els bloquejos des del servidor: `docker compose exec app agentic-os reset-throttle`.
-- Si «Massa intents» torna a sortir sense que t'hagis equivocat, algú està provant contrasenyes contra la teva web. La contrasenya i el codi TOTP continuen protegint-te i els navegadors on ja havies entrat no es bloquegen. Un dispositiu nou, en canvi, es tornarà a bloquejar mentre duri l'atac, encara que facis `reset-throttle` (l'atacant ho torna a activar amb pocs intents): per entrar-hi, limita l'accés a les teves IP amb `ALLOWED_IPS` a `.env` (i `docker compose up -d`) o fes servir una VPN. Això també talla l'atac de soca-rel.
-- Contrasenya oblidada o mòbil perdut: `docker compose exec -it app agentic-os init`.
+**I can't log in**
+- "The password or code is incorrect" and you are sure of the password: the time on your phone or on the server is wrong. On the server: `timedatectl` (it must say `System clock synchronized: yes`). Every failed attempt counts towards the lockout.
+- "Too many attempts": the lockout grows with every error. A browser where you had already logged in (in the last 12 months, and without clearing its cookies) is only locked out by its own errors: even if someone is trying passwords from the Internet, you can still log in from it. From a new browser or device, wait for the time it shows, or lift every lockout from the server: `docker compose exec app agentic-os reset-throttle`.
+- If "Too many attempts" comes back without you making any mistake, someone is trying passwords against your site. The password and the TOTP code still protect you, and the browsers where you had already logged in are not locked out. A new device, though, will be locked out again while the attack lasts, even if you run `reset-throttle` (the attacker sets the lockout off again with a few attempts): to log in from it, restrict access to your IPs with `ALLOWED_IPS` in `.env` (and `docker compose up -d`) or use a VPN. That also cuts the attack off at the root.
+- Forgotten password or lost phone: `docker compose exec -it app agentic-os init`.
 
-**Claude diu que la sessió ha caducat o no està connectat**
-- Comprova-ho: `docker compose exec app claude auth status`
-- Amb token: genera'n un de nou (`claude setup-token`, pas 6), substitueix-lo a `.env` i fes `docker compose up -d`.
-- Amb inici de sessió desat: `docker compose exec -it app claude auth login`.
+**Claude says that the session has expired or that it is not connected**
+- Check it: `docker compose exec app claude auth status`
+- With a token: generate a new one (`claude setup-token`, step 6), replace it in `.env` and run `docker compose up -d`.
+- With a login saved on the server: `docker compose exec -it app claude auth login`.
 
-**ChatGPT diu que no està connectat**
-- `docker compose exec app codex login status`; si cal, torna a fer el pas 7 i `docker compose restart app`.
-- Els registres de Codex viuen en un espai en memòria de 64 MB (`/run/codex-state`) que l'aplicació buida cada vegada que engega Codex, de manera que mai no li impedeixen tornar a arrencar. Si, després de moltes crides sense reiniciar l'aplicació, ChatGPT comença a fallar i als registres surten errors de SQLite o d'espai ple, `docker compose restart app` el buida del tot.
+**ChatGPT says that it is not connected**
+- `docker compose exec app codex login status`; if needed, do step 7 again and `docker compose restart app`.
+- Codex's logs live in a 64 MB in-memory space (`/run/codex-state`) that the app empties every time it starts Codex, so they never stop it from starting again. If, after many calls without restarting the app, ChatGPT starts failing and the logs show SQLite or disk-full errors, `docker compose restart app` empties it completely.
 
-**Límits d'ús de la subscripció**
-- Les subscripcions tenen finestres d'ús (per exemple, de 5 hores i de 7 dies). El tauler mostra el percentatge fet servir i quan es renova: el de ChatGPT sempre, i el de Claude a partir de la primera resposta de Claude des que l'aplicació ha arrencat (la CLI de Claude només l'informa quan respon). `agentic-os doctor` només mostra el de ChatGPT.
-- Quan s'arriba al límit, aquell model falla fins que es renova. Mentrestant, fes servir l'altre model en mode Solo o passa temporalment al mode `api`.
-- El mode Consell fa diverses crides per pregunta: fes-lo servir quan valgui la pena.
+**Subscription usage limits**
+- Subscriptions have usage windows (for example, of 5 hours and of 7 days). The dashboard shows the percentage used and when it renews: ChatGPT's always, and Claude's from Claude's first answer since the app started (the Claude CLI only reports it when it answers). `agentic-os doctor` only shows ChatGPT's.
+- When the limit is reached, that model fails until it renews. Meanwhile, use the other model in Solo mode, or switch to `api` mode for a while.
+- Council mode makes several calls per question: use it when it is worth it.
 
-**Disc ple**
-- `docker system df` per veure què ocupa; `docker image prune -f` i `docker builder prune -f` alliberen imatges i memòria cau de construccions antigues.
+**Disk full**
+- `docker system df` to see what takes up the space; `docker image prune -f` and `docker builder prune -f` free old images and build cache.
 
-## Seguretat
+## Security
 
-**Què queda exposat a Internet**
-- Només Caddy (80 i 443) i l'SSH. L'aplicació no té cap port publicat i viu en una xarxa interna.
-- Caddy fa HTTPS amb HSTS, redirigeix HTTP a HTTPS i tanca les connexions que no són per al teu domini. Els registres d'accés no guarden cookies, i cap registre (ni el de l'aplicació ni els de Caddy) no guarda la consulta dels URL: ni els noms dels fitxers que puges ni el que cerques.
-- El cos de les peticions té un màxim d'1 MiB (4 KiB per a l'inici de sessió). Caddy el passa a l'aplicació a mesura que arriba, sense acumular-lo en memòria, i l'aplicació respon 408 i tanca la connexió si no ha arribat sencer en 15 segons (Caddy talla als 30): una pujada lenta o que es queda a mitges no pot ocupar cap connexió gaire estona. Els WebSockets no tenen aquest límit. La pujada d'un adjunt, que només es pot fer amb la sessió iniciada, té un límit propi: 20 MB i 120 segons (Caddy talla als 150).
-- Els adjunts: el servidor en decideix el tipus pel contingut, rebutja l'SVG i no serveix mai cap fitxer pujat com a pàgina web (els PDF i els fitxers de text es descarreguen). Llegeix els PDF en un procés a part, sense accés als secrets de l'aplicació i amb límits de temps (60 segons) i de memòria, perquè un PDF maliciós no el pugui encallar. Si tot i així el contenidor de l'aplicació es queda sense memòria (dos PDF grans alhora durant un debat), el nucli mata primer aquest procés: la pujada falla amb un missatge i les CLI i el servidor continuen.
-- Docker i ufw: els ports que publica Docker no passen per les regles d'ufw. Aquí només es publiquen el 80 i el 443, que han de ser públics. No afegeixis `ports:` a l'aplicació; per depurar, fes servir `127.0.0.1:PORT:PORT` i un túnel SSH.
+**What is exposed to the Internet**
+- Only Caddy (80 and 443) and SSH. The app has no published port and lives on an internal network.
+- Caddy serves HTTPS with HSTS, redirects HTTP to HTTPS and closes the connections that are not for your domain. The access logs keep no cookies, and no log (neither the app's nor Caddy's) keeps the query of the URLs: neither the names of the files you upload nor what you search for.
+- Request bodies have a maximum of 1 MiB (4 KiB for the login). Caddy passes a body on to the app as it arrives, without holding it in memory, and the app answers 408 and closes the connection if it has not arrived whole within 15 seconds (Caddy cuts off at 30 s): a slow upload, or one that stalls halfway, cannot hold a connection for long. WebSockets do not have this limit. Uploading an attachment, which can only be done while logged in, has a limit of its own: 20 MB and 120 seconds (Caddy cuts off at 150 s).
+- Attachments: the server decides their type from their content, refuses SVG and never serves an uploaded file as a web page (PDFs and text files are downloaded). It reads PDFs in a separate process, with no access to the app's secrets and with limits on time (60 seconds) and memory, so that a malicious PDF cannot jam it. If even so the app's container runs out of memory (two large PDFs at once during a debate), the kernel kills that process first: the upload fails with a message, and the CLIs and the server carry on.
+- Docker and ufw: the ports that Docker publishes bypass ufw's rules. Here only 80 and 443 are published, and they have to be public. Don't add `ports:` to the app; to debug, use `127.0.0.1:PORT:PORT` and an SSH tunnel.
 
-**Inici de sessió i sessions**
-- Contrasenya (argon2id) **i** codi TOTP, que no es pot reutilitzar. Bloqueig exponencial després d'intents fallits, que es manté encara que reiniciïs (`agentic-os reset-throttle` l'aixeca).
-- Cada navegador on has entrat rep una segona cookie, de dispositiu conegut (un any; no s'esborra en tancar la sessió). Un dispositiu conegut només es bloqueja pels seus propis errors: els intents d'altres des d'Internet no et poden deixar fora d'un navegador que ja fas servir. `agentic-os reset-sessions` i `agentic-os init` obliden tots els dispositius. Durant un atac sostingut, un dispositiu nou només pot entrar si limites l'accés amb `ALLOWED_IPS` o una VPN (vegeu [Resolució de problemes](#resolució-de-problemes)).
-- Sessions desades al servidor (només se'n guarda el hash) amb una cookie `__Host-` HttpOnly, Secure i SameSite=Strict. Caduquen després de 72 hores sense activitat i als 30 dies (`AOS_SESSION_IDLE_HOURS`, d'1 a 8.760 hores; `AOS_SESSION_MAX_DAYS`, d'1 a 3.650 dies). Una pestanya oberta que no fas servir no compta com a activitat.
+**Login and sessions**
+- Password (argon2id) **and** TOTP code, which cannot be reused. Exponential lockout after failed attempts, which survives a restart (`agentic-os reset-throttle` lifts it).
+- Every browser where you have logged in gets a second cookie, a known-device cookie (a year; it is not deleted when you log out). A known device is only locked out by its own errors: other people's attempts from the Internet cannot lock you out of a browser that you already use. `agentic-os reset-sessions` and `agentic-os init` forget every device. During a sustained attack, a new device can only log in if you restrict access with `ALLOWED_IPS` or a VPN (see [Troubleshooting](#troubleshooting)).
+- Sessions are stored on the server (only their hash is kept), with a `__Host-` cookie that is HttpOnly, Secure and SameSite=Strict. They expire after 72 hours without activity and after 30 days (`AOS_SESSION_IDLE_HOURS`, from 1 to 8,760 hours; `AOS_SESSION_MAX_DAYS`, from 1 to 3,650 days). An open tab that you are not using does not count as activity.
 
 **Secrets**
-- `.env` (permisos 600) i el volum `app_home` contenen credencials que donen accés a les teves subscripcions. Qui sigui root al VPS les pot fer servir: no comparteixis l'accés al servidor.
-- Les CLI s'executen en un directori buit i amb una llista tancada de variables d'entorn, sense accés a cap *shell* ni als secrets de l'aplicació. La de Claude no té cap eina. Codex 0.157.1 encara ofereix a ChatGPT una eina que executa codi en un procés fill de Codex (`codex-code-mode`, un entorn aïllat V8 sense accés als fitxers ni a la xarxa, que s'atura amb Codex) i eines per obrir subagents. L'aplicació només deixa córrer un subagent alhora (`agents.max_threads=1`), interromp de seguida qualsevol feina que no pertanyi a una crida en curs, atura la crida si ChatGPT hi fa servir subagents més de 3 vegades i, quan ja no hi ha cap crida en curs, reinicia el procés de Codex que n'hagi obert algun (els subagents aturats no alliberen la memòria). Com a protecció addicional, l'aplicació té un límit de CPU (`APP_CPUS`).
-- Codex desa el text de cada crida en els seus registres: viuen en memòria (`/run/codex-state`), fora dels volums i de les còpies de seguretat, i s'esborren cada vegada que l'aplicació engega Codex (i en reiniciar-la).
+- `.env` (permissions 600) and the `app_home` volume contain credentials that give access to your subscriptions. Whoever is root on the VPS can use them: don't share access to the server.
+- The CLIs run in an empty directory with a closed list of environment variables, without access to any *shell* or to the app's secrets. Claude's has no tools at all. Codex 0.157.1 still offers ChatGPT a tool that runs code in a child process of Codex (`codex-code-mode`, an isolated V8 environment without access to files or the network, which stops with Codex) and tools to open subagents. The app only lets one subagent run at a time (`agents.max_threads=1`), interrupts at once any work that does not belong to a call in progress, stops the call if ChatGPT uses subagents in it more than 3 times and, once no call is in progress, restarts any Codex process that has opened one (stopped subagents do not free their memory). As an extra protection, the app has a CPU limit (`APP_CPUS`).
+- Codex saves the text of every call in its logs: they live in memory (`/run/codex-state`), outside the volumes and the backups, and are deleted every time the app starts Codex (and when the app restarts).
 
-**Reforços opcionals**
-- `ALLOWED_IPS` a `.env`: només aquestes IP podran obrir la web.
-- Una VPN (Tailscale o WireGuard) en lloc d'exposar la web a Internet: més segur, però menys còmode.
+**Optional hardening**
+- `ALLOWED_IPS` in `.env`: only these IPs will be able to open the web app.
+- A VPN (Tailscale or WireGuard) instead of exposing the web app to the Internet: more secure, but less convenient.
 
-**Condicions d'ús de les subscripcions**
+**Terms of use of the subscriptions**
 
-Fer servir les subscripcions a través de les CLI oficials és una zona que cada proveïdor regula a la seva manera. Llegeix-ne les condicions i decideix tu:
+Using the subscriptions through the official CLIs is an area that each provider regulates in its own way. Read their terms and decide for yourself:
 
-- **Anthropic.** L'article del Help Center «Use the Claude Agent SDK with your Claude plan» (juny del 2026) inclou l'ordre `claude -p` en projectes propis entre els usos que consumeixen els límits del teu pla. Les condicions d'ús prohibeixen compartir les credencials i l'accés automatitzat que no estigui permès explícitament. L'aplicació fa servir la CLI oficial sense modificar i mai extreu el token per cridar l'API directament.
-- **OpenAI.** Recomana les claus d'API per a l'automatització. Fer servir la subscripció de ChatGPT a través de Codex en una aplicació com aquesta no està autoritzat explícitament: és sota la teva responsabilitat.
-- **Recomanació:** un sol usuari (tu), ús interactiu i moderat, sense compartir l'accés amb ningú. Si tens dubtes o en fas un ús intensiu, fes servir el mode `api`.
+- **Anthropic.** The Help Center article "Use the Claude Agent SDK with your Claude plan" (June 2026) lists the `claude -p` command in your own projects among the uses that draw on your plan's limits. The terms of use forbid sharing credentials, and automated access that is not explicitly permitted. The app uses the official CLI unmodified, and never extracts the token to call the API directly.
+- **OpenAI.** It recommends API keys for automation. Using the ChatGPT subscription through Codex in an app like this one is not explicitly authorized: it is your own responsibility.
+- **Recommendation:** a single user (you), interactive and moderate use, without sharing access with anyone. If you have doubts, or use it heavily, use `api` mode.

@@ -47,7 +47,7 @@ yaml = pytest.importorskip("yaml")  # PyYAML comes with uvicorn[standard]
 ROOT = Path(__file__).resolve().parents[1]
 BODY_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 BACKUP_DIR = "/var/backups/claudegpt"
-RESTORE_DIR = "/home/usuari"
+RESTORE_DIR = "/home/user"
 
 
 def read(relative: str) -> str:
@@ -193,8 +193,8 @@ def test_the_docs_give_caddys_timeouts() -> None:
     }
     assert len(timeouts) == 2
     for document in ("docs/ARCHITECTURE.md", "docs/DEPLOYMENT.md"):
-        found = re.findall(r"(?:Caddy talla als|Caddy cuts off at) (\d+)", read(document))
-        said = {int(n) for n in found}
+        # "(Caddy cuts off at 30 s)", whatever the language of the document.
+        said = {int(n) for n in re.findall(r"\(Caddy\b[^)]*?(\d+)[^)]*\)", read(document))}
         assert said == timeouts, document
 
 
@@ -228,11 +228,14 @@ def test_caddy_streams_request_bodies_instead_of_buffering_them() -> None:
         ("docs/ARCHITECTURE.md", "sense eines"),
         # agents.max_threads caps sub-agents running at once, not per call.
         ("docs/ARCHITECTURE.md", "un per crida"),
-        ("docs/DEPLOYMENT.md", "un per crida"),
+        ("docs/ARCHITECTURE.md", "one per call"),
+        ("docs/DEPLOYMENT.md", "one per call"),
         ("docs/adr/0002-subscriptions-via-official-clis.md", "un subagent per crida"),
+        ("docs/adr/0002-subscriptions-via-official-clis.md", "one subagent per call"),
         # Caddy streams request bodies (test_caddy_streams_request_bodies_...).
         ("docs/ARCHITECTURE.md", "llegeix sencer"),
-        ("docs/DEPLOYMENT.md", "llegeix sencer"),
+        ("docs/ARCHITECTURE.md", "reads it whole"),
+        ("docs/DEPLOYMENT.md", "reads it whole"),
         # The Codex logs are deleted before every start: a full tmpfs cannot stop it.
         ("docs/DEPLOYMENT.md", "failed to initialize sqlite state runtime"),
     ],
@@ -242,12 +245,10 @@ def test_docs_drop_stale_claims(document: str, stale: str) -> None:
 
 
 def test_login_troubleshooting_covers_new_devices_during_an_attack() -> None:
-    text = section(read("docs/DEPLOYMENT.md"), "Resolució de problemes")
-    login = text[text.index("**No puc iniciar sessió**") :].split("\n\n")[0]
+    text = section(read("docs/DEPLOYMENT.md"), "Troubleshooting")
+    login = text[text.index("**I can't log in**") :].split("\n\n")[0]
     assert "agentic-os reset-throttle" in login
-    advice = next(
-        line for line in login.splitlines() if "dispositiu nou" in line and "atac" in line
-    )
+    advice = next(line for line in login.splitlines() if "new device" in line and "attack" in line)
     assert "ALLOWED_IPS" in advice and "VPN" in advice
 
 
@@ -264,9 +265,11 @@ def test_links_to_sections_resolve(document: str) -> None:
         assert target in anchors, target
 
 
-def test_harden_script_points_to_existing_sections() -> None:
+@pytest.mark.parametrize("script", ["deploy/harden.sh", "deploy/backup.sh", "deploy/restore.sh"])
+def test_deploy_scripts_point_to_existing_sections(script: str) -> None:
     headings = set(re.findall(r"^## (.+)$", read("docs/DEPLOYMENT.md"), re.M))
-    named = re.findall(r"apartat «([^»]+)»", read("deploy/harden.sh"))
+    # section "Updating", or section \"Updating\" inside a string of the script
+    named = re.findall(r'section \\?"([^"\\]+)\\?"', read(script))
     assert named
     for name in named:
         assert name in headings, name
@@ -280,7 +283,7 @@ def test_ssh_hardening_keeps_the_default_max_auth_tries() -> None:
 
 def test_update_steps_refresh_base_images_and_the_host() -> None:
     assert services()["app"]["build"]["pull"] is True
-    update = section(read("docs/DEPLOYMENT.md"), "Actualitzar")
+    update = section(read("docs/DEPLOYMENT.md"), "Updating")
     assert "docker compose build --pull" in update
     assert "apt-get upgrade" in update  # Docker Engine, containerd and runc
 
@@ -290,13 +293,13 @@ def test_update_steps_apply_a_new_caddyfile() -> None:
     # a new inode that the running container never sees, and `docker compose up -d`
     # keeps a container whose service definition did not change.
     assert "./deploy/Caddyfile:/etc/caddy/Caddyfile:ro" in services()["caddy"]["volumes"]
-    [steps] = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Actualitzar"))[:1]
+    [steps] = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Updating"))[:1]
     commands = steps.splitlines()
     assert commands.index("docker compose restart caddy") > commands.index("git pull")
 
 
 def test_backups_are_written_outside_the_repository() -> None:
-    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
+    backups = section(read("docs/DEPLOYMENT.md"), "Backups")
     assert "/var/backups/claudegpt" in backups
     # Neither inside the clone (/opt/claudegpt) nor relative to it.
     assert not re.search(r"\$PWD/backups|/opt/claudegpt/backups|(?<![\w/])backups/", backups)
@@ -319,7 +322,7 @@ def test_leftover_backups_in_the_clone_are_ignored_by_git(path: str) -> None:
 
 # --------------------------------------------------------- backups and restores
 #
-# The «Còpies de seguretat» section of docs/DEPLOYMENT.md runs deploy/backup.sh
+# The "Backups" section of docs/DEPLOYMENT.md runs deploy/backup.sh
 # and deploy/restore.sh (audit items 2 and 16, and N8, N9 and N23). Where they can,
 # the tests run the guide's own commands, so they also cover what the owner
 # pastes; the rest call the scripts directly.
@@ -330,7 +333,7 @@ LINUX_SCRIPTS = pytest.mark.skipif(
 )
 
 CURRENT_ENV = "DOMAIN=ia.example.com\nACME_EMAIL=tu@example.com\nAOS_CLAUDE_MODE=cli\n"
-BACKUP_ENV = "DOMAIN=copia.example.com\nACME_EMAIL=tu@example.com\nAOS_CLAUDE_MODE=api\n"
+BACKUP_ENV = "DOMAIN=backup.example.com\nACME_EMAIL=tu@example.com\nAOS_CLAUDE_MODE=api\n"
 OLD_VOLUMES = ("claudegpt_app_data", "claudegpt_app_home")
 # A well-formed age recipient (bech32 alphabet): the stand-in of age rejects others.
 AGE_KEY = "age1" + ("qpzry9x8gf2tvdw0s3jn54khce6mua7l" * 2)[:58]
@@ -1016,7 +1019,7 @@ class Sandbox:
         assert not self.state.exists()
 
     def assert_restored(self, archive: Path, env_file: Path) -> tuple[str, str]:
-        """A finished restore, before --finalitza: the app runs with the new volumes
+        """A finished restore, before --finalize: the app runs with the new volumes
         and the uploaded .env; the old volumes, .env.prev and the uploads are kept."""
         journal = self.journal()
         assert (journal["step"], journal["status"]) == ("R5", "done")
@@ -1044,8 +1047,8 @@ def sandbox(tmp_path: Path) -> Sandbox:
 
 
 def guide_block(marker: str) -> str:
-    """The bash block of «Còpies de seguretat» that contains ``marker``."""
-    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
+    """The bash block of "Backups" that contains ``marker``."""
+    backups = section(read("docs/DEPLOYMENT.md"), "Backups")
     [block] = [block for block in bash_blocks(backups) if marker in block]
     return block
 
@@ -1081,7 +1084,7 @@ def guide_restore(sandbox: Sandbox) -> tuple[str, Path, Path]:
 
 
 def test_backup_steps_run_the_scripts_and_leave_the_owners_shell_alone() -> None:
-    blocks = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat"))
+    blocks = bash_blocks(section(read("docs/DEPLOYMENT.md"), "Backups"))
     assert any("bash deploy/backup.sh" in block for block in blocks)
     assert any("bash deploy/restore.sh" in block for block in blocks)
     for block in blocks:
@@ -1092,23 +1095,21 @@ def test_backup_steps_run_the_scripts_and_leave_the_owners_shell_alone() -> None
 
 
 def test_the_guide_explains_every_restore_step_and_command() -> None:
-    backups = section(read("docs/DEPLOYMENT.md"), "Còpies de seguretat")
+    backups = section(read("docs/DEPLOYMENT.md"), "Backups")
     restore = read("deploy/restore.sh")
     for step in ("R0", "R1", "R2", "R3", "R4", "R5"):
         assert step in backups and step in restore, step
-    for option in ("--estat", "--reprèn", "--desfés", "--finalitza"):
+    for option in ("--status", "--resume", "--undo", "--finalize"):
         assert f"bash deploy/restore.sh {option}" in backups, option
         assert option in restore, option
-    assert "--sense-xifrar" in backups and "--sense-xifrar" in read("deploy/backup.sh")
+    assert "--unencrypted" in backups and "--unencrypted" in read("deploy/backup.sh")
     # A dropped SSH session should not stop a long backup or restore; if it does,
     # the restore's messages go to a log next to its journal.
     assert "tmux" in backups
     assert "/var/lib/claudegpt/restore.state.log" in backups
-    # --desfés keeps the restored volumes once the app has run with them.
-    [undo] = [
-        line for line in backups.splitlines() if "| `bash deploy/restore.sh --desfés`" in line
-    ]
-    assert "es conserven" in undo
+    # --undo keeps the restored volumes once the app has run with them.
+    [undo] = [line for line in backups.splitlines() if "| `bash deploy/restore.sh --undo`" in line]
+    assert "are kept" in undo
 
 
 def test_ci_shellchecks_every_deploy_script() -> None:
@@ -1218,7 +1219,7 @@ def test_download_deletes_only_the_backup_it_copied(tmp_path: Path, fault: str) 
         (stubs / name).chmod(0o755)
     log = tmp_path / "commands.log"
     log.touch()
-    block = guide_block("scp").replace("AAAA-MM-DD_HHMMSS", stamp)
+    block = guide_block("scp").replace("YYYY-MM-DD_HHMMSS", stamp)
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", block],
         cwd=laptop,
@@ -1368,23 +1369,30 @@ def test_an_interrupted_backup_restarts_the_app_and_leaves_no_partial_file(
 @LINUX_SCRIPTS
 def test_the_next_backup_deletes_what_a_killed_one_left(sandbox: Sandbox) -> None:
     """kill -9 or a power cut in the middle of a backup: no trap runs, so its hidden
-    temporary files (in plain text with --sense-xifrar) used to stay forever."""
+    temporary files (in plain text with --unencrypted) used to stay forever."""
     sandbox.interrupt(
-        sandbox.command("backup", "--sense-xifrar"),
+        sandbox.command("backup", "--unencrypted"),
         "tar",
         signal.SIGKILL,
         FAKE_DATE="2026-09-28 10:00:00",
     )
-    assert [name for name in sandbox.backup_files() if name.startswith(".")]
-    for name in (".nota", ".env-2026-09-28_090000.backup"):  # not temporaries of backup.sh
+    left = [name for name in sandbox.backup_files() if name.startswith(".")]
+    assert left and all(".partial." in name for name in left), left
+    # The temporaries of a backup.sh from before the scripts were in English.
+    for name in (
+        ".claudegpt-2026-09-27_080000.parcial.Ab12Cd",
+        ".env-2026-09-27_080000.parcial.Ab12Cd",
+    ):
+        (sandbox.backups / name).write_text("left by an earlier version")
+    for name in (".note", ".env-2026-09-28_090000.backup"):  # not temporaries of backup.sh
         (sandbox.backups / name).write_text("the owner's")
 
-    result = sandbox.script("backup", "--sense-xifrar", FAKE_DATE="2026-09-28 10:05:00")
+    result = sandbox.script("backup", "--unencrypted", FAKE_DATE="2026-09-28 10:05:00")
 
     assert result.returncode == 0, result.stderr
     assert list(sandbox.backup_files()) == [
         ".env-2026-09-28_090000.backup",
-        ".nota",
+        ".note",
         "claudegpt-2026-09-28_100500.tar.gz",
         "env-2026-09-28_100500",
     ]
@@ -1405,11 +1413,11 @@ def test_backup_waits_for_an_unfinished_restore(sandbox: Sandbox, restore: str) 
         assert sandbox.script("restore", str(archive), str(env_file), FAIL="up").returncode
     sandbox.log.write_text("")
 
-    result = sandbox.script("backup", "--sense-xifrar", FAKE_DATE="2026-09-28 11:00:00")
+    result = sandbox.script("backup", "--unencrypted", FAKE_DATE="2026-09-28 11:00:00")
 
     if restore == "killed":
         assert result.returncode != 0 and "ERROR" in result.stderr
-        assert "bash deploy/restore.sh --estat" in result.stderr
+        assert "bash deploy/restore.sh --status" in result.stderr
         assert "docker compose stop app" not in sandbox.calls()
         assert sandbox.backup_files() == {}
     else:  # rolled back: the app runs with the old data again, and that is saved
@@ -1426,7 +1434,7 @@ def test_backup_reads_the_volumes_that_env_names(sandbox: Sandbox) -> None:
     env = CURRENT_ENV + f"APP_DATA_VOLUME={restored[0]}\nAPP_HOME_VOLUME='{restored[1]}'\n"
     (sandbox.project / ".env").write_text(env)
 
-    result = sandbox.script("backup", "--sense-xifrar", FAKE_DATE="2026-09-28 11:00:00")
+    result = sandbox.script("backup", "--unencrypted", FAKE_DATE="2026-09-28 11:00:00")
 
     assert result.returncode == 0, result.stderr
     [run] = [call for call in sandbox.calls() if call.startswith("docker run ")]
@@ -1452,7 +1460,7 @@ def test_backup_refuses_a_volume_that_does_not_exist(sandbox: Sandbox) -> None:
 
 @LINUX_SCRIPTS
 def test_a_plain_backup_restores_with_restore_sh(sandbox: Sandbox) -> None:
-    result = sandbox.script("backup", "--sense-xifrar", FAKE_DATE="2026-09-28 10:00:00")
+    result = sandbox.script("backup", "--unencrypted", FAKE_DATE="2026-09-28 10:00:00")
     assert result.returncode == 0, result.stderr
     archive = sandbox.backups / "claudegpt-2026-09-28_100000.tar.gz"
     env_copy = sandbox.backups / "env-2026-09-28_100000"
@@ -1498,18 +1506,18 @@ def test_a_restore_switches_to_new_volumes_and_keeps_the_old_ones(sandbox: Sandb
         assert "--label com.docker.compose.project=claudegpt" in call
         assert f"--label com.docker.compose.volume={key}" in call
 
-    refused = sandbox.script("restore", "--finalitza", stdin="no\n")
+    refused = sandbox.script("restore", "--finalize", stdin="no\n")
     assert refused.returncode != 0 and "ERROR" in refused.stderr
     sandbox.assert_restored(archive, env_file)
 
-    done = sandbox.script("restore", "--finalitza", stdin="esborra\n")
+    done = sandbox.script("restore", "--finalize", stdin="delete\n")
     assert done.returncode == 0, done.stderr
     assert sandbox.volumes() == sorted(new)
     assert sandbox.app() == ("running", new)
     assert not (sandbox.project / ".env.prev").exists()
     assert not archive.exists() and not env_file.exists()
     assert not sandbox.state.exists()
-    assert "No hi ha cap restauració" in sandbox.script("restore", "--estat").stdout
+    assert "No restore in progress" in sandbox.script("restore", "--status").stdout
 
 
 @LINUX_SCRIPTS
@@ -1600,7 +1608,7 @@ KILL_POINTS = {
 
 
 @LINUX_SCRIPTS
-@pytest.mark.parametrize("action", ["--desfés", "--reprèn"])
+@pytest.mark.parametrize("action", ["--undo", "--resume"])
 @pytest.mark.parametrize("point", [*KILL_POINTS, "rolled-back"])
 def test_an_interrupted_restore_can_be_undone_or_resumed(
     sandbox: Sandbox, point: str, action: str
@@ -1618,7 +1626,7 @@ def test_an_interrupted_restore_can_be_undone_or_resumed(
     journal = sandbox.journal()
     assert (journal["step"], journal["status"]) == expected
 
-    status = sandbox.script("restore", "--estat")
+    status = sandbox.script("restore", "--status")
     assert status.returncode == 0 and expected[0] in status.stdout
     # No other restore can start before this one is resumed or undone.
     again = sandbox.script("restore", str(archive), str(env_file))
@@ -1627,13 +1635,13 @@ def test_an_interrupted_restore_can_be_undone_or_resumed(
     result = sandbox.script("restore", action)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    if action == "--desfés":
+    if action == "--undo":
         # Killed at R4, the app may have run (and written) with the restored volumes.
         new = (journal["new_data_volume"], journal["new_home_volume"])
         sandbox.assert_before_restore(archive, env_file, new if point == "R4" else ())
     else:
         sandbox.assert_restored(archive, env_file)
-        assert sandbox.script("restore", "--finalitza", stdin="esborra\n").returncode == 0
+        assert sandbox.script("restore", "--finalize", stdin="delete\n").returncode == 0
         assert not sandbox.state.exists()
 
 
@@ -1665,7 +1673,7 @@ def test_an_interrupted_restore_goes_back_to_the_current_data(
         assert sandbox.volumes() == sorted(OLD_VOLUMES)
         assert not sandbox.state.exists()
         assert "docker compose stop app" not in sandbox.calls()
-    else:  # R3, R4: rolled back, the restored volumes kept for --reprèn
+    else:  # R3, R4: rolled back, the restored volumes kept for --resume
         journal = sandbox.journal()
         step = "R3" if point == "stop" else "R4"
         assert (journal["step"], journal["status"]) == (step, "rolled_back")
@@ -1679,7 +1687,7 @@ def test_a_finished_restore_can_still_be_undone(sandbox: Sandbox) -> None:
     assert result.returncode == 0, result.stderr
     new = sandbox.assert_restored(archive, env_file)
 
-    undone = sandbox.script("restore", "--desfés")
+    undone = sandbox.script("restore", "--undo")
 
     assert undone.returncode == 0, undone.stderr
     # Back to the data from before; the restored volumes are the app's data since
@@ -1691,22 +1699,22 @@ def test_a_finished_restore_can_still_be_undone(sandbox: Sandbox) -> None:
 
 @LINUX_SCRIPTS
 def test_undoing_a_finished_restore_keeps_what_was_written_since(sandbox: Sandbox) -> None:
-    """--desfés after R5 used to delete the restored volumes without asking, and
+    """--undo after R5 used to delete the restored volumes without asking, and
     with them everything the app had written since the restore."""
     archive, env_file = sandbox.upload()
     assert sandbox.script("restore", str(archive), str(env_file)).returncode == 0
     database = sandbox.volume(sandbox.journal()["new_data_volume"]) / "agentic_os.sqlite3"
     with contextlib.closing(sqlite3.connect(database)) as db:  # the owner goes on working
-        db.execute("INSERT INTO settings VALUES ('conversa', 'escrita després')")
+        db.execute("INSERT INTO settings VALUES ('conversation', 'written since')")
         db.commit()
 
-    undone = sandbox.script("restore", "--desfés")
+    undone = sandbox.script("restore", "--undo")
 
     assert undone.returncode == 0, undone.stderr
     assert sandbox.app() == ("running", OLD_VOLUMES)
     with contextlib.closing(sqlite3.connect(database)) as db:
-        row = db.execute("SELECT value FROM settings WHERE key = 'conversa'").fetchone()
-    assert row == ("escrita després",)
+        row = db.execute("SELECT value FROM settings WHERE key = 'conversation'").fetchone()
+    assert row == ("written since",)
 
 
 @LINUX_SCRIPTS
@@ -1715,8 +1723,8 @@ def test_resume_extracts_again_restored_volumes_that_were_deleted(
     sandbox: Sandbox, recreated: bool
 ) -> None:
     """After a roll-back no container uses the restored volumes, so `docker volume
-    prune -a` deletes them. --reprèn used to go on: docker compose created them
-    again, empty, R5 reported success and --finalitza deleted the real data."""
+    prune -a` deletes them. --resume used to go on: docker compose created them
+    again, empty, R5 reported success and --finalize deleted the real data."""
     archive, env_file = sandbox.upload()
     assert sandbox.script("restore", str(archive), str(env_file), FAIL="up").returncode
     journal = sandbox.journal()
@@ -1727,26 +1735,26 @@ def test_resume_extracts_again_restored_volumes_that_were_deleted(
             sandbox.volume(name).mkdir()
     sandbox.log.write_text("")
 
-    resumed = sandbox.script("restore", "--reprèn")
+    resumed = sandbox.script("restore", "--resume")
 
     assert resumed.returncode == 0, resumed.stderr
-    assert "AVÍS" in resumed.stderr
+    assert "WARNING" in resumed.stderr
     # Extracted again from the upload, and never started on empty volumes.
     assert sandbox.assert_restored(archive, env_file) == new
     assert "created volume" not in sandbox.log.read_text()
-    assert sandbox.script("restore", "--finalitza", stdin="esborra\n").returncode == 0
+    assert sandbox.script("restore", "--finalize", stdin="delete\n").returncode == 0
     assert sandbox.volumes() == sorted(new) and sandbox.marker(new[0]) == "BACKUP"
 
 
 @LINUX_SCRIPTS
 def test_resume_without_the_image_keeps_the_restored_volumes(sandbox: Sandbox) -> None:
-    """The database check needs the image: without it the volumes are not «gone»."""
+    """The database check needs the image: without it the volumes are not "gone"."""
     archive, env_file = sandbox.upload()
     assert sandbox.script("restore", str(archive), str(env_file), FAIL="up").returncode
     before = sandbox.journal()
     (sandbox.root / "image-missing").touch()
 
-    resumed = sandbox.script("restore", "--reprèn")
+    resumed = sandbox.script("restore", "--resume")
 
     assert resumed.returncode != 0 and "docker compose build" in resumed.stderr
     assert sandbox.journal() == before
@@ -1763,14 +1771,14 @@ def test_resume_after_r4_stops_if_the_restored_volumes_are_gone(sandbox: Sandbox
     sandbox.prune(journal["new_data_volume"], journal["new_home_volume"])
     sandbox.log.write_text("")
 
-    resumed = sandbox.script("restore", "--reprèn")
+    resumed = sandbox.script("restore", "--resume")
 
     # .env names the restored volumes already: it cannot extract them again safely.
     assert resumed.returncode != 0 and "ERROR" in resumed.stderr
-    assert "bash deploy/restore.sh --desfés" in resumed.stderr
+    assert "bash deploy/restore.sh --undo" in resumed.stderr
     assert "created volume" not in sandbox.log.read_text()
     assert (sandbox.journal()["step"], sandbox.journal()["status"]) == ("R4", "running")
-    assert sandbox.script("restore", "--desfés").returncode == 0
+    assert sandbox.script("restore", "--undo").returncode == 0
     sandbox.assert_before_restore(archive, env_file)
 
 
@@ -1788,7 +1796,7 @@ def test_a_restore_never_starts_the_app_on_volumes_that_vanished(sandbox: Sandbo
     assert "created volume" not in sandbox.log.read_text()
     assert sandbox.app() == ("running", OLD_VOLUMES)
     assert (sandbox.journal()["step"], sandbox.journal()["status"]) == ("R4", "rolled_back")
-    resumed = sandbox.script("restore", "--reprèn")
+    resumed = sandbox.script("restore", "--resume")
     assert resumed.returncode == 0, resumed.stderr
     assert sandbox.assert_restored(archive, env_file) == new
 
@@ -1809,7 +1817,7 @@ def test_finalize_deletes_nothing_unless_the_app_runs_on_the_restored_data(
     else:  # the database in use is damaged
         env["FAIL"] = "check"
 
-    result = sandbox.script("restore", "--finalitza", stdin="esborra\n", **env)
+    result = sandbox.script("restore", "--finalize", stdin="delete\n", **env)
 
     assert result.returncode != 0 and "ERROR" in result.stderr
     assert sandbox.marker(OLD_VOLUMES[0]) == "CURRENT"
@@ -1838,7 +1846,7 @@ def test_a_second_signal_cannot_stop_the_roll_back(sandbox: Sandbox, sig: signal
 @LINUX_SCRIPTS
 def test_ctrl_c_as_a_restore_finishes_does_not_undo_it(sandbox: Sandbox) -> None:
     """Ctrl+C while the journal was being told R5 used to roll back a restore that
-    had worked, and left a journal that said both «done» and «rolled back»."""
+    had worked, and left a journal that said both "done" and "rolled back"."""
     (sandbox.bin / "sync").write_text(R5_SYNC_STUB)
     archive, env_file = sandbox.upload()
 
@@ -1846,8 +1854,8 @@ def test_ctrl_c_as_a_restore_finishes_does_not_undo_it(sandbox: Sandbox) -> None
     sandbox.interrupt(command, "r5", signal.SIGINT)
 
     sandbox.assert_restored(archive, env_file)
-    status = sandbox.script("restore", "--estat").stdout
-    assert "  Estat: feta;" in status
+    status = sandbox.script("restore", "--status").stdout
+    assert "  Status: done;" in status
 
 
 @LINUX_SCRIPTS
@@ -1867,7 +1875,7 @@ def test_a_second_restore_replaces_the_volumes_of_the_first(sandbox: Sandbox) ->
     archive, env_file = sandbox.upload("FIRST")
     first = sandbox.script("restore", str(archive), str(env_file), FAKE_DATE="2026-09-28 10:00")
     assert first.returncode == 0, first.stderr
-    assert sandbox.script("restore", "--finalitza", stdin="esborra\n").returncode == 0
+    assert sandbox.script("restore", "--finalize", stdin="delete\n").returncode == 0
 
     archive, env_file = sandbox.upload("SECOND")
     second = sandbox.script("restore", str(archive), str(env_file), FAKE_DATE="2026-09-28 11:00")
@@ -1877,7 +1885,7 @@ def test_a_second_restore_replaces_the_volumes_of_the_first(sandbox: Sandbox) ->
     assert journal["old_data_volume"] == "claudegpt_app_data_r20260928-100000"
     assert journal["new_data_volume"] == "claudegpt_app_data_r20260928-110000"
     assert sandbox.marker(journal["new_data_volume"]) == "SECOND"
-    assert sandbox.script("restore", "--finalitza", stdin="esborra\n").returncode == 0
+    assert sandbox.script("restore", "--finalize", stdin="delete\n").returncode == 0
     assert sandbox.volumes() == [
         "claudegpt_app_data_r20260928-110000",
         "claudegpt_app_home_r20260928-110000",
@@ -1902,11 +1910,79 @@ def test_backups_and_restores_never_run_at_the_same_time(sandbox: Sandbox) -> No
 
 @LINUX_SCRIPTS
 def test_restore_commands_without_a_restore(sandbox: Sandbox) -> None:
-    status = sandbox.script("restore", "--estat")
-    assert status.returncode == 0 and "No hi ha cap restauració" in status.stdout
-    assert sandbox.script("restore", "--desfés").returncode == 0
-    for option in ("--reprèn", "--finalitza"):
+    status = sandbox.script("restore", "--status")
+    assert status.returncode == 0 and "No restore in progress" in status.stdout
+    assert sandbox.script("restore", "--undo").returncode == 0
+    for option in ("--resume", "--finalize"):
         result = sandbox.script("restore", option)
         assert result.returncode != 0 and "ERROR" in result.stderr
     assert sandbox.app() == ("running", OLD_VOLUMES)
     assert sandbox.calls() == []
+
+
+# ------------------------------------------- the Catalan names of earlier versions
+
+
+@LINUX_SCRIPTS
+@pytest.mark.parametrize(
+    ("legacy", "option"),
+    [
+        ("--estat", "--status"),
+        ("--reprèn", "--resume"),
+        ("--repren", "--resume"),
+        ("--desfés", "--undo"),
+        ("--desfes", "--undo"),
+        ("--finalitza", "--finalize"),
+        ("--ajuda", "--help"),
+    ],
+)
+def test_restore_still_takes_the_catalan_names_of_its_options(
+    sandbox: Sandbox, legacy: str, option: str
+) -> None:
+    """The options had Catalan names before the scripts were in English: an owner
+    who learnt them, or the guide of an earlier version, gets the same command."""
+    old, new = sandbox.script("restore", legacy), sandbox.script("restore", option)
+    assert (old.returncode, old.stdout, old.stderr) == (new.returncode, new.stdout, new.stderr)
+
+
+@LINUX_SCRIPTS
+def test_backup_still_takes_the_catalan_names_of_its_options(sandbox: Sandbox) -> None:
+    result = sandbox.script("backup", "--sense-xifrar", FAKE_DATE="2026-09-28 10:00:00")
+    assert result.returncode == 0, result.stderr
+    assert list(sandbox.backup_files()) == [
+        "claudegpt-2026-09-28_100000.tar.gz",
+        "env-2026-09-28_100000",
+    ]
+    old, new = sandbox.script("backup", "--ajuda"), sandbox.script("backup", "--help")
+    assert old.returncode == new.returncode == 0 and old.stdout == new.stdout
+
+
+@LINUX_SCRIPTS
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "# Volumes restored by deploy/restore.sh",
+        "# Volums restaurats per deploy/restore.sh",  # as earlier versions wrote it
+    ],
+)
+def test_a_restore_replaces_the_volume_lines_of_an_earlier_restore(
+    sandbox: Sandbox, comment: str
+) -> None:
+    """The .env of a server that was itself restored carries the lines that R2 wrote
+    there: R2 drops them, comment included, and writes its own."""
+    archive, env_file = sandbox.upload()
+    env_file.write_text(
+        f"{BACKUP_ENV}{comment} (20260101-000000)\n"
+        "APP_DATA_VOLUME=claudegpt_app_data_r20260101-000000\n"
+        "APP_HOME_VOLUME=claudegpt_app_home_r20260101-000000\n"
+    )
+
+    result = sandbox.script("restore", str(archive), str(env_file))
+
+    assert result.returncode == 0, result.stderr
+    sandbox.assert_restored(archive, env_file)
+    env = (sandbox.project / ".env").read_text()
+    stamp = sandbox.journal()["stamp"]
+    assert [line for line in env.splitlines() if line.startswith("#")] == [
+        f"# Volumes restored by deploy/restore.sh ({stamp})"
+    ]

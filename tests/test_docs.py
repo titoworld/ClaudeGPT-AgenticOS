@@ -77,7 +77,7 @@ def field_default(name: str) -> int:
 
 PROTOCOL = "docs/PROTOCOL.md"
 ARCHITECTURE = "docs/ARCHITECTURE.md"
-DESPLEGAMENT = "docs/DEPLOYMENT.md"
+DEPLOYMENT = "docs/DEPLOYMENT.md"
 LOGIN_BODY = middleware.SMALL_BODY_PATHS["/api/auth/login"]
 BODY_SECONDS = int(middleware.BODY_TIMEOUT_SECONDS)
 assert BODY_SECONDS == middleware.BODY_TIMEOUT_SECONDS  # the docs give whole seconds
@@ -133,20 +133,16 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (ARCHITECTURE, r"Request bodies have a maximum of (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
     (ARCHITECTURE, r"\((\d+ [KM]iB) for logging in", LOGIN_BODY),
     (ARCHITECTURE, r"has not arrived whole within (\d+) s\b", BODY_SECONDS),
-    (
-        DESPLEGAMENT,
-        r"El cos de les peticions té un màxim d'(\d+ [KM]iB)",
-        middleware.MAX_BODY_BYTES,
-    ),
-    (DESPLEGAMENT, r"\((\d+ [KM]iB) per a l'inici de sessió", LOGIN_BODY),
-    (DESPLEGAMENT, r"no ha arribat sencer en (\d+) segons", BODY_SECONDS),
+    (DEPLOYMENT, r"Request bodies have a maximum of (\d+ [KM]iB)", middleware.MAX_BODY_BYTES),
+    (DEPLOYMENT, r"\((\d+ [KM]iB) for the login", LOGIN_BODY),
+    (DEPLOYMENT, r"has not arrived whole within (\d+) seconds", BODY_SECONDS),
     # Attachments.
     (PROTOCOL, r"; (\d+) s a `PUT /api/attachments`", UPLOAD_SECONDS),
     (PROTOCOL, r"o (\d+) MB a `PUT /api/attachments`", UPLOAD_MB),
     (ARCHITECTURE, r"has a limit of its own: (\d+) MB", UPLOAD_MB),
     (ARCHITECTURE, r"has a limit of its own: \d+ MB and (\d+) s\b", UPLOAD_SECONDS),
-    (DESPLEGAMENT, r"té un límit propi: (\d+) MB", UPLOAD_MB),
-    (DESPLEGAMENT, r"té un límit propi: \d+ MB i (\d+) segons", UPLOAD_SECONDS),
+    (DEPLOYMENT, r"has a limit of its own: (\d+) MB", UPLOAD_MB),
+    (DEPLOYMENT, r"has a limit of its own: \d+ MB and (\d+) seconds", UPLOAD_SECONDS),
     (PROTOCOL, r"com a molt (\d+) adjunts per missatge", attachments.MAX_ATTACHMENTS),
     (PROTOCOL, r"com a molt (\d+), cadascun un sol cop", attachments.MAX_ATTACHMENTS),
     (ARCHITECTURE, r"at most (\d+) and \d+ MB in all", attachments.MAX_ATTACHMENTS),
@@ -166,7 +162,7 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     (PROTOCOL, r"com a molt (\d+) caràcters \(un de més llarg", attachments.MAX_NAME_LENGTH),
     (PROTOCOL, r"s'esborra al cap de (\d+) h\b", ORPHAN_HOURS),
     (PROTOCOL, r"en un procés a part, com a molt (\d+) s", int(attachments.PDF_TIMEOUT_SECONDS)),
-    (DESPLEGAMENT, r"límits de temps \((\d+) segons\)", int(attachments.PDF_TIMEOUT_SECONDS)),
+    (DEPLOYMENT, r"limits on time \((\d+) seconds\)", int(attachments.PDF_TIMEOUT_SECONDS)),
     (PROTOCOL, r"Si passa d'([\d.]+) caràcters", attachments.MAX_PDF_TEXT_CHARS),
     (
         PROTOCOL,
@@ -203,17 +199,17 @@ DOCUMENTED_NUMBERS: list[tuple[str, str, int]] = [
     ),
     (PROTOCOL, r"`AOS_SESSION_MAX_DAYS` \((\d+) dies\)", field_default("session_max_days")),
     (
-        DESPLEGAMENT,
-        r"`AOS_SESSION_IDLE_HOURS`, d'1 a ([\d.]+) hores",
+        DEPLOYMENT,
+        r"`AOS_SESSION_IDLE_HOURS`, from 1 to ([\d,]+) hours",
         field_bound("session_idle_hours", "le"),
     ),
     (
-        DESPLEGAMENT,
-        r"`AOS_SESSION_MAX_DAYS`, d'1 a ([\d.]+) dies",
+        DEPLOYMENT,
+        r"`AOS_SESSION_MAX_DAYS`, from 1 to ([\d,]+) days",
         field_bound("session_max_days", "le"),
     ),
-    (DESPLEGAMENT, r"fins a (\d+) hores sense activitat", field_default("session_idle_hours")),
-    (DESPLEGAMENT, r"i (\d+) dies com a màxim", field_default("session_max_days")),
+    (DEPLOYMENT, r"up to (\d+) hours without activity", field_default("session_idle_hours")),
+    (DEPLOYMENT, r"and (\d+) days at most", field_default("session_max_days")),
 ]
 
 
@@ -466,7 +462,7 @@ def test_the_readme_deploy_summary_puts_the_claude_token_in_env() -> None:
     assert any(line.startswith("docker compose up -d") for line in lines[token + 1 : doctor])
     # The guide's later commands (updates, backups) run from /opt/claudegpt.
     assert "/opt/claudegpt" in lines[0] and any("deploy/harden.sh" in line for line in lines)
-    guide = section(read(DESPLEGAMENT), "6. Connectar Claude (subscripció Pro/Max)")
+    guide = section(read(DEPLOYMENT), "6. Connect Claude (Pro/Max subscription)")
     assert "CLAUDE_CODE_OAUTH_TOKEN=" in guide and "docker compose up -d" in guide
 
 
@@ -496,12 +492,13 @@ def test_the_hello_version_in_the_protocol_is_the_package_version() -> None:
 
 
 def test_the_login_messages_the_guide_quotes_are_the_ones_the_web_shows() -> None:
-    troubleshooting = section(read(DESPLEGAMENT), "Resolució de problemes")
-    login = troubleshooting[troubleshooting.index("**No puc iniciar sessió**") :]
+    troubleshooting = section(read(DEPLOYMENT), "Troubleshooting")
+    login = troubleshooting[troubleshooting.index("**I can't log in**") :]
     login = login.split("\n\n")[0]
-    quoted = re.findall(r"«([^»]+)»", login)
+    quoted = re.findall(r'"([^"]+)"', login)
     assert quoted
-    shown = read("web/src/views/Login.svelte")
+    # The login screen's English texts (web/src/views/Login.svelte reads them).
+    shown = read("web/src/lib/i18n/areas/app.ts")
     for message in quoted:
         assert message.rstrip(".") in shown, message
 

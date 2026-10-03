@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Backup of ClaudeGPT OS: the two data volumes and .env, encrypted with age
-# (docs/DEPLOYMENT.md, section «Còpies de seguretat»). As root, on the server:
+# (docs/DEPLOYMENT.md, section "Backups"). As root, on the server:
 #
 #   cd /opt/claudegpt
 #   bash deploy/backup.sh age1...          # your age public key
-#   bash deploy/backup.sh --sense-xifrar   # discouraged: without encryption
+#   bash deploy/backup.sh --unencrypted    # discouraged: without encryption
+#
+# (--sense-xifrar, the Catalan name of --unencrypted in earlier versions, works too.)
 #
 # It adds two files to /var/backups/claudegpt (mode 700), named after the date
 # and time of the backup:
@@ -46,11 +48,11 @@ readonly LOCK=$STATE.lock
 
 usage() {
   cat << 'EOF'
-Ús: bash deploy/backup.sh CLAU_PÚBLICA_AGE    (la clau comença per age1...)
-    bash deploy/backup.sh --sense-xifrar      (desaconsellat: còpia sense xifrar)
+Usage: bash deploy/backup.sh AGE_PUBLIC_KEY   (the key starts with age1...)
+       bash deploy/backup.sh --unencrypted    (discouraged: an unencrypted backup)
 
-Desa una còpia de les dades i del fitxer .env a /var/backups/claudegpt.
-Guia: docs/DEPLOYMENT.md, apartat «Còpies de seguretat».
+Saves a backup of the data and of the .env file to /var/backups/claudegpt.
+Guide: docs/DEPLOYMENT.md, section "Backups".
 EOF
 }
 
@@ -85,7 +87,7 @@ volume_name() {
   env_value "$1"
   REPLY=${REPLY:-$2}
   [[ $REPLY =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] ||
-    die "$1, al fitxer .env, no és un nom de volum vàlid: «$REPLY»."
+    die "$1 in the .env file is not a valid volume name: \"$REPLY\"."
 }
 
 encrypt=1 key=""
@@ -94,11 +96,12 @@ encrypt=1 key=""
   exit 2
 }
 case $1 in
+  # --ajuda and --sense-xifrar: the Catalan names of earlier versions.
   -h | --help | --ajuda)
     usage
     exit 0
     ;;
-  --sense-xifrar) encrypt=0 ;;
+  --unencrypted | --sense-xifrar) encrypt=0 ;;
   -*)
     usage >&2
     exit 2
@@ -119,20 +122,20 @@ finish() {
     if detached docker compose start app > /dev/null; then
       stopped=0
     else
-      warn "ERROR: l'aplicació ha quedat aturada. Engega-la amb: docker compose start app"
+      warn "ERROR: the app was left stopped. Start it with: docker compose start app"
       reported=1
       [ "$status" != 0 ] || status=1
     fi
   fi
   if [ "$status" != 0 ] && [ "$published" = 0 ]; then
-    [ "$reported" = 1 ] || warn "ERROR: la còpia ha fallat (mira el missatge de sobre)."
-    warn "No s'ha fet cap còpia nova, i les còpies anteriors continuen intactes."
+    [ "$reported" = 1 ] || warn "ERROR: the backup failed (see the message above)."
+    warn "No new backup was made, and the earlier backups are intact."
   fi
   exit "$status"
 }
 interrupted() {
   trap '' INT TERM HUP
-  warn "ERROR: s'ha interromput la còpia."
+  warn "ERROR: the backup was interrupted."
   reported=1
   exit "$1"
 }
@@ -143,13 +146,13 @@ trap 'interrupted 143' TERM
 trap 'exec > /dev/null 2>&1; interrupted 129' HUP
 
 # ---------------------------------------------------- checks: nothing stops yet
-[ -f .env ] || die "no trobo el fitxer .env a $PWD."
+[ -f .env ] || die "cannot find the .env file in $PWD."
 install -d -m 700 -- "$(dirname -- "$LOCK")"
 exec 9>> "$LOCK"
 locked=0
 if command -v flock > /dev/null; then
   flock -n 9 ||
-    die "hi ha una restauració o una altra còpia en marxa: espera que acabi (bash deploy/restore.sh --estat)."
+    die "a restore or another backup is running: wait for it to finish (bash deploy/restore.sh --status)."
   locked=1
 fi
 # A restore that was killed, or that could not roll back, can leave .env naming
@@ -158,7 +161,7 @@ fi
 if [ -f "$STATE" ]; then
   case $(sed -n 's/^status=//p' "$STATE") in
     running | rollback_failed)
-      die "hi ha una restauració a mitges. Mira-la amb bash deploy/restore.sh --estat i acaba-la amb --reprèn o --desfés; després fes la còpia."
+      die "a restore is unfinished. Look at it with bash deploy/restore.sh --status and finish it with --resume or --undo; then make the backup."
       ;;
   esac
 fi
@@ -169,29 +172,31 @@ home_volume=$REPLY
 
 if [ "$encrypt" = 1 ]; then
   command -v age > /dev/null ||
-    die "no trobo age. Instal·la'l (apt-get install -y age) o fes servir --sense-xifrar."
+    die "cannot find age. Install it (apt-get install -y age) or use --unencrypted."
   age -r "$key" < /dev/null > /dev/null ||
-    die "la clau pública no és vàlida: «$key». Copia-la sencera (age1...) des del teu ordinador."
+    die "the public key is not valid: \"$key\". Copy all of it (age1...) from your computer."
 fi
 docker image inspect "$IMAGE" > /dev/null ||
-  die "no hi ha la imatge $IMAGE. Construeix-la amb: docker compose build"
+  die "the image $IMAGE does not exist. Build it with: docker compose build"
 for volume in "$data_volume" "$home_volume"; do
   # `docker run` would create a missing volume, empty: that would be an empty backup.
   docker volume inspect "$volume" > /dev/null ||
-    die "no existeix el volum $volume (revisa APP_DATA_VOLUME i APP_HOME_VOLUME a .env)."
+    die "the volume $volume does not exist (check APP_DATA_VOLUME and APP_HOME_VOLUME in .env)."
 done
 install -d -m 700 -- "$BACKUP_DIR"
 # A backup that was killed (kill -9, a power cut) leaves its hidden temporaries
-# here (in plain text with --sense-xifrar). Only this script writes those names,
-# and the lock says that no other backup is running.
+# here (in plain text with --unencrypted). Only this script writes those names
+# (.parcial. in earlier versions), and the lock says that no other backup is running.
 if [ "$locked" = 1 ]; then
   shopt -s nullglob
-  stale=("$BACKUP_DIR"/.claudegpt-????-??-??_??????.parcial.??????
+  stale=("$BACKUP_DIR"/.claudegpt-????-??-??_??????.partial.??????
+    "$BACKUP_DIR"/.env-????-??-??_??????.partial.??????
+    "$BACKUP_DIR"/.claudegpt-????-??-??_??????.parcial.??????
     "$BACKUP_DIR"/.env-????-??-??_??????.parcial.??????)
   shopt -u nullglob
   if [ "${#stale[@]}" -gt 0 ]; then
-    rm -f -- "${stale[@]}" || die "no he pogut esborrar els fitxers temporals d'una còpia anterior a $BACKUP_DIR."
-    say "He esborrat els fitxers temporals d'una còpia que es va interrompre: ${stale[*]##*/}"
+    rm -f -- "${stale[@]}" || die "could not delete the temporary files of an earlier backup in $BACKUP_DIR."
+    say "Deleted the temporary files of a backup that was interrupted: ${stale[*]##*/}"
   fi
 fi
 
@@ -201,8 +206,8 @@ if [ "$encrypt" = 1 ]; then
 else
   archive_ext=.tar.gz env_ext=""
 fi
-tmp_archive=$(mktemp "$BACKUP_DIR/.claudegpt-$stamp.parcial.XXXXXX")
-tmp_env=$(mktemp "$BACKUP_DIR/.env-$stamp.parcial.XXXXXX")
+tmp_archive=$(mktemp "$BACKUP_DIR/.claudegpt-$stamp.partial.XXXXXX")
+tmp_env=$(mktemp "$BACKUP_DIR/.env-$stamp.partial.XXXXXX")
 
 # ------------------------------------------------ the data, with the app stopped
 read_volumes() {
@@ -212,26 +217,26 @@ read_volumes() {
     -v "$home_volume:/home/app:ro" "$IMAGE" tar czf - -C / data home/app
 }
 
-say "Aturo l'aplicació uns segons, mentre llegeixo les dades..."
+say "Stopping the app for a few seconds, while the data is read..."
 stopped=1 # before the stop: an interrupted stop must start the app again too
-docker compose stop app || die "no s'ha pogut aturar l'aplicació."
+docker compose stop app || die "could not stop the app."
 if [ "$encrypt" = 1 ]; then
   read_volumes | age -r "$key" > "$tmp_archive" ||
-    die "no s'han pogut llegir o xifrar les dades (mira el missatge de sobre)."
+    die "could not read or encrypt the data (see the message above)."
 else
-  read_volumes > "$tmp_archive" || die "no s'han pogut llegir les dades (mira el missatge de sobre)."
+  read_volumes > "$tmp_archive" || die "could not read the data (see the message above)."
 fi
 # If it does not start, the trap tries again and reports it; the backup is good.
 if docker compose start app; then stopped=0; fi
 
 if [ "$encrypt" = 1 ]; then
-  age -r "$key" < .env > "$tmp_env" || die "no s'ha pogut xifrar el fitxer .env."
+  age -r "$key" < .env > "$tmp_env" || die "could not encrypt the .env file."
 else
-  cat .env > "$tmp_env" || die "no s'ha pogut copiar el fitxer .env."
+  cat .env > "$tmp_env" || die "could not copy the .env file."
 fi
 
 # -------------------------------------------------------------------- publish
-sync -- "$tmp_archive" "$tmp_env" || die "no s'han pogut desar les dades al disc."
+sync -- "$tmp_archive" "$tmp_env" || die "could not write the data to the disk."
 
 # Links $1 as $2: status 1 if $2 exists; any other error ends the backup.
 new_name() {
@@ -239,7 +244,7 @@ new_name() {
   if [ -e "$2" ] || [ -L "$2" ]; then return 1; fi
   error=$(ln -T -- "$1" "$2" 2>&1) && return 0
   if [ -e "$2" ] || [ -L "$2" ]; then return 1; fi
-  die "no s'ha pogut desar $2: $error"
+  die "could not save $2: $error"
 }
 
 suffix="" n=0
@@ -255,17 +260,17 @@ while :; do
     if [ "$archive" -ef "$tmp_archive" ]; then rm -f -- "$archive"; fi
   fi
   n=$((n + 1))
-  [ "$n" -lt 100 ] || die "no trobo cap nom lliure per a la còpia a $BACKUP_DIR."
+  [ "$n" -lt 100 ] || die "cannot find a free name for the backup in $BACKUP_DIR."
   suffix=-$n
 done
-sync -- "$BACKUP_DIR" || warn "AVÍS: no s'ha pogut confirmar que el directori s'ha desat al disc."
+sync -- "$BACKUP_DIR" || warn "WARNING: could not confirm that the directory was written to the disk."
 rm -f -- "$tmp_archive" "$tmp_env"
 tmp_archive="" tmp_env=""
 # The owner downloads them with the user they log in with (sudo -i keeps it).
 chown -- "${SUDO_USER:-root}" "$BACKUP_DIR" "$archive" "$env_copy" ||
-  warn "AVÍS: els fitxers no són de ${SUDO_USER:-root}; per descarregar-los, entra com a root."
+  warn "WARNING: the files do not belong to ${SUDO_USER:-root}; to download them, log in as root."
 
-say "Còpia feta: $stamp$suffix"
+say "Backup done: $stamp$suffix"
 say "  $archive"
 say "  $env_copy"
-say "Descarrega-la al teu ordinador i esborra-la del servidor (docs/DEPLOYMENT.md)."
+say "Download it to your computer and delete it from the server (docs/DEPLOYMENT.md)."
