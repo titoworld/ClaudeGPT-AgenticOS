@@ -1,11 +1,17 @@
 // Calendar-day helpers. Dates travel as 'YYYY-MM-DD' (UTC days, as the API sends
 // them) and are always formatted in UTC so a browser west of Greenwich never
-// shows the previous day.
+// shows the previous day. Labels are in the language in force (lib/i18n).
+
+import { i18n } from '../i18n/index.svelte';
+import { perLocale } from './intl';
 
 const DAY_MS = 86_400_000;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-const MONTHS_SHORT = ['gen.', 'febr.', 'març', 'abr.', 'maig', 'juny', 'jul.', 'ag.', 'set.', 'oct.', 'nov.', 'des.'];
-const longDay = new Intl.DateTimeFormat('ca-ES', { weekday: 'short', day: 'numeric', month: 'long', timeZone: 'UTC' });
+/** A month's short name on its own ('Sept', 'sept', 'set.'), without the "de" Catalan puts after a day. */
+const monthShort = perLocale((tag) => new Intl.DateTimeFormat(tag, { month: 'short', timeZone: 'UTC' }));
+const longDay = perLocale(
+  (tag) => new Intl.DateTimeFormat(tag, { weekday: 'short', day: 'numeric', month: 'long', timeZone: 'UTC' }),
+);
 
 export function isIsoDay(value: string): boolean {
   return ISO_DAY.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
@@ -38,17 +44,18 @@ export function rangeEnd(dataDays: string[], today: string = utcDay()): string {
   return end;
 }
 
-/** Axis label: '27 set.' */
+/** Axis label: '27 Sept', '27 sept', '27 set.' */
 export function axisDayLabel(day: string): string {
   const [, m, d] = day.split('-').map(Number);
   if (!m || !d) return day;
-  return `${d} ${MONTHS_SHORT[m - 1] ?? ''}`.trim();
+  const month = m <= 12 ? monthShort().format(Date.UTC(2000, m - 1, 1)) : '';
+  return i18n.m.dashboard.chart.axisDay(d, month).trim();
 }
 
-/** Tooltip/table label: 'dg., 27 de setembre' */
+/** Tooltip/table label: 'Sun 27 September', 'dom, 27 de septiembre', 'dg., 27 de setembre' */
 export function fullDayLabel(day: string): string {
   const t = Date.parse(`${day}T00:00:00Z`);
-  return Number.isNaN(t) ? day : longDay.format(t);
+  return Number.isNaN(t) ? day : longDay().format(t);
 }
 
 /**

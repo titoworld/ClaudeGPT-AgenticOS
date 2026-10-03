@@ -5,6 +5,7 @@
    * a single y-axis. Each day's full-height slot is the hover/focus target; one
    * tooltip lists every series. Arrow keys move between days.
    */
+  import { i18n } from '../i18n/index.svelte';
   import { tickIndices } from './dates';
   import { navIndex } from './nav';
   import { band, barThickness, linear, niceTicks, roundedBar } from './scale';
@@ -75,7 +76,9 @@
       .slice()
       .reverse() // same order as the stack reads, top to bottom
       .map((s) => ({ key: s.key, color: s.color, label: s.label, value: format(Number(d.values[s.key] ?? 0)) }));
-    if (series.length > 1) rows.push({ key: '__total', color: null, label: 'Total', value: format(stacks[i]?.total ?? 0) });
+    if (series.length > 1) {
+      rows.push({ key: '__total', color: null, label: i18n.m.dashboard.chart.total, value: format(stacks[i]?.total ?? 0) });
+    }
     return rows;
   }
 
@@ -83,7 +86,7 @@
     const d = data[i];
     if (!d) return '';
     const parts = series.map((s) => `${s.label} ${format(Number(d.values[s.key] ?? 0))}`);
-    if (series.length > 1) parts.push(`total ${format(stacks[i]?.total ?? 0)}`);
+    if (series.length > 1) parts.push(i18n.m.dashboard.chart.totalValue(format(stacks[i]?.total ?? 0)));
     return `${d.fullLabel}: ${parts.join(', ')}`;
   }
 

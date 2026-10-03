@@ -6,18 +6,24 @@ import { mount } from 'svelte';
 import '../../styles/tokens.css';
 import Dashboard from '../../views/Dashboard.svelte';
 import { processedTokens } from '../costs';
+import { asLocale, i18n } from '../i18n/index.svelte';
 import type { Agent, AgentSpend, FxRate, MonthSpend, ProviderMode, ProviderStatus, SavingKind, Stats } from '../protocol';
 import { addDays, utcDay } from './dates';
 
 const params = new URLSearchParams(location.search);
 const empty = params.has('empty');
+/** ?lang=en|es|ca: the interface's language (else the one this browser already has). */
+const lang = asLocale(params.get('lang'));
+if (lang) i18n.set(lang);
 /** ?api: both agents on API keys; ?mixed: Claude subscription + ChatGPT API; default: both subscriptions. */
 const MODE: Record<Agent, ProviderMode> = {
   claude: params.has('api') ? 'api' : 'cli',
   chatgpt: params.has('api') || params.has('mixed') ? 'api' : 'cli',
 };
-/** USD per million tokens (input, output, cache read, cache write). */
-const PRICE: Record<Agent, [number, number, number, number]> = { claude: [3, 15, 0.3, 3.75], chatgpt: [1.25, 10, 0.125, 0] };
+/** The models of the mocked agents. */
+const MODEL: Record<Agent, string> = { claude: 'claude-opus-5-5', chatgpt: 'gpt-6-astra' };
+/** USD per million tokens (input, output, cache read, cache write) of those models, as pricing.py has them. */
+const PRICE: Record<Agent, [number, number, number, number]> = { claude: [4, 20, 0.2, 5], chatgpt: [10, 50, 1, 12.5] };
 const SCALE = 12;
 const HISTORY = 90;
 
@@ -183,8 +189,8 @@ function mockProviders(): ProviderStatus[] {
       agent: 'claude',
       mode: MODE.claude,
       available: true,
-      model: MODE.claude === 'api' ? 'claude-sonnet-4-5' : 'claude-sonnet-4-5 (Pro)',
-      detail: MODE.claude === 'api' ? 'Clau d’API configurada.' : 'Sessió de la subscripció activa.',
+      model: MODE.claude === 'api' ? MODEL.claude : `${MODEL.claude} (Pro)`,
+      detail: MODE.claude === 'api' ? 'API key set.' : 'Subscription session active.',
       limits:
         MODE.claude === 'api'
           ? []
@@ -197,8 +203,8 @@ function mockProviders(): ProviderStatus[] {
       agent: 'chatgpt',
       mode: MODE.chatgpt,
       available: !down,
-      model: MODE.chatgpt === 'api' ? 'gpt-5' : 'gpt-5-codex',
-      detail: down ? 'La CLI no respon.' : MODE.chatgpt === 'api' ? 'Clau d’API configurada.' : 'Sessió de ChatGPT Plus activa.',
+      model: MODEL.chatgpt,
+      detail: down ? 'The CLI does not respond.' : MODE.chatgpt === 'api' ? 'API key set.' : 'ChatGPT Plus session active.',
       limits:
         MODE.chatgpt === 'api'
           ? []
@@ -217,13 +223,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 window.fetch = async (input: RequestInfo | URL) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.origin);
   await sleep(params.has('slow') ? 1500 : 120);
-  if (params.has('error')) return json({ detail: 'El servidor no respon.' }, 503);
+  if (params.has('error')) return json({ detail: 'The server does not respond.' }, 503);
   if (url.pathname === '/api/stats') return json(mockStats(Number(url.searchParams.get('days') ?? 30)));
   if (url.pathname === '/api/spend') return json(mockMonth());
   if (url.pathname === '/api/providers') {
-    return params.has('noproviders') ? json({ detail: 'No s’ha pogut consultar.' }, 503) : json(mockProviders());
+    return params.has('noproviders') ? json({ detail: 'Could not be checked.' }, 503) : json(mockProviders());
   }
-  return json({ detail: 'No trobat' }, 404);
+  return json({ detail: 'Not found' }, 404);
 };
 
 const target = document.getElementById('app');

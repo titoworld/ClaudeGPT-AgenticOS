@@ -23,7 +23,7 @@ export interface TableColumn {
   numeric: boolean;
 }
 
-/** Accessible twin of a chart ("Veure taula"). Cells are preformatted text. */
+/** Accessible twin of a chart ("Show table"). Cells are preformatted text. */
 export interface ChartTable {
   caption: string;
   columns: TableColumn[];

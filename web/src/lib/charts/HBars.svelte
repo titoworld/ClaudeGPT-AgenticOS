@@ -4,6 +4,7 @@
    * labelled at the bar tip, so no value axis is drawn: only the baseline.
    * Each category row is the hover/focus target; arrow keys move between rows.
    */
+  import { i18n } from '../i18n/index.svelte';
   import { navIndex } from './nav';
   import { linear, roundedBar } from './scale';
   import { positive } from './stack';
@@ -77,7 +78,7 @@
     if (!d) return '';
     const parts = series.map((s) => {
       const v = d.values[s.key];
-      const value = v == null ? 'sense dades' : format(v);
+      const value = v == null ? i18n.m.dashboard.chart.noValue : format(v);
       return series.length > 1 ? `${s.label} ${value}` : value;
     });
     return `${d.fullLabel}: ${parts.join(', ')}`;

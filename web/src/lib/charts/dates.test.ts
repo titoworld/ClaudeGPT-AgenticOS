@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n, LOCALE_KEY } from '../i18n/index.svelte';
 import { addDays, axisDayLabel, dayRange, fullDayLabel, isIsoDay, rangeEnd, tickIndices, utcDay } from './dates';
 
 describe('calendar days', () => {
@@ -60,5 +61,25 @@ describe('tickIndices', () => {
   it('handles degenerate inputs', () => {
     expect(tickIndices(0, 5)).toEqual([]);
     expect(tickIndices(5, 0)).toEqual([4]);
+  });
+});
+
+describe('day labels in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it('name the days of the axis and of the tooltips in the language in force', () => {
+    i18n.set('en');
+    expect(axisDayLabel('2026-09-27')).toBe('27 Sept');
+    expect(axisDayLabel('2026-03-01')).toBe('1 Mar');
+    expect(fullDayLabel('2026-09-27')).toMatch(/^Sun 27 September$/);
+    i18n.set('es');
+    expect(axisDayLabel('2026-09-27')).toBe('27 sept');
+    expect(axisDayLabel('2026-05-10')).toBe('10 may');
+    expect(fullDayLabel('2026-09-27')).toMatch(/^dom, 27 de septiembre$/);
+    i18n.set('ca');
+    expect(axisDayLabel('2026-04-05')).toBe('5 abr.');
   });
 });

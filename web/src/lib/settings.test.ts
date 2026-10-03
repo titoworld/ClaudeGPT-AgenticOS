@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { i18n, LOCALE_KEY } from './i18n/index.svelte';
 import type { RuntimeSettings } from './protocol';
 import {
   amountText,
   cleanSettings,
   DEFAULT_SETTINGS,
   formatAmount,
-  INVALID_AMOUNT,
+  invalidAmount,
   LIMITS,
   normalizeSettings,
   parseAmount,
@@ -149,7 +150,7 @@ describe('amounts typed in the budget and plan inputs (F2)', () => {
     s.plans_eur.chatgpt = parseAmount('1.000');
     const errors = validateSettings(s);
     expect(errors['budgets_eur.claude']).toBeUndefined();
-    expect(errors['plans_eur.chatgpt']).toBe(INVALID_AMOUNT);
+    expect(errors['plans_eur.chatgpt']).toBe(invalidAmount());
     // The drawer does not save while there are errors; once fixed, the value is sent.
     s.plans_eur.chatgpt = parseAmount('22,99');
     expect(validateSettings(s)).toEqual({});
@@ -204,13 +205,13 @@ describe('the refine defaults («Perfecciona», ADR 0010)', () => {
     const doc = await protocolDoc();
     const range = (field: string) => {
       const m = new RegExp(`${field}: [^;]+;\\s+// ([\\d,.]+)–([\\d,.]+)`).exec(doc);
-      return m ? [m[1]!, m[2]!].map((n) => Number(n.replaceAll('.', '').replace(',', '.'))) : null;
+      return m ? [m[1]!, m[2]!].map((n) => Number(n.replaceAll(',', ''))) : null;
     };
     expect(range('max_rounds')).toEqual([LIMITS.refine_rounds.min, LIMITS.refine_rounds.max]);
     expect(range('budget_eur')).toEqual([LIMITS.refine_budget_eur.min, LIMITS.refine_budget_eur.max]);
     expect(range('convergence_threshold')).toEqual([LIMITS.refine_threshold.min, LIMITS.refine_threshold.max]);
-    const words = /de cada versió: ([\d.]+)–([\d.]+)/.exec(doc);
-    expect(words && [words[1], words[2]].map((n) => Number(n!.replaceAll('.', '')))).toEqual([
+    const words = /of each version: ([\d,]+)–([\d,]+)/.exec(doc);
+    expect(words && [words[1], words[2]].map((n) => Number(n!.replaceAll(',', '')))).toEqual([
       LIMITS.refine_words.min,
       LIMITS.refine_words.max,
     ]);
@@ -223,7 +224,7 @@ describe('the refine defaults («Perfecciona», ADR 0010)', () => {
       editor: 'claude',
     });
     for (const [field, value] of [['max_rounds', 12], ['budget_eur', 3], ['convergence_threshold', 90]] as const) {
-      expect(new RegExp(`${field}: [^;]+;\\s+// [^\\n]*per defecte (\\d+)`).exec(doc)?.[1]).toBe(String(value));
+      expect(new RegExp(`${field}: [^;]+;\\s+// [^\\n]*default (\\d+)`).exec(doc)?.[1]).toBe(String(value));
     }
   });
 
@@ -263,7 +264,7 @@ describe('the refine defaults («Perfecciona», ADR 0010)', () => {
     const s = valid();
     s.refine = { ...s.refine, budget_eur: parseAmount('1.000') as number, max_words: Number.NaN };
     expect(validateSettings(s)).toMatchObject({
-      'refine.budget_eur': INVALID_AMOUNT,
+      'refine.budget_eur': invalidAmount(),
       'refine.max_words': 'Cal un número.',
     });
     s.refine = { ...s.refine, budget_eur: parseAmount('') as unknown as number, max_words: 150.5 };
@@ -274,5 +275,55 @@ describe('the refine defaults («Perfecciona», ADR 0010)', () => {
     s.refine = { ...s.refine, budget_eur: parseAmount('2,5') as number, max_words: 400 };
     expect(validateSettings(s)).toEqual({});
     expect(cleanSettings(s).refine).toMatchObject({ budget_eur: 2.5, max_words: 400 });
+  });
+});
+
+describe('the settings in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it('says what is wrong in the language in force, with its own numbers', () => {
+    const s = valid();
+    s.fx.eur_per_usd = 9;
+    s.refine = { ...s.refine, max_words: 99 };
+    s.budgets_eur.claude = -1;
+    s.plans_eur.chatgpt = 200_000;
+    i18n.set('en');
+    expect(validateSettings(s)).toEqual({
+      'refine.max_words': 'Must be between 100 and 20,000.',
+      eur_per_usd: 'Must be between 0.2 and 5.',
+      'budgets_eur.claude': 'Must be an amount of €0 or more.',
+      'plans_eur.chatgpt': 'At most €100,000.',
+    });
+    i18n.set('es');
+    expect(validateSettings(s)).toEqual({
+      'refine.max_words': 'Tiene que estar entre 100 y 20.000.',
+      eur_per_usd: 'Tiene que estar entre 0,2 y 5.',
+      'budgets_eur.claude': 'Tiene que ser un importe de 0 € o más.',
+      'plans_eur.chatgpt': 'Como máximo 100.000 €.',
+    });
+  });
+
+  it('reads and writes amounts with the decimal mark of the language', () => {
+    i18n.set('en');
+    expect(formatAmount(50.5)).toBe('50.5');
+    expect(parseAmount('50.5')).toBe(50.5);
+    expect(parseAmount('50,5')).toBe(50.5);
+    // The point is the English decimal mark; a comma before three digits is a thousand.
+    expect(parseAmount('1.000')).toBe(1);
+    expect(parseAmount('1,000')).toBeNaN();
+    const s = valid();
+    s.refine = { ...s.refine, budget_eur: parseAmount('1,000') as number };
+    expect(validateSettings(s)['refine.budget_eur']).toBe(
+      'Enter a valid amount, without a thousands separator (e.g. 1000 or 50.5).',
+    );
+    for (const v of [0.1, 22.99, 1.234, 100_000]) expect(parseAmount(formatAmount(v))).toBe(v);
+    i18n.set('es');
+    expect(formatAmount(50.5)).toBe('50,5');
+    expect(parseAmount('1.000')).toBeNaN();
+    expect(parseAmount('1,000')).toBe(1);
+    expect(invalidAmount()).toBe('Escribe un importe válido, sin separador de miles (p. ej., 1000 o 50,5).');
   });
 });

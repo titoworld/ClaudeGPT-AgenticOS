@@ -1,5 +1,6 @@
 // RuntimeSettings defaults and validation, mirroring the server ranges (docs/PROTOCOL.md).
 
+import { i18n } from './i18n/index.svelte';
 import { validateModelId } from './models';
 import {
   AGENTS,
@@ -109,38 +110,44 @@ export type SettingsField =
   | `price:${string}`;
 export type SettingsErrors = Partial<Record<SettingsField, string>>;
 
-const ca = (n: number): string => n.toLocaleString('ca-ES');
+/** A number as the language in force writes it (the limits in messages: "0,2", "20.000"). */
+const number = (n: number): string => n.toLocaleString(i18n.tag);
 
 const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 function checkInt(value: unknown, min: number, max: number): string | null {
-  if (!isNumber(value)) return 'Cal un número.';
-  if (!Number.isInteger(value)) return 'Ha de ser un nombre enter.';
-  if (value < min || value > max) return `Ha d'estar entre ${ca(min)} i ${ca(max)}.`;
+  const t = i18n.m.settings.validation;
+  if (!isNumber(value)) return t.number;
+  if (!Number.isInteger(value)) return t.integer;
+  if (value < min || value > max) return t.between(number(min), number(max));
   return null;
 }
 
 function checkNumber(value: unknown, min: number, max: number): string | null {
-  if (!isNumber(value)) return 'Cal un número.';
-  if (value < min || value > max) return `Ha d'estar entre ${ca(min)} i ${ca(max)}.`;
+  const t = i18n.m.settings.validation;
+  if (!isNumber(value)) return t.number;
+  if (value < min || value > max) return t.between(number(min), number(max));
   return null;
 }
 
-export const INVALID_AMOUNT = 'Escriu un import vàlid, sense separador de milers (p. ex. 1000 o 50,5).';
+/** The error of an amount typed as text that is not one (e.g. with a thousands separator). */
+export const invalidAmount = (): string => i18n.m.settings.validation.invalidAmount;
 
 /** Optional amount in euros: empty (null) means "not set"; NaN is text that is not an amount. */
 function checkEuros(value: unknown): string | null {
+  const t = i18n.m.settings.validation;
   if (value == null || value === '') return null;
-  if (typeof value === 'number' && Number.isNaN(value)) return INVALID_AMOUNT;
-  if (!isNumber(value) || value < LIMITS.eur.min) return 'Ha de ser un import de 0 € o més.';
-  if (value > LIMITS.eur.max) return `Com a màxim ${ca(LIMITS.eur.max)} €.`;
+  if (typeof value === 'number' && Number.isNaN(value)) return t.invalidAmount;
+  if (!isNumber(value) || value < LIMITS.eur.min) return t.amountMin;
+  if (value > LIMITS.eur.max) return t.amountMax(number(LIMITS.eur.max));
   return null;
 }
 
 /** A required amount in euros within `min`..`max` (typed as text: NaN is text that is not an amount). */
 function checkRequiredEuros(value: unknown, min: number, max: number): string | null {
-  if (value == null || value === '') return 'Cal un import.';
-  if (typeof value === 'number' && Number.isNaN(value)) return INVALID_AMOUNT;
+  const t = i18n.m.settings.validation;
+  if (value == null || value === '') return t.amountRequired;
+  if (typeof value === 'number' && Number.isNaN(value)) return t.invalidAmount;
   return checkNumber(value, min, max);
 }
 
@@ -151,7 +158,7 @@ export function validatePrice(model: string, price: ModelPrice): string | null {
   for (const key of ['input', 'output', 'cache_read', 'cache_write'] as const) {
     const v: unknown = price[key];
     if (!isNumber(v) || v < LIMITS.price.min || v > LIMITS.price.max) {
-      return `Els preus han de ser nombres entre ${ca(LIMITS.price.min)} i ${ca(LIMITS.price.max)} (USD per milió de tokens).`;
+      return i18n.m.settings.validation.prices(number(LIMITS.price.min), number(LIMITS.price.max));
     }
   }
   return null;
@@ -205,11 +212,17 @@ export function validateSettings(s: RuntimeSettings): SettingsErrors {
 
 const AMOUNT = /^(-?)(\d*)(?:([.,])(\d*))?$/;
 
+/** The decimal mark of the language in force: '.' in English, ',' in Spanish and Catalan. */
+function decimalMark(): string {
+  return new Intl.NumberFormat(i18n.tag).formatToParts(1.5).find((p) => p.type === 'decimal')?.value ?? '.';
+}
+
 /**
  * Euro amount typed by the owner: `null` when empty, NaN when it is not an
  * amount (validation reports it instead of clearing the saved value). Both ','
- * (Catalan) and '.' are decimal separators; "1.000" is rejected because in
- * Catalan it means a thousand, not one.
+ * and '.' are decimal separators, but the language's thousands separator before
+ * exactly three digits is rejected: "1.000" in Spanish and Catalan, like "1,000"
+ * in English, means a thousand, not one.
  */
 export function parseAmount(text: string): number | null {
   const s = text.trim();
@@ -218,14 +231,14 @@ export function parseAmount(text: string): number | null {
   if (!m) return Number.NaN;
   const [, sign = '', int = '', sep, frac = ''] = m;
   if (!int && !frac) return Number.NaN;
-  if (sep === '.' && frac.length === 3 && /[1-9]/.test(int)) return Number.NaN;
+  if (sep && sep !== decimalMark() && frac.length === 3 && /[1-9]/.test(int)) return Number.NaN;
   return Number(`${sign}${int || '0'}.${frac || '0'}`);
 }
 
-/** Text of a saved amount, with the Catalan decimal comma ("" when not set). */
+/** Text of a saved amount, with the decimal mark of the language in force ("" when not set). */
 export function formatAmount(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '';
-  return value.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 }).replace('.', ',');
+  return value.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 }).replace('.', decimalMark());
 }
 
 /**

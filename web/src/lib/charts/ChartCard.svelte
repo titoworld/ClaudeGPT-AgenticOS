@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
-   * Chart container: title, legend (for >= 2 series), the "Veure taula" toggle
+   * Chart container: title, legend (for >= 2 series), the "Show table" toggle
    * with the accessible table twin, and the empty state.
    */
   import type { Snippet } from 'svelte';
+  import { i18n } from '../i18n/index.svelte';
   import type { ChartTable, SeriesDef } from './types';
 
   interface Props {
@@ -12,19 +13,13 @@
     legend?: SeriesDef[];
     table: ChartTable;
     empty?: boolean;
+    /** What the empty state says (by default, that there is no data in the period). */
     emptyText?: string;
     children: Snippet;
   }
 
-  let {
-    title,
-    subtitle,
-    legend = [],
-    table,
-    empty = false,
-    emptyText = 'Encara no hi ha dades en aquest període.',
-    children,
-  }: Props = $props();
+  let { title, subtitle, legend = [], table, empty = false, emptyText, children }: Props = $props();
+  const t = $derived(i18n.m.dashboard.chart);
 
   let showTable = $state(false);
   const id = $props.id();
@@ -40,10 +35,10 @@
       <button type="button" class="toggle" aria-controls="{id}-body" onclick={() => (showTable = !showTable)}>
         {#if showTable}
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13.5h12M4 11V7m4 4V4m4 7V8" /></svg>
-          Veure gràfic
+          {t.showChart}
         {:else}
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h11v9h-11zM2.5 6.5h11M2.5 9.5h11M6.5 3.5v9" /></svg>
-          Veure taula
+          {t.showTable}
         {/if}
       </button>
     {/if}
@@ -61,7 +56,7 @@
     {#if empty}
       <div class="empty">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5h16M7 16v-3m5 3V9m5 7v-5" /></svg>
-        <p>{emptyText}</p>
+        <p>{emptyText ?? t.empty}</p>
       </div>
     {:else if showTable}
       <div class="table-wrap">

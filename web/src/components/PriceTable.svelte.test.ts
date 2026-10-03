@@ -3,6 +3,7 @@
 // server prices by (pricing.normalize_model), never by a second row.
 import { flushSync } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
+import { i18n, LOCALE_KEY } from '../lib/i18n/index.svelte';
 import type { ModelPrice, PriceRow, Pricing } from '../lib/protocol';
 import { cleanup, render } from '../lib/test-render';
 import PriceTable from './PriceTable.svelte';
@@ -203,5 +204,37 @@ describe('PriceTable: adding a model (A21, N13)', () => {
     await add(root, 'amb espais');
     expect(props.prices).toEqual({});
     expect(addError(root)).toContain('Identificador no vàlid');
+  });
+});
+
+describe('PriceTable in English and Spanish (ADR 0011)', () => {
+  afterEach(() => {
+    i18n.set('ca');
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it('names its columns and actions, writes prices and notes in the language in force', async () => {
+    i18n.set('en');
+    const { root } = mountTable({ 'claude-opus-5': OWN_OPUS, 'my-model': MINE }, withOwnOpus());
+    const heads = [...root.querySelectorAll('table.prices thead th')].map((th) => th.textContent?.trim());
+    expect(heads).toEqual(['Model', 'Input', 'Output', 'Cache read', 'Cache write', 'Actions']);
+    expect(describeRow(root, 'claude-opus-5')).toMatchObject({
+      tag: 'own',
+      base: ['5', '25', '0.5', '6.25'],
+      action: 'Restore the default price of claude-opus-5',
+    });
+    expect(describeRow(root, 'claude-sonnet-5')?.cells).toEqual(['2', '10', '0.2', '2.5']);
+    await add(root, 'MY-MODEL');
+    expect(addNote(root)).toBe('The server treats “MY-MODEL” as “my-model”, which already has its own price.');
+
+    // The note on screen follows a change of language, like the rest of the table.
+    i18n.set('es');
+    flushSync();
+    expect(addNote(root)).toBe('El servidor trata «MY-MODEL» como «my-model», que ya tiene un precio propio.');
+    expect(describeRow(root, 'claude-opus-5')).toMatchObject({ tag: 'propio', base: ['5', '25', '0,5', '6,25'] });
+    await add(root, 'openai/');
+    expect(addError(root)).toBe(
+      'Este identificador no corresponde a ningún modelo (sin el prefijo del proveedor, la fecha o el contexto no queda nada).',
+    );
   });
 });
