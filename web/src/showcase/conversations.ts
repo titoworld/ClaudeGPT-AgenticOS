@@ -1,7 +1,10 @@
-// Example conversations of the showcase (index.html): what the server stores of them and,
-// for the turns the page shows live, the events it sends, with the shapes the engine
-// writes (orchestrator/engine.py). The texts are in content/*.md.
+// Example conversations of the showcase (index.html), in English, Spanish and Catalan: what
+// the server stores of them and, for the turns the page shows live, the events it sends,
+// with the shapes the engine writes (orchestrator/engine.py). The texts of each language are
+// in content/<lang>/*.md, next to its quote PDF; the numbers (tokens, times, scores) are the
+// same in every language.
 
+import type { Locale } from '../lib/i18n/index.svelte';
 import type {
   Agent,
   Attachment,
@@ -18,17 +21,19 @@ import type {
   Usage,
 } from '../lib/protocol';
 import { addUsage, emptyUsage } from '../lib/turns.svelte';
-import consell from './content/consell.md?raw';
-import copies from './content/copies.md?raw';
-import pressupost from './content/pressupost.md?raw';
 
 export const MODEL: Record<Agent, string> = { claude: 'claude-opus-5-5', chatgpt: 'gpt-6-astra' };
 
 /** USD per million tokens (input, output, cache read), as pricing.py has them. */
 const PRICE: Record<Agent, [number, number, number]> = { claude: [4, 20, 0.2], chatgpt: [10, 50, 1] };
 
-/** The sections of a content file, by the name of their `<!-- @name -->` marker. */
-function sections(raw: string): Record<string, string> {
+/** The content files, by path: ./content/<lang>/<name>.md. */
+const CONTENT = import.meta.glob<string>('./content/*/*.md', { query: '?raw', import: 'default', eager: true });
+
+/** The sections of content/<lang>/<file>.md, by the name of their `<!-- @name -->` marker. */
+function sections(lang: Locale, file: string): Record<string, string> {
+  const raw = CONTENT[`./content/${lang}/${file}.md`];
+  if (raw === undefined) throw new Error(`Missing content/${lang}/${file}.md`);
   const parts = raw.split(/^<!-- @([\w-]+) -->\n/m);
   const out: Record<string, string> = {};
   for (let i = 1; i < parts.length; i += 2) out[parts[i]!] = parts[i + 1]!.trim();
@@ -39,6 +44,25 @@ function text(all: Record<string, string>, name: string): string {
   const value = all[name];
   if (value === undefined) throw new Error(`Missing section ${name}`);
   return value;
+}
+
+/** The items of a section that is a Markdown list, one `- item` per line. */
+function items(all: Record<string, string>, name: string): string[] {
+  return text(all, name)
+    .split('\n')
+    .map((line) => {
+      if (!line.startsWith('- ')) throw new Error(`Section ${name}: «${line}» is not a list item`);
+      return line.slice(2);
+    });
+}
+
+/** The changes of a section written as the engine writes them: `- [kind] text` per line. */
+function changeList(all: Record<string, string>, name: string): RefineChange[] {
+  return items(all, name).map((item) => {
+    const match = /^\[(\w+)\] (.+)$/.exec(item);
+    if (!match) throw new Error(`Section ${name}: «${item}» is not a change`);
+    return { kind: match[1]!, text: match[2]! };
+  });
 }
 
 /** What a subscription call would have cost at API prices (the `equivalent` basis). */
@@ -90,7 +114,6 @@ function stored(partial: Omit<Message, 'agent' | 'round' | 'final' | 'meta'> & P
 
 // --------------------------------------------------------------------- the council
 
-const C = sections(consell);
 export const DEBATE_ID = 41;
 const DQ = 410;
 
@@ -116,7 +139,8 @@ const DEBATE_OUTCOME: TurnOutcome = {
   cached: false,
 };
 
-export function debateMessages(): Message[] {
+export function debateMessages(lang: Locale): Message[] {
+  const C = sections(lang, 'council');
   const d = DEBATE_CALLS;
   const turn = { turn_id: DQ };
   return [
@@ -155,39 +179,45 @@ export function debateMessages(): Message[] {
 
 // ------------------------------------------------- a duel over a PDF (ChatGPT on Codex)
 
-const P = sections(pressupost);
 export const PDF_ID = 39;
 const PQ = 390;
 export const PDF_REQUEST = 'req-pressupost';
 
-/** The attached quote: its file is pressupost-cuina.pdf, its thumbnail pressupost-cuina.webp. */
-export const PDF_ATTACHMENT: Attachment = {
-  id: 12,
-  name: 'pressupost-cuina.pdf',
-  kind: 'pdf',
-  mime: 'application/pdf',
-  size: 0, // the size of the file, set when it is loaded
-  pages: 6,
-  width: null,
-  height: null,
-  sha256: '9d7ee04d8d39277a1215cadc65d27978bbb0ac10234a36117f1c62325ec164bf',
-  created_at: ago(70),
-  has_thumbnail: true,
-  text_available: true,
-  estimated_tokens: 21_600,
-  // Page 6 is the floor plan, a drawing without text: Claude reads it for ChatGPT.
-  pdf_notes: { no_text: [6], garbled: [], hidden: [] },
+/**
+ * The quote of each language: its file in content/<lang>/ (its thumbnail is the .webp of the
+ * same name) and what the server's analysis gives for it. Every one has 6 pages, so the same
+ * estimate (`estimate_tokens('pdf', pages=6)`).
+ */
+const QUOTE: Record<Locale, Pick<Attachment, 'name' | 'size' | 'sha256' | 'estimated_tokens'>> = {
+  en: { name: 'kitchen-quote.pdf', size: 90_989, sha256: 'b80bde6c84c9f6f8a1c19e3347630cdfae6de703c3b803bdc4dad77e5a746c1e', estimated_tokens: 21_600 },
+  es: { name: 'presupuesto-cocina.pdf', size: 90_909, sha256: '563c75d0f13587a9b50c8d37e95ee486eabe96857644c41b78ff8897c9c90028', estimated_tokens: 21_600 },
+  ca: { name: 'pressupost-cuina.pdf', size: 89_785, sha256: '9d7ee04d8d39277a1215cadc65d27978bbb0ac10234a36117f1c62325ec164bf', estimated_tokens: 21_600 },
 };
 
-const PDF_READING: PdfReading = {
-  attachment_id: PDF_ATTACHMENT.id,
-  name: PDF_ATTACHMENT.name,
-  checked: true,
-  claude_pages: [6],
-  hidden_pages: [],
-  unchecked_pages: [],
-  reason: null,
-};
+const PDF_UPLOADED_AT = ago(70);
+
+/** The attached quote, in `lang`. */
+export function pdfAttachment(lang: Locale): Attachment {
+  return {
+    id: 12,
+    ...QUOTE[lang],
+    kind: 'pdf',
+    mime: 'application/pdf',
+    pages: 6,
+    width: null,
+    height: null,
+    created_at: PDF_UPLOADED_AT,
+    has_thumbnail: true,
+    text_available: true,
+    // Page 6 is the floor plan, a drawing without text: Claude reads it for ChatGPT.
+    pdf_notes: { no_text: [6], garbled: [], hidden: [] },
+  };
+}
+
+function pdfReading(lang: Locale): PdfReading {
+  const { id, name } = pdfAttachment(lang);
+  return { attachment_id: id, name, checked: true, claude_pages: [6], hidden_pages: [], unchecked_pages: [], reason: null };
+}
 
 const PDF_CALLS = {
   claude: { usage: call('claude', 23_420, 910, 0, 180), latency: 26_310, ttft: 2_240 },
@@ -197,7 +227,8 @@ const PDF_CALLS = {
 
 const PDF_TOTAL = total(Object.values(PDF_CALLS).map((c) => c.usage));
 
-export function pdfMessages(size: number): Message[] {
+export function pdfMessages(lang: Locale): Message[] {
+  const P = sections(lang, 'quote');
   const turn = { turn_id: PQ };
   return [
     stored({
@@ -205,7 +236,7 @@ export function pdfMessages(size: number): Message[] {
       meta: {
         mode: 'duel', target: 'claude',
         options: { debate: { rounds: 2, consensus_threshold: 85, synthesizer: 'claude' }, use_cache: true },
-        attachments: [{ ...PDF_ATTACHMENT, size }],
+        attachments: [pdfAttachment(lang)],
         outcome: {
           status: 'completed', failures: [], usage: PDF_TOTAL, savings: NO_SAVINGS, consensus: null,
           final_message_ids: [PQ + 1, PQ + 2], cached: false,
@@ -218,7 +249,7 @@ export function pdfMessages(size: number): Message[] {
     }),
     stored({
       ...turn, id: PQ + 2, kind: 'answer', agent: 'chatgpt', content: text(P, 'chatgpt-answer'), final: true, created_at: ago(63),
-      meta: meta('chatgpt', PDF_CALLS.chatgpt, { savings: NO_SAVINGS, pdf_reading: [PDF_READING] }),
+      meta: meta('chatgpt', PDF_CALLS.chatgpt, { savings: NO_SAVINGS, pdf_reading: [pdfReading(lang)] }),
     }),
   ];
 }
@@ -250,9 +281,11 @@ function completed(streamId: string, messageId: number, c: Call, extra: Partial<
 }
 
 /** The duel as this tab saw it: the turn ended a moment ago, with Claude's check of the PDF. */
-export function pdfEvents(): TurnEvent[] {
+export function pdfEvents(lang: Locale): TurnEvent[] {
+  const P = sections(lang, 'quote');
+  const { id, name } = pdfAttachment(lang);
   const check = {
-    type: 'pdf.check' as const, attachment_id: PDF_ATTACHMENT.id, name: PDF_ATTACHMENT.name,
+    type: 'pdf.check' as const, attachment_id: id, name,
     claude_pages: [] as number[], hidden_pages: [] as number[], unchecked_pages: [] as number[], reused: false, reason: null,
   };
   return sequence(PDF_REQUEST, [
@@ -265,7 +298,7 @@ export function pdfEvents(): TurnEvent[] {
     ...deltas('c', 'text', text(P, 'claude-answer')),
     completed('c', PQ + 1, PDF_CALLS.claude),
     ...deltas('g', 'text', text(P, 'chatgpt-answer')),
-    completed('g', PQ + 2, PDF_CALLS.chatgpt, { pdf_reading: [PDF_READING] }),
+    completed('g', PQ + 2, PDF_CALLS.chatgpt, { pdf_reading: [pdfReading(lang)] }),
     {
       type: 'turn.completed', conversation_id: PDF_ID, turn_id: PQ, final_message_ids: [PQ + 1, PQ + 2], usage: PDF_TOTAL,
       savings: NO_SAVINGS, consensus: null, cached: false,
@@ -273,9 +306,8 @@ export function pdfEvents(): TurnEvent[] {
   ]);
 }
 
-// ---------------------------------------------- «Perfecciona», live in its fourth round
+// ------------------------------------------------- Refine, live in its fourth round
 
-const R = sections(copies);
 export const REFINE_ID = 40;
 const RQ = 400;
 export const REFINE_REQUEST = 'req-copies';
@@ -284,50 +316,40 @@ const REFINE_OPTIONS: RefineOptions = {
   max_rounds: 12, budget_eur: 3, max_words: null, stop_on_convergence: true, convergence_threshold: 90, editor: 'claude',
 };
 
-const change = (kind: string, value: string): RefineChange => ({ kind, text: value });
+interface Review {
+  score: number;
+  changes: RefineChange[];
+}
 
-const MERGE = [
-  change('merge', "L'estructura per seccions i la regla 3-2-1 vénen de la resposta de Claude."),
-  change('merge', 'La taula de retenció i les comprovacions vénen de la resposta de ChatGPT.'),
-];
-const REVIEWS: Record<2 | 3, Record<Agent, { score: number; changes: RefineChange[] }>> = {
-  2: {
-    claude: {
-      score: 74,
-      changes: [
-        change('defect', "Objectius: un RPO de 24 hores contradiu el registre de transaccions cada 15 minuts."),
-        change('simplification', 'Fora el paràgraf del RAID: el RAID no és una còpia de seguretat.'),
-      ],
+/** The texts of the refine turn in a language, with the scores, which are the same in all. */
+interface RefineTexts {
+  /** The sections of content/<lang>/backups.md. */
+  R: Record<string, string>;
+  /** What the merge (version 1) took from each answer. */
+  merge: RefineChange[];
+  reviews: Record<2 | 3, Record<Agent, Review>>;
+  /** The changelog of versions 2 and 3. */
+  changelog: Record<2 | 3, RefineChange[]>;
+  /** Claude's review in the fourth round (ChatGPT's is still under way). */
+  roundFour: Review;
+  budgetWords: number;
+}
+
+function refineTexts(lang: Locale): RefineTexts {
+  const R = sections(lang, 'backups');
+  const review = (round: 2 | 3 | 4, agent: Agent, score: number): Review => ({ score, changes: changeList(R, `review-${round}-${agent}`) });
+  return {
+    R,
+    merge: changeList(R, 'changes-1'),
+    reviews: {
+      2: { claude: review(2, 'claude', 74), chatgpt: review(2, 'chatgpt', 71) },
+      3: { claude: review(3, 'claude', 86), chatgpt: review(3, 'chatgpt', 83) },
     },
-    chatgpt: { score: 71, changes: [change('defect', "Retenció: «les últimes» no diu quantes còpies mensuals es guarden.")] },
-  },
-  3: {
-    claude: {
-      score: 86,
-      changes: [change('requirement', "L'encàrrec demana com es comprova la restauració: la prova mensual no té responsable ni dia.")],
-    },
-    chatgpt: {
-      score: 83,
-      changes: [
-        change('simplification', 'La taula de retenció té tres files: una frase diu el mateix en menys espai.'),
-        change('clarity', '«Es restaura la base de dades» no diu què es comprova ni on s\'anota.'),
-      ],
-    },
-  },
-};
-const CHANGELOG: Record<2 | 3, RefineChange[]> = {
-  2: [
-    change('defect', "L'RPO de la base de dades és de 15 minuts, com el registre de transaccions."),
-    change('defect', 'Les còpies mensuals es guarden 12 mesos.'),
-    change('simplification', 'Fora el paràgraf del RAID.'),
-  ],
-  3: [
-    change('requirement', 'Hi ha un responsable i un suplent, i la prova mensual té dia: el primer dilluns.'),
-    change('clarity', 'La prova diu què es comprova i on se n\'anota el resultat.'),
-    change('simplification', 'La retenció passa de taula a una frase.'),
-  ],
-};
-const ROUND_FOUR_CLAUDE = { score: 93, changes: [change('clarity', "L'alerta diària no diu qui la rep ni qui l'atén.")] };
+    changelog: { 2: changeList(R, 'changes-2'), 3: changeList(R, 'changes-3') },
+    roundFour: review(4, 'claude', 93),
+    budgetWords: Math.max(300, Math.ceil(Math.round(1.2 * words(text(R, 'v1')) * 1e6) / 1e6)),
+  };
+}
 
 const REFINE_CALLS = {
   claude0: { usage: call('claude', 1240, 690, 0, 130), latency: 16_920, ttft: 1_380 },
@@ -342,13 +364,15 @@ const REFINE_CALLS = {
   review4c: { usage: call('claude', 2230, 150, 1400, 60), latency: 7_640, ttft: 1_220 },
 } satisfies Record<string, Call>;
 
-const BUDGET_WORDS = Math.max(300, Math.ceil(Math.round(1.2 * words(text(R, 'v1')) * 1e6) / 1e6));
-
-function versionMeta(version: number, body: string, changelog: RefineChange[]): RefineMeta {
-  return { role: 'version', version, words: words(body), budget_words: BUDGET_WORDS, accepted: true, reason: null, changelog };
+function versionMeta(version: number, body: string, changelog: RefineChange[], budgetWords: number): RefineMeta {
+  return {
+    role: 'version', version, words: words(body), budget_words: budgetWords, accepted: true,
+    reason: null,
+    changelog,
+  };
 }
 
-function reviewMeta(review: { score: number; changes: RefineChange[] }): RefineMeta {
+function reviewMeta(review: Review): RefineMeta {
   return { role: 'review', score: review.score, unchanged: review.changes.length === 0, changes: review.changes };
 }
 
@@ -357,13 +381,17 @@ const lines = (changes: RefineChange[]): string => changes.map((c) => `- [${c.ki
 /** Ids of the stored messages of the refine turn, in the order the engine stores them. */
 const RM = { claude0: RQ + 1, chatgpt0: RQ + 2, merge: RQ + 3, review2c: RQ + 4, review2g: RQ + 5, edit2: RQ + 6, review3c: RQ + 7, review3g: RQ + 8, edit3: RQ + 9, review4c: RQ + 10 };
 
-export function refineMessages(): Message[] {
+export function refineMessages(lang: Locale): Message[] {
+  const { R, merge, reviews, changelog, roundFour, budgetWords } = refineTexts(lang);
   const turn = { turn_id: RQ };
   const k = REFINE_CALLS;
-  const review = (id: number, agent: Agent, round: number, r: { score: number; changes: RefineChange[] }, c: Call, minutes: number) =>
+  const review = (id: number, agent: Agent, round: number, r: Review, c: Call, minutes: number) =>
     stored({ ...turn, id, kind: 'revision', agent, round, content: lines(r.changes), created_at: ago(minutes), meta: meta(agent, c, { refine: reviewMeta(r) }) });
-  const version = (id: number, round: number, body: string, changelog: RefineChange[], c: Call, minutes: number) =>
-    stored({ ...turn, id, kind: 'revision', agent: 'claude', round, content: body, created_at: ago(minutes), meta: meta('claude', c, { refine: versionMeta(round, body, changelog) }) });
+  const version = (id: number, round: number, body: string, changes: RefineChange[], c: Call, minutes: number) =>
+    stored({
+      ...turn, id, kind: 'revision', agent: 'claude', round, content: body, created_at: ago(minutes),
+      meta: meta('claude', c, { refine: versionMeta(round, body, changes, budgetWords) }),
+    });
   return [
     stored({
       ...turn, id: RQ, kind: 'question', content: text(R, 'question'), final: true, created_at: ago(9),
@@ -376,43 +404,46 @@ export function refineMessages(): Message[] {
     }),
     stored({ ...turn, id: RM.claude0, kind: 'answer', agent: 'claude', content: text(R, 'claude-answer'), created_at: ago(8), meta: meta('claude', k.claude0) }),
     stored({ ...turn, id: RM.chatgpt0, kind: 'answer', agent: 'chatgpt', content: text(R, 'chatgpt-answer'), created_at: ago(8), meta: meta('chatgpt', k.chatgpt0) }),
-    version(RM.merge, 1, text(R, 'v1'), MERGE, k.merge, 7),
-    review(RM.review2c, 'claude', 2, REVIEWS[2].claude, k.review2c, 6),
-    review(RM.review2g, 'chatgpt', 2, REVIEWS[2].chatgpt, k.review2g, 6),
-    version(RM.edit2, 2, text(R, 'v2'), CHANGELOG[2], k.edit2, 5),
-    review(RM.review3c, 'claude', 3, REVIEWS[3].claude, k.review3c, 4),
-    review(RM.review3g, 'chatgpt', 3, REVIEWS[3].chatgpt, k.review3g, 4),
-    version(RM.edit3, 3, text(R, 'v3'), CHANGELOG[3], k.edit3, 2),
-    review(RM.review4c, 'claude', 4, ROUND_FOUR_CLAUDE, k.review4c, 1),
+    version(RM.merge, 1, text(R, 'v1'), merge, k.merge, 7),
+    review(RM.review2c, 'claude', 2, reviews[2].claude, k.review2c, 6),
+    review(RM.review2g, 'chatgpt', 2, reviews[2].chatgpt, k.review2g, 6),
+    version(RM.edit2, 2, text(R, 'v2'), changelog[2], k.edit2, 5),
+    review(RM.review3c, 'claude', 3, reviews[3].claude, k.review3c, 4),
+    review(RM.review3g, 'chatgpt', 3, reviews[3].chatgpt, k.review3g, 4),
+    version(RM.edit3, 3, text(R, 'v3'), changelog[3], k.edit3, 2),
+    review(RM.review4c, 'claude', 4, roundFour, k.review4c, 1),
   ];
 }
 
 /** The refine turn so far: three versions, and the fourth round's reviews under way (Claude's done). */
-export function refineEvents(): TurnEvent[] {
+export function refineEvents(lang: Locale): TurnEvent[] {
+  const { R, merge, reviews, changelog, roundFour, budgetWords } = refineTexts(lang);
   const k = REFINE_CALLS;
   const sum = (...names: (keyof typeof REFINE_CALLS)[]) => total(names.map((n) => k[n].usage));
   const round = (n: 1 | 2 | 3, body: string, changes: RefineChange[], usage: Usage, so_far: Usage): Draft => ({
-    type: 'refine.round', round: n, version: n, accepted: true, reason: null, reason_code: null, words: words(body), budget_words: BUDGET_WORDS,
+    type: 'refine.round', round: n, version: n, accepted: true,
+    reason: null, reason_code: null,
+    words: words(body), budget_words: budgetWords,
     changes,
-    proposals: n === 1 ? { claude: null, chatgpt: null } : { claude: REVIEWS[n].claude.changes.length, chatgpt: REVIEWS[n].chatgpt.changes.length },
-    scores: n === 1 ? { claude: null, chatgpt: null } : { claude: REVIEWS[n].claude.score, chatgpt: REVIEWS[n].chatgpt.score },
+    proposals: n === 1 ? { claude: null, chatgpt: null } : { claude: reviews[n].claude.changes.length, chatgpt: reviews[n].chatgpt.changes.length },
+    scores: n === 1 ? { claude: null, chatgpt: null } : { claude: reviews[n].claude.score, chatgpt: reviews[n].chatgpt.score },
     converged: false, usage, total: so_far,
   });
-  const reviews = (n: 2 | 3, c: 'review2c' | 'review3c', g: 'review2g' | 'review3g'): Draft[] => [
+  const reviewDrafts = (n: 2 | 3, c: 'review2c' | 'review3c', g: 'review2g' | 'review3g'): Draft[] => [
     { type: 'phase', phase: 'review', round: n },
     { type: 'stream.started', stream_id: `r${n}c`, agent: 'claude', kind: 'revision', round: n, model: MODEL.claude },
     { type: 'stream.started', stream_id: `r${n}g`, agent: 'chatgpt', kind: 'revision', round: n, model: MODEL.chatgpt },
-    ...deltas(`r${n}c`, 'critique', lines(REVIEWS[n].claude.changes)),
-    ...deltas(`r${n}g`, 'critique', lines(REVIEWS[n].chatgpt.changes)),
-    completed(`r${n}c`, RM[c], k[c], { refine: reviewMeta(REVIEWS[n].claude) }),
-    completed(`r${n}g`, RM[g], k[g], { refine: reviewMeta(REVIEWS[n].chatgpt) }),
+    ...deltas(`r${n}c`, 'critique', lines(reviews[n].claude.changes)),
+    ...deltas(`r${n}g`, 'critique', lines(reviews[n].chatgpt.changes)),
+    completed(`r${n}c`, RM[c], k[c], { refine: reviewMeta(reviews[n].claude) }),
+    completed(`r${n}g`, RM[g], k[g], { refine: reviewMeta(reviews[n].chatgpt) }),
   ];
-  const edit = (n: 1 | 2 | 3, body: string, changelog: RefineChange[], c: 'merge' | 'edit2' | 'edit3'): Draft[] => [
+  const edit = (n: 1 | 2 | 3, body: string, changes: RefineChange[], c: 'merge' | 'edit2' | 'edit3'): Draft[] => [
     { type: 'phase', phase: 'edit', round: n },
     { type: 'stream.started', stream_id: `e${n}`, agent: 'claude', kind: 'revision', round: n, model: MODEL.claude },
     ...deltas(`e${n}`, 'answer', body),
-    ...deltas(`e${n}`, 'critique', lines(changelog)),
-    completed(`e${n}`, RM[c], k[c], { refine: versionMeta(n, body, changelog) }),
+    ...deltas(`e${n}`, 'critique', lines(changes)),
+    completed(`e${n}`, RM[c], k[c], { refine: versionMeta(n, body, changes, budgetWords) }),
   ];
   return sequence(REFINE_REQUEST, [
     { type: 'turn.started', conversation_id: REFINE_ID, turn_id: RQ, mode: 'refine', new_conversation: false },
@@ -423,22 +454,22 @@ export function refineEvents(): TurnEvent[] {
     ...deltas('a0g', 'text', text(R, 'chatgpt-answer')),
     completed('a0c', RM.claude0, k.claude0),
     completed('a0g', RM.chatgpt0, k.chatgpt0),
-    ...edit(1, text(R, 'v1'), MERGE, 'merge'),
-    round(1, text(R, 'v1'), MERGE, k.merge.usage, sum('claude0', 'chatgpt0', 'merge')),
-    ...reviews(2, 'review2c', 'review2g'),
-    ...edit(2, text(R, 'v2'), CHANGELOG[2], 'edit2'),
-    round(2, text(R, 'v2'), CHANGELOG[2], sum('review2c', 'review2g', 'edit2'), sum('claude0', 'chatgpt0', 'merge', 'review2c', 'review2g', 'edit2')),
-    ...reviews(3, 'review3c', 'review3g'),
-    ...edit(3, text(R, 'v3'), CHANGELOG[3], 'edit3'),
+    ...edit(1, text(R, 'v1'), merge, 'merge'),
+    round(1, text(R, 'v1'), merge, k.merge.usage, sum('claude0', 'chatgpt0', 'merge')),
+    ...reviewDrafts(2, 'review2c', 'review2g'),
+    ...edit(2, text(R, 'v2'), changelog[2], 'edit2'),
+    round(2, text(R, 'v2'), changelog[2], sum('review2c', 'review2g', 'edit2'), sum('claude0', 'chatgpt0', 'merge', 'review2c', 'review2g', 'edit2')),
+    ...reviewDrafts(3, 'review3c', 'review3g'),
+    ...edit(3, text(R, 'v3'), changelog[3], 'edit3'),
     round(
-      3, text(R, 'v3'), CHANGELOG[3], sum('review3c', 'review3g', 'edit3'),
+      3, text(R, 'v3'), changelog[3], sum('review3c', 'review3g', 'edit3'),
       sum('claude0', 'chatgpt0', 'merge', 'review2c', 'review2g', 'edit2', 'review3c', 'review3g', 'edit3'),
     ),
     { type: 'phase', phase: 'review', round: 4 },
     { type: 'stream.started', stream_id: 'r4c', agent: 'claude', kind: 'revision', round: 4, model: MODEL.claude },
     { type: 'stream.started', stream_id: 'r4g', agent: 'chatgpt', kind: 'revision', round: 4, model: MODEL.chatgpt },
-    ...deltas('r4c', 'critique', lines(ROUND_FOUR_CLAUDE.changes)),
-    completed('r4c', RM.review4c, k.review4c, { refine: reviewMeta(ROUND_FOUR_CLAUDE) }),
+    ...deltas('r4c', 'critique', lines(roundFour.changes)),
+    completed('r4c', RM.review4c, k.review4c, { refine: reviewMeta(roundFour) }),
     // ChatGPT is still thinking about its review: it has written nothing yet.
   ]);
 }
@@ -451,17 +482,27 @@ const summary = (id: number, title: string, minutes: number, mode: ConversationS
 
 const DAY = 24 * 60;
 
-export function conversationList(): ConversationSummary[] {
+/** The title of an example conversation: the first line of its question. */
+const titleOf = (lang: Locale, file: string): string => text(sections(lang, file), 'question').split('\n')[0]!;
+
+export function conversationList(lang: Locale): ConversationSummary[] {
+  // The other conversations' titles, newest first (content/<lang>/sidebar.md).
+  const others = items(sections(lang, 'sidebar'), 'titles');
+  const other = (i: number): string => {
+    const title = others[i];
+    if (title === undefined) throw new Error(`content/${lang}/sidebar.md: missing title ${i + 1}`);
+    return title;
+  };
   return [
-    summary(REFINE_ID, 'Política de còpies de seguretat del servidor', 1, 'refine', 11),
-    summary(DEBATE_ID, "Migració de PostgreSQL 14 a 17 amb el mínim temps d'aturada", 15, 'debate', 8),
-    summary(PDF_ID, 'Revisa el pressupost de la reforma de la cuina', 63, 'duel', 3),
-    summary(38, 'Pla de proves per a la passarel·la de pagaments', 190, 'debate', 8),
-    summary(37, 'Correu per renegociar el contracte amb el proveïdor', DAY + 140, 'solo', 2),
-    summary(36, 'Svelte 5 o React 19 per a un tauler intern?', DAY + 420, 'duel', 3),
-    summary(35, 'Explica la factura de la llum de setembre', 3 * DAY + 60, 'solo', 2),
-    summary(34, "Revisa l'script de desplegament amb rsync", 4 * DAY + 200, 'debate', 8),
-    summary(33, "Noms per a l'associació de veïns", 12 * DAY, 'duel', 3),
-    summary(32, 'Resum de «Thinking in Systems» en deu idees', 20 * DAY, 'solo', 2),
+    summary(REFINE_ID, titleOf(lang, 'backups'), 1, 'refine', 11),
+    summary(DEBATE_ID, titleOf(lang, 'council'), 15, 'debate', 8),
+    summary(PDF_ID, titleOf(lang, 'quote'), 63, 'duel', 3),
+    summary(38, other(0), 190, 'debate', 8),
+    summary(37, other(1), DAY + 140, 'solo', 2),
+    summary(36, other(2), DAY + 420, 'duel', 3),
+    summary(35, other(3), 3 * DAY + 60, 'solo', 2),
+    summary(34, other(4), 4 * DAY + 200, 'debate', 8),
+    summary(33, other(5), 12 * DAY, 'duel', 3),
+    summary(32, other(6), 20 * DAY, 'solo', 2),
   ];
 }

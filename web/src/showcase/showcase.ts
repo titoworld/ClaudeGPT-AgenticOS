@@ -1,10 +1,12 @@
 // Development-only harness: the whole app against a fake server (server.ts) with example
-// conversations in Catalan (conversations.ts), for the README screenshots and to look at
-// the interface without a backend or spending tokens. `?shot=` picks the view:
+// conversations (conversations.ts, texts in content/<lang>/), for the README screenshots and
+// to look at the interface without a backend or spending tokens.
+// `?lang=` picks the language of the interface and of the examples: en (default), es or ca.
+// `?shot=` picks the view:
 //   inici        a new conversation (the four modes)
 //   consell      a council debate that reached consensus (default)
 //   adjunts      a duel over a PDF, with Claude's check for ChatGPT on the subscription
-//   perfecciona  a «Perfecciona» turn in its fourth round
+//   perfecciona  a Refine turn in its fourth round
 //   tauler       the usage dashboard
 //   configuracio the settings, over the council
 // `?narrow` opens the sidebar as on a phone (use a narrow window). The live turns replay
@@ -13,13 +15,14 @@
 import { mount } from 'svelte';
 import '../styles/tokens.css';
 import '../app.css';
+import { i18n, LOCALES, type Locale } from '../lib/i18n/index.svelte';
 import {
   conversationList,
   DEBATE_ID,
   debateMessages,
-  PDF_ATTACHMENT,
   PDF_ID,
   PDF_REQUEST,
+  pdfAttachment,
   pdfEvents,
   pdfMessages,
   REFINE_ID,
@@ -27,9 +30,10 @@ import {
   refineEvents,
   refineMessages,
 } from './conversations';
-import pdfUrl from './pressupost-cuina.pdf?url';
-import thumbnailUrl from './pressupost-cuina.webp?url';
 import { live, ShowcaseSocket, showcaseApi } from './server';
+
+/** The quote PDF of each language and its thumbnail, by path: ./content/<lang>/<name>. */
+const FILES = import.meta.glob<string>(['./content/*/*.pdf', './content/*/*.webp'], { query: '?url', import: 'default', eager: true });
 
 const ROUTES: Record<string, string> = {
   inici: '#/',
@@ -45,34 +49,53 @@ const shot = params.get('shot') ?? 'consell';
 const route = ROUTES[shot];
 if (!route) throw new Error(`Unknown shot «${shot}»: ${Object.keys(ROUTES).join(', ')}`);
 
+function locale(value: string): Locale {
+  const found = LOCALES.find((l) => l === value);
+  if (!found) throw new Error(`Unknown lang «${value}»: ${LOCALES.join(', ')}`);
+  return found;
+}
+
+const lang = locale(params.get('lang') ?? 'en');
+
+function file(name: string): string {
+  const url = FILES[`./content/${lang}/${name}`];
+  if (!url) throw new Error(`Missing content/${lang}/${name}`);
+  return url;
+}
+
 async function bytes(url: string): Promise<Uint8Array> {
   const response = await fetch(url);
   return new Uint8Array(await response.arrayBuffer());
 }
 
+const attachment = pdfAttachment(lang);
+const pdfUrl = file(attachment.name);
+const thumbnailUrl = file(attachment.name.replace(/\.pdf$/, '.webp'));
+
 // The files, before fetch is replaced: the fake server answers every request afterwards.
 const [pdf, thumbnail] = await Promise.all([bytes(pdfUrl), bytes(thumbnailUrl)]);
 
 const { api, fetch: serverFetch } = showcaseApi();
-api.conversations = conversationList();
-api.messages.set(DEBATE_ID, debateMessages());
-api.messages.set(PDF_ID, pdfMessages(pdf.length));
-api.messages.set(REFINE_ID, refineMessages());
-api.addAttachment({ ...PDF_ATTACHMENT, size: pdf.length }, pdf);
-const stored = api.attachments.get(PDF_ATTACHMENT.id);
+api.conversations = conversationList(lang);
+api.messages.set(DEBATE_ID, debateMessages(lang));
+api.messages.set(PDF_ID, pdfMessages(lang));
+api.messages.set(REFINE_ID, refineMessages(lang));
+api.addAttachment(attachment, pdf);
+const stored = api.attachments.get(attachment.id);
 if (stored) stored.thumbnail = thumbnail;
-live.set(REFINE_REQUEST, { conversationId: REFINE_ID, events: refineEvents() });
-live.set(PDF_REQUEST, { conversationId: PDF_ID, events: pdfEvents() });
+live.set(REFINE_REQUEST, { conversationId: REFINE_ID, events: refineEvents(lang) });
+live.set(PDF_REQUEST, { conversationId: PDF_ID, events: pdfEvents(lang) });
 
-// A clean browser: no preferences, no draft, logged in.
+// A clean browser: no preferences, no draft, logged in, in the language of `?lang=`.
 localStorage.clear();
 sessionStorage.clear();
+i18n.set(lang);
 history.replaceState(null, '', `${location.pathname}${location.search}${route}`);
 window.fetch = serverFetch;
 window.WebSocket = ShowcaseSocket as unknown as typeof WebSocket;
 
 // An <img> loads its address without fetch: the PDF's thumbnail points to its file instead.
-const thumbnailPath = `/api/attachments/${PDF_ATTACHMENT.id}/thumbnail`;
+const thumbnailPath = `/api/attachments/${attachment.id}/thumbnail`;
 const imageAddress = (value: string): string => (value === thumbnailPath ? thumbnailUrl : value);
 const src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
 if (src?.set) {

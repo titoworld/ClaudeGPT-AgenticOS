@@ -11,7 +11,7 @@ El servidor `vps-01`: l'aplicació, la base de dades PostgreSQL i els fitxers qu
 
 ## Còpies
 
-- **Base de dades:** `pg_dump` complet cada nit a les 02:00 i arxivat continu del registre de transaccions (WAL) cada 15 minuts.
+- **Base de dades:** `pg_basebackup` complet cada nit a les 02:00 i arxivat continu del registre de transaccions (WAL) cada 15 minuts.
 - **Fitxers:** còpia incremental cada nit amb `restic`, xifrada.
 - **Configuració:** ja és al repositori d'infraestructura; el `.env` s'hi guarda xifrat.
 
@@ -55,7 +55,7 @@ Pèrdua màxima de 24 hores i recuperació en 4 hores.
 
 | Què | Com | Freqüència |
 | --- | --- | --- |
-| Base de dades | `pg_dump` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
+| Base de dades | `pg_basebackup` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
 | Fitxers dels usuaris | Còpia incremental amb `restic` | Cada nit |
 | Configuració | Repositori d'infraestructura i `.env` xifrat | A cada canvi |
 
@@ -98,7 +98,7 @@ La contrasenya del repositori `restic` és al gestor de contrasenyes de l'equip 
 
 | Què | Com | Freqüència |
 | --- | --- | --- |
-| Base de dades | `pg_dump` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
+| Base de dades | `pg_basebackup` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
 | Fitxers dels usuaris | Còpia incremental amb `restic` | Cada nit |
 | Configuració | Repositori d'infraestructura i `.env` xifrat | A cada canvi |
 
@@ -140,7 +140,7 @@ La contrasenya del repositori `restic` és al gestor de contrasenyes de l'equip 
 
 | Què | Com | Freqüència |
 | --- | --- | --- |
-| Base de dades | `pg_dump` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
+| Base de dades | `pg_basebackup` complet i registre de transaccions | Cada nit (02:00) i cada 15 min |
 | Fitxers dels usuaris | Còpia incremental amb `restic` | Cada nit |
 | Configuració | Repositori d'infraestructura i `.env` xifrat | A cada canvi |
 
@@ -168,3 +168,26 @@ Es guarden les còpies **diàries durant 14 dies**, les **setmanals durant 8 set
 ## Claus
 
 La contrasenya del repositori `restic` és al gestor de contrasenyes de l'equip i, en paper, en un sobre tancat a l'oficina. Sense ella, les còpies no es poden llegir.
+<!-- @changes-1 -->
+- [merge] L'estructura per seccions i la regla 3-2-1 vénen de la resposta de Claude.
+- [merge] La taula de retenció i les comprovacions vénen de la resposta de ChatGPT.
+<!-- @review-2-claude -->
+- [defect] Objectius: un RPO de 24 hores contradiu el registre de transaccions cada 15 minuts.
+- [simplification] Fora el paràgraf del RAID: el RAID no és una còpia de seguretat.
+<!-- @review-2-chatgpt -->
+- [defect] Retenció: «les últimes» no diu quantes còpies mensuals es guarden.
+<!-- @changes-2 -->
+- [defect] L'RPO de la base de dades és de 15 minuts, com el registre de transaccions.
+- [defect] Les còpies mensuals es guarden 12 mesos.
+- [simplification] Fora el paràgraf del RAID.
+<!-- @review-3-claude -->
+- [requirement] L'encàrrec demana com es comprova la restauració: la prova mensual no té responsable ni dia.
+<!-- @review-3-chatgpt -->
+- [simplification] La taula de retenció té tres files: una frase diu el mateix en menys espai.
+- [clarity] «Es restaura la base de dades» no diu què es comprova ni on s'anota.
+<!-- @changes-3 -->
+- [requirement] Hi ha un responsable i un suplent, i la prova mensual té dia: el primer dilluns.
+- [clarity] La prova diu què es comprova i on se n'anota el resultat.
+- [simplification] La retenció passa de taula a una frase.
+<!-- @review-4-claude -->
+- [clarity] L'alerta diària no diu qui la rep ni qui l'atén.

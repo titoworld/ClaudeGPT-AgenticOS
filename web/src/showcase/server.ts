@@ -1,9 +1,12 @@
 // The showcase's server: the REST API (FakeApi of lib/test-server.ts, with /api/stats on
 // top) and a WebSocket that greets, answers pings and replays the turns the page shows
 // live. Both agents run on their subscriptions (Claude Code and Codex), with the models
-// and prices of pricing.py.
+// and prices of pricing.py. As the real server does, it writes the agents' status and the
+// models' descriptions in the language of each request (Accept-Language, or the socket's
+// ?lang=), else in English.
 
 import { addDays, utcDay } from '../lib/charts/dates';
+import { asLocale, type Locale } from '../lib/i18n/index.svelte';
 import type {
   Agent,
   AgentSpend,
@@ -49,32 +52,81 @@ export const SETTINGS: RuntimeSettings = {
   pdf_in_revisions: 'text',
 };
 
+/** The server's texts of the agents' status and of the models, in each language. */
+interface ServerTexts {
+  claude: string;
+  chatgpt: string;
+  /** Before the model an alias stands for («Now: claude-opus-5-5»). */
+  now: string;
+  models: Record<'opus' | 'sonnet' | 'haiku' | 'fable' | 'gpt-6-astra' | 'gpt-6-sol' | 'gpt-6-luna', string>;
+}
+
+const SERVER_TEXTS: Record<Locale, ServerTexts> = {
+  en: {
+    claude: 'Subscription active (max)',
+    chatgpt: 'ChatGPT subscription active (Plus)',
+    now: 'Now',
+    models: {
+      opus: 'Deep reasoning and long tasks.',
+      sonnet: 'Balance between quality and speed.',
+      haiku: 'The fastest and most affordable; good for summaries.',
+      fable: 'The most capable; may not be included in every plan.',
+      'gpt-6-astra': 'The most capable, for the most demanding work.',
+      'gpt-6-sol': 'Balanced, for everyday work.',
+      'gpt-6-luna': 'Fast and affordable, for simple tasks.',
+    },
+  },
+  es: {
+    claude: 'Suscripción activa (max)',
+    chatgpt: 'Suscripción de ChatGPT activa (Plus)',
+    now: 'Ahora',
+    models: {
+      opus: 'Razonamiento profundo y tareas largas.',
+      sonnet: 'Equilibrio entre calidad y velocidad.',
+      haiku: 'El más rápido y económico; bueno para los resúmenes.',
+      fable: 'El más capaz; puede no estar incluido en todos los planes.',
+      'gpt-6-astra': 'El más capaz, para el trabajo más exigente.',
+      'gpt-6-sol': 'Equilibrado, para el trabajo del día a día.',
+      'gpt-6-luna': 'Rápido y económico, para tareas sencillas.',
+    },
+  },
+  ca: {
+    claude: 'Subscripció activa (max)',
+    chatgpt: 'Subscripció ChatGPT activa (Plus)',
+    now: 'Ara',
+    models: {
+      opus: 'Raonament profund i tasques llargues.',
+      sonnet: 'Equilibri entre qualitat i velocitat.',
+      haiku: 'El més ràpid i econòmic; bo per als resums.',
+      fable: 'El més capaç; pot no estar inclòs en tots els plans.',
+      'gpt-6-astra': 'El més capaç, per a la feina més exigent.',
+      'gpt-6-sol': 'Equilibrat, per a la feina de cada dia.',
+      'gpt-6-luna': 'Ràpid i econòmic, per a tasques senzilles.',
+    },
+  },
+};
+
 const inHours = (hours: number): string => new Date(Date.now() + hours * 3_600_000).toISOString();
 
-export const PROVIDERS: ProviderStatus[] = [
-  {
-    agent: 'claude',
-    mode: 'cli',
-    available: true,
-    model: MODEL.claude,
-    detail: 'Subscripció activa (max)',
-    limits: [
-      { window: '5h', used_percent: 27, resets_at: inHours(2.6), status: 'allowed' },
-      { window: '7d', used_percent: 44, resets_at: inHours(4 * 24 + 3), status: 'allowed' },
-    ],
-  },
-  {
-    agent: 'chatgpt',
-    mode: 'cli',
-    available: true,
-    model: MODEL.chatgpt,
-    detail: 'Subscripció ChatGPT activa (Plus)',
-    limits: [
-      { window: '5h', used_percent: 18, resets_at: inHours(3.9), status: 'allowed' },
-      { window: '7d', used_percent: 52, resets_at: inHours(2 * 24 + 7), status: 'allowed' },
-    ],
-  },
-];
+const LIMITS: Record<Agent, ProviderStatus['limits']> = {
+  claude: [
+    { window: '5h', used_percent: 27, resets_at: inHours(2.6), status: 'allowed' },
+    { window: '7d', used_percent: 44, resets_at: inHours(4 * 24 + 3), status: 'allowed' },
+  ],
+  chatgpt: [
+    { window: '5h', used_percent: 18, resets_at: inHours(3.9), status: 'allowed' },
+    { window: '7d', used_percent: 52, resets_at: inHours(2 * 24 + 7), status: 'allowed' },
+  ],
+};
+
+/** The agents' status, in `lang`. */
+export function providers(lang: Locale): ProviderStatus[] {
+  const t = SERVER_TEXTS[lang];
+  return [
+    { agent: 'claude', mode: 'cli', available: true, model: MODEL.claude, detail: t.claude, limits: LIMITS.claude },
+    { agent: 'chatgpt', mode: 'cli', available: true, model: MODEL.chatgpt, detail: t.chatgpt, limits: LIMITS.chatgpt },
+  ];
+}
 
 const model = (id: string, label: string, description: string, isDefault = false, context: number | null = null) => ({
   id,
@@ -84,32 +136,36 @@ const model = (id: string, label: string, description: string, isDefault = false
   context_window: context,
 });
 
-export const CATALOG: ModelCatalog = {
-  claude: {
-    mode: 'cli',
-    default_model: MODEL.claude,
-    fast_model: 'haiku',
-    live: true,
-    models: [
-      model(MODEL.claude, MODEL.claude, 'Raonament profund i tasques llargues.', true),
-      model('opus', 'Claude Opus', `Raonament profund i tasques llargues. Ara: ${MODEL.claude}`),
-      model('sonnet', 'Claude Sonnet', 'Equilibri entre qualitat i velocitat. Ara: claude-sonnet-5'),
-      model('haiku', 'Claude Haiku', 'El més ràpid i econòmic; bo per als resums. Ara: claude-haiku-4-5'),
-      model('fable', 'Claude Fable', 'El més capaç; pot no estar inclòs en tots els plans. Ara: claude-fable-5-1'),
-    ],
-  },
-  chatgpt: {
-    mode: 'cli',
-    default_model: MODEL.chatgpt,
-    fast_model: 'gpt-6-luna',
-    live: true,
-    models: [
-      model('gpt-6-astra', 'gpt-6-astra', 'El més capaç, per a la feina més exigent.', true, 400_000),
-      model('gpt-6-sol', 'gpt-6-sol', 'Equilibrat, per a la feina de cada dia.', false, 400_000),
-      model('gpt-6-luna', 'gpt-6-luna', 'Ràpid i econòmic, per a tasques senzilles.', false, 400_000),
-    ],
-  },
-};
+/** The models of each agent, described in `lang`. */
+export function catalog(lang: Locale): ModelCatalog {
+  const { models: d, now } = SERVER_TEXTS[lang];
+  return {
+    claude: {
+      mode: 'cli',
+      default_model: MODEL.claude,
+      fast_model: 'haiku',
+      live: true,
+      models: [
+        model(MODEL.claude, MODEL.claude, d.opus, true),
+        model('opus', 'Claude Opus', `${d.opus} ${now}: ${MODEL.claude}`),
+        model('sonnet', 'Claude Sonnet', `${d.sonnet} ${now}: claude-sonnet-5`),
+        model('haiku', 'Claude Haiku', `${d.haiku} ${now}: claude-haiku-4-5`),
+        model('fable', 'Claude Fable', `${d.fable} ${now}: claude-fable-5-1`),
+      ],
+    },
+    chatgpt: {
+      mode: 'cli',
+      default_model: MODEL.chatgpt,
+      fast_model: 'gpt-6-luna',
+      live: true,
+      models: [
+        model('gpt-6-astra', 'gpt-6-astra', d['gpt-6-astra'], true, 400_000),
+        model('gpt-6-sol', 'gpt-6-sol', d['gpt-6-sol'], false, 400_000),
+        model('gpt-6-luna', 'gpt-6-luna', d['gpt-6-luna'], false, 400_000),
+      ],
+    },
+  };
+}
 
 /** USD per million tokens (input, output, cache read, cache write), as pricing.py has them. */
 const PRICES: Record<string, [number, number, number, number]> = {
@@ -268,11 +324,15 @@ function stats(days: number): Stats {
 const json = (body: unknown): Response =>
   new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
+/** The language of a request, as the server reads it: its Accept-Language, else English. */
+function requestLocale(input: RequestInfo | URL, init?: RequestInit): Locale {
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+  return asLocale(headers.get('Accept-Language')) ?? 'en';
+}
+
 /** The REST API: FakeApi, plus the dashboard's statistics. */
 export function showcaseApi(): { api: FakeApi; fetch: typeof window.fetch } {
   const api = new FakeApi(SETTINGS);
-  api.providers = PROVIDERS;
-  api.catalog = CATALOG;
   api.pricing = PRICING;
   api.spend = month();
   const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -280,6 +340,9 @@ export function showcaseApi(): { api: FakeApi; fetch: typeof window.fetch } {
     // A server a few milliseconds away: the app paints its loading states as it does live.
     await new Promise((resolve) => setTimeout(resolve, 40));
     if (url.pathname === '/api/stats') return json(stats(Number(url.searchParams.get('days') ?? 30)));
+    const lang = requestLocale(input, init);
+    api.providers = providers(lang);
+    api.catalog = catalog(lang);
     return api.fetch(input, init);
   };
   return { api, fetch };
@@ -290,16 +353,17 @@ export function showcaseApi(): { api: FakeApi; fetch: typeof window.fetch } {
 /** Turns the server is running (or ran a moment ago), replayed to a `turn.subscribe`. */
 export const live = new Map<string, { conversationId: number; events: TurnEvent[] }>();
 
-/** A WebSocket to the showcase's server: it opens at once and says hello. */
+/** A WebSocket to the showcase's server: it opens at once and says hello, in its ?lang=. */
 export class ShowcaseSocket extends FakeSocket {
   constructor(url: string) {
     super(url);
+    const lang = asLocale(new URL(url, location.href).searchParams.get('lang')) ?? 'en';
     setTimeout(() => {
       this.open();
       this.receive({
         type: 'hello',
         version: '0.2.0',
-        providers: PROVIDERS,
+        providers: providers(lang),
         fx: FX,
         active_turns: [...live].map(([requestId, turn]) => ({
           request_id: requestId,
